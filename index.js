@@ -29,10 +29,12 @@ app.get('/verify', async (req, res) => {
         res.json({ title: info.videoDetails.title });
     } catch (e) { 
         let errorMsg = e.message;
-        if (errorMsg.includes('confirm you’re not a bot') || errorMsg.includes('403')) {
-            errorMsg = 'שגיאה: יוטיוב דורש אימות אנושי (בוט). נסה שוב בעוד כמה דקות או השתמש בלינק אחר.';
+        if (e.statusCode === 429 || errorMsg.includes('429')) {
+            errorMsg = 'שגיאה: יותר מדי בקשות ליוטיוב. השרת חסום זמנית, נסה שוב בעוד מספר דקות.';
+        } else if (errorMsg.includes('confirm you’re not a bot')) {
+            errorMsg = 'שגיאה: יוטיוב דורש אימות אנושי. הגישה מהשרת נחסמה.';
         }
-        res.status(400).json({ error: errorMsg }); 
+        res.status(e.statusCode || 400).json({ error: errorMsg }); 
     }
 });
 
@@ -73,7 +75,8 @@ app.get('/', (req, res) => {
             .input-group { display: flex; background: var(--card); padding: 8px; border-radius: 20px; border: 1px solid #2a2e38; transition: 0.3s; }
             .input-group:focus-within { border-color: var(--p); box-shadow: 0 0 30px rgba(0,210,255,0.15); }
             input { flex: 1; background: none; border: none; color: white; padding: 15px; outline: none; font-size: 16px; }
-            .btn-search { background: linear-gradient(to right, var(--p), var(--p2)); color: white; border: none; padding: 0 30px; border-radius: 15px; font-weight: bold; cursor: pointer; }
+            .btn-search { background: linear-gradient(to right, var(--p), var(--p2)); color: white; border: none; padding: 0 30px; border-radius: 15px; font-weight: bold; cursor: pointer; min-width: 100px; }
+            .btn-search:disabled { opacity: 0.6; cursor: not-allowed; }
             .results { max-width: 1200px; margin: 40px auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 20px; padding: 0 20px; }
             .v-card { background: var(--card); border-radius: 15px; overflow: hidden; transition: 0.3s; cursor: pointer; border: 1px solid #1a1e26; }
             .v-card:hover { transform: translateY(-8px); border-color: var(--p); }
@@ -95,7 +98,7 @@ app.get('/', (req, res) => {
             <h1>הורדת תוכן מיוטיוב</h1>
             <div class="search-container">
                 <div class="input-group">
-                    <input type="text" id="q" placeholder="חפש שיר או הדבק לינק..." onkeypress="handleEnter(event)">
+                    <input type="text" id="q" placeholder="חפש שיר או הדבק לינק..." onkeydown="handleEnter(event)">
                     <button class="btn-search" id="sBtn" onclick="doSearch()">חפש</button>
                 </div>
             </div>
@@ -124,7 +127,12 @@ app.get('/', (req, res) => {
 
             function play(name) { sounds[name].currentTime = 0; sounds[name].play().catch(()=>{}); }
 
-            function handleEnter(e) { if(e.key === 'Enter') doSearch(); }
+            function handleEnter(e) { 
+                if(e.key === 'Enter') {
+                    e.preventDefault();
+                    doSearch(); 
+                }
+            }
 
             function showToast(msg) {
                 play('error');
@@ -136,14 +144,20 @@ app.get('/', (req, res) => {
             }
 
             async function doSearch() {
-                play('click');
                 const q = document.getElementById('q').value;
                 if(!q) return;
+                
                 const sBtn = document.getElementById('sBtn');
+                if(sBtn.disabled) return;
+
+                play('click');
                 sBtn.disabled = true;
+                sBtn.innerText = 'טוען...';
+
                 try {
-                    if(q.includes('http')) { openDownloadModal(q); }
-                    else {
+                    if(q.includes('http')) { 
+                        await openDownloadModal(q); 
+                    } else {
                         const res = await fetch('/search?q=' + encodeURIComponent(q));
                         const data = await res.json();
                         document.getElementById('results').innerHTML = data.map(v => \`
@@ -155,12 +169,15 @@ app.get('/', (req, res) => {
                             </div>
                         \`).join('');
                     }
-                } catch(e) { showToast(e.message); }
-                sBtn.disabled = false;
+                } catch(e) { 
+                    showToast(e.message); 
+                } finally {
+                    sBtn.disabled = false;
+                    sBtn.innerText = 'חפש';
+                }
             }
 
             async function openDownloadModal(url) {
-                play('click');
                 currentUrl = url;
                 document.getElementById('dlModal').style.display = 'flex';
                 document.getElementById('dlActions').style.display = 'none';
@@ -168,12 +185,16 @@ app.get('/', (req, res) => {
                 try {
                     const res = await fetch('/verify?url=' + encodeURIComponent(url));
                     const data = await res.json();
-                    if(data.error) throw new Error(data.error);
+                    if(!res.ok) throw new Error(data.error || 'שגיאה באימות');
+                    
                     currentTitle = data.title;
                     document.getElementById('dlTitle').innerText = data.title;
                     document.getElementById('dlActions').style.display = 'block';
                     play('success');
-                } catch(e) { closeModal(); showToast(e.message); }
+                } catch(e) { 
+                    closeModal(); 
+                    showToast(e.message); 
+                }
             }
 
             function executeDownload(fmt) {
