@@ -1,8 +1,19 @@
 const express = require('express');
 const ytdl = require('@distube/ytdl-core');
 const yts = require('yt-search');
+const fs = require('fs');
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+let agent;
+try {
+    if (fs.existsSync('cookies.json')) {
+        const cookieData = JSON.parse(fs.readFileSync('cookies.json', 'utf8'));
+        agent = ytdl.createAgent(cookieData);
+    }
+} catch (e) {
+    console.error(e.message);
+}
 
 const agentOptions = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -24,15 +35,16 @@ app.get('/verify', async (req, res) => {
     try {
         if (!ytdl.validateURL(url)) throw new Error('קישור לא תקין');
         const info = await ytdl.getInfo(url, { 
+            agent,
             requestOptions: { headers: agentOptions }
         });
         res.json({ title: info.videoDetails.title });
     } catch (e) { 
         let errorMsg = e.message;
         if (e.statusCode === 429 || errorMsg.includes('429')) {
-            errorMsg = 'שגיאה: יותר מדי בקשות ליוטיוב. השרת חסום זמנית, נסה שוב בעוד מספר דקות.';
+            errorMsg = 'שגיאה: יותר מדי בקשות ליוטיוב. יש לעדכן את קובץ ה-Cookies.';
         } else if (errorMsg.includes('confirm you’re not a bot')) {
-            errorMsg = 'שגיאה: יוטיוב דורש אימות אנושי. הגישה מהשרת נחסמה.';
+            errorMsg = 'שגיאה: יוטיוב דורש אימות אנושי. ה-Cookies לא תקפים.';
         }
         res.status(e.statusCode || 400).json({ error: errorMsg }); 
     }
@@ -44,6 +56,7 @@ app.get('/get-file', async (req, res) => {
         const extension = format === 'mp4' ? 'mp4' : 'mp3';
         res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(title || 'download')}.${extension}"`);
         ytdl(url, {
+            agent,
             requestOptions: { headers: agentOptions },
             quality: format === 'mp4' ? 'highestvideo' : 'highestaudio',
             filter: format === 'mp4' ? 'audioandvideo' : 'audioonly'
