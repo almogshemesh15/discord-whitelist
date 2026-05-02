@@ -1,10 +1,11 @@
 {
-  "name": "youtube-downloader",
+  "name": "youtube-downloader-pro",
   "version": "1.0.0",
   "main": "index.js",
   "dependencies": {
     "express": "^4.18.2",
-    "@distube/ytdl-core": "^4.13.5"
+    "@distube/ytdl-core": "^4.13.5",
+    "yt-search": "^2.10.3"
   },
   "scripts": {
     "start": "node index.js"
