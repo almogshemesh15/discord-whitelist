@@ -22,7 +22,7 @@ if (fs.existsSync(DB_FILE)) {
         if (parsed.whitelist) data.whitelist = parsed.whitelist;
         if (parsed.pendingPlaces) data.pendingPlaces = parsed.pendingPlaces;
         if (parsed.keys) {
-            data.keys = parsed.keys.map(k => typeof k === 'string' ? { key: k, expiresAt: null } : k);
+            data.keys = parsed.keys.map(k => typeof k === 'string' ? { key: k } : { key: k.key });
         }
     } catch (e) {}
 } else {
@@ -37,16 +37,12 @@ function parseLocalTime(inputString) {
     if (!inputString) return null;
     const localDate = new Date(inputString);
     const offset = localDate.getTimezoneOffset() * 60000;
-    return localDate.getTime() - offset + (6 * 3600000);
+    return localDate.getTime() - offset - (3 * 3600000);
 }
 
 function checkExpiration() {
     const now = Date.now();
     let changed = false;
-
-    const initialKeysLength = data.keys.length;
-    data.keys = data.keys.filter(k => !k.expiresAt || k.expiresAt > now);
-    if (data.keys.length !== initialKeysLength) changed = true;
 
     ['creators', 'places'].forEach(type => {
         const initialLength = data.whitelist[type].length;
@@ -109,17 +105,8 @@ app.get('/', (req, res) => {
     
     const keyOptions = data.keys.map(k => `<option value="${k.key}">${k.key}</option>`).join('');
     const keyTags = data.keys.map(k => {
-        let keyTimeInfo = '';
-        if (k.expiresAt) {
-            const diff = k.expiresAt - Date.now();
-            if (diff > 0) {
-                const hours = Math.floor(diff / 3600000);
-                const minutes = Math.floor((diff % 3600000) / 60000);
-                keyTimeInfo = ` (${hours}h ${minutes}m left)`;
-            }
-        }
         return `
-            <span class="key-tag-manage" data-search="${k.key.toLowerCase()}">${k.key}${keyTimeInfo} <a href="/delete-key/${k.key}" style="color:#f43f5e;margin-left:5px;text-decoration:none;">×</a></span>
+            <span class="key-tag-manage" data-search="${k.key.toLowerCase()}">${k.key} <a href="/delete-key/${k.key}" style="color:#f43f5e;margin-left:5px;text-decoration:none;">×</a></span>
         `;
     }).join('');
 
@@ -156,7 +143,12 @@ app.get('/', (req, res) => {
                     👤 Owner: <strong>${item.creatorName}</strong> (${item.creatorId})<br>
                     <span class="key-badge">🔑 Used Key: ${item.key}</span>
                 </td>
-                <td><a href="/approve/${item.id}" class="btn-approve">Approve</a></td>
+                <td>
+                    <form action="/approve/${item.id}" method="POST" style="display:flex; gap:5px; align-items:center;">
+                        <input type="datetime-local" name="expiresAt" style="padding:4px; margin-bottom:0; width:160px; font-size:12px;">
+                        <button type="submit" class="btn-approve" style="background:none; border:none; padding:0; width:auto; font-size:14px;">Approve</button>
+                    </form>
+                </td>
             </tr>
         `;
     }).join('');
@@ -213,7 +205,6 @@ app.get('/', (req, res) => {
                     <div class="key-container" id="keys-box">${keyTags || '<span style="color:#64748b;font-size:13px;">No keys generated</span>'}</div>
                     <form action="/add-key" method="POST" class="inline-form" style="display: flex; flex-direction: column; gap: 8px; align-items: stretch;">
                         <input type="text" name="key" placeholder="Key string" required style="margin-bottom:0;">
-                        <input type="datetime-local" name="expiresAt" placeholder="Expiration (Optional)" style="margin-bottom:0;">
                         <button type="submit">Create Key</button>
                     </form>
                 </div>
@@ -370,16 +361,12 @@ app.post('/add', async (req, res) => {
 
 app.post('/add-key', (req, res) => {
     const key = req.body.key.trim();
-    const expiresAtRaw = req.body.expiresAt;
     if (key) {
-        const expiresTime = expiresAtRaw ? parseLocalTime(expiresAtRaw) : null;
         const existingKeyIndex = data.keys.findIndex(k => k.key === key);
-        if (existingKeyIndex !== -1) {
-            data.keys[existingKeyIndex].expiresAt = expiresTime;
-        } else {
-            data.keys.push({ key, expiresAt: expiresTime });
+        if (existingKeyIndex === -1) {
+            data.keys.push({ key });
+            save();
         }
-        save();
     }
     res.redirect('/');
 });
@@ -390,26 +377,26 @@ app.get('/delete-key/:key', (req, res) => {
     res.redirect('/');
 });
 
-app.get('/approve/:id', (req, res) => {
+app.post('/approve/:id', (req, res) => {
     const id = Number(req.params.id);
+    const expiresAtRaw = req.body.expiresAt;
     const pending = data.pendingPlaces.find(p => p.id === id);
     if (pending) {
-        const matchedKey = data.keys.find(k => k.key === pending.key);
-        const inheritedExpiration = matchedKey ? matchedKey.expiresAt : null;
+        const expiresTime = expiresAtRaw ? parseLocalTime(expiresAtRaw) : null;
         const existingIndex = data.whitelist.places.findIndex(p => p.id === id);
         
         if (existingIndex !== -1) {
             data.whitelist.places[existingIndex] = {
                 ...data.whitelist.places[existingIndex],
                 assignedKey: pending.key,
-                expiresAt: inheritedExpiration || data.whitelist.places[existingIndex].expiresAt
+                expiresAt: expiresTime || data.whitelist.places[existingIndex].expiresAt
             };
         } else {
             data.whitelist.places.push({ 
                 id, 
                 name: pending.name || 'Approved Place', 
                 assignedKey: pending.key, 
-                expiresAt: inheritedExpiration 
+                expiresAt: expiresTime 
             });
         }
         data.pendingPlaces = data.pendingPlaces.filter(p => p.id !== id);
