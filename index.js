@@ -37,7 +37,7 @@ function parseLocalTime(inputString) {
     if (!inputString) return null;
     const localDate = new Date(inputString);
     const offset = localDate.getTimezoneOffset() * 60000;
-    return localDate.getTime() - offset + (3 * 3600000);
+    return localDate.getTime() - offset + (6 * 3600000);
 }
 
 function checkExpiration() {
@@ -211,10 +211,9 @@ app.get('/', (req, res) => {
                         <input type="text" class="search-input" placeholder="Search keys..." oninput="searchKeys(this)">
                     </div>
                     <div class="key-container" id="keys-box">${keyTags || '<span style="color:#64748b;font-size:13px;">No keys generated</span>'}</div>
-                    <form action="/add-key" method="POST" class="inline-form">
-                        <div style="flex: 2;">
-                            <input type="text" name="key" placeholder="Key string" required>
-                        </div>
+                    <form action="/add-key" method="POST" class="inline-form" style="display: flex; flex-direction: column; gap: 8px; align-items: stretch;">
+                        <input type="text" name="key" placeholder="Key string" required style="margin-bottom:0;">
+                        <input type="datetime-local" name="expiresAt" placeholder="Expiration (Optional)" style="margin-bottom:0;">
                         <button type="submit">Create Key</button>
                     </form>
                 </div>
@@ -353,7 +352,7 @@ app.post('/add', async (req, res) => {
                 name: name || data.whitelist[type][existingIndex].name,
                 groups: groups.length > 0 ? groups : data.whitelist[type][existingIndex].groups,
                 assignedKey: assignedKey || null,
-                expiresAt: expiresTime
+                expiresAt: expiresTime || data.whitelist[type][existingIndex].expiresAt
             };
         } else {
             data.whitelist[type].push({ 
@@ -371,12 +370,14 @@ app.post('/add', async (req, res) => {
 
 app.post('/add-key', (req, res) => {
     const key = req.body.key.trim();
+    const expiresAtRaw = req.body.expiresAt;
     if (key) {
+        const expiresTime = expiresAtRaw ? parseLocalTime(expiresAtRaw) : null;
         const existingKeyIndex = data.keys.findIndex(k => k.key === key);
         if (existingKeyIndex !== -1) {
-            data.keys[existingKeyIndex].expiresAt = null;
+            data.keys[existingKeyIndex].expiresAt = expiresTime;
         } else {
-            data.keys.push({ key, expiresAt: null });
+            data.keys.push({ key, expiresAt: expiresTime });
         }
         save();
     }
@@ -393,15 +394,23 @@ app.get('/approve/:id', (req, res) => {
     const id = Number(req.params.id);
     const pending = data.pendingPlaces.find(p => p.id === id);
     if (pending) {
+        const matchedKey = data.keys.find(k => k.key === pending.key);
+        const inheritedExpiration = matchedKey ? matchedKey.expiresAt : null;
         const existingIndex = data.whitelist.places.findIndex(p => p.id === id);
+        
         if (existingIndex !== -1) {
             data.whitelist.places[existingIndex] = {
                 ...data.whitelist.places[existingIndex],
                 assignedKey: pending.key,
-                expiresAt: null
+                expiresAt: inheritedExpiration || data.whitelist.places[existingIndex].expiresAt
             };
         } else {
-            data.whitelist.places.push({ id, name: pending.name || 'Approved Place', assignedKey: pending.key, expiresAt: null });
+            data.whitelist.places.push({ 
+                id, 
+                name: pending.name || 'Approved Place', 
+                assignedKey: pending.key, 
+                expiresAt: inheritedExpiration 
+            });
         }
         data.pendingPlaces = data.pendingPlaces.filter(p => p.id !== id);
         save();
