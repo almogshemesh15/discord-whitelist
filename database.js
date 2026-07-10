@@ -72,7 +72,6 @@ function checkExpiration() {
 
     if (changed) save();
 }
-
 setInterval(checkExpiration, 1000);
 
 module.exports = {
