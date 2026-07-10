@@ -52,7 +52,7 @@ function checkExpiration() {
 
     if (changed) save();
 }
-setInterval(checkExpiration, 10000);
+setInterval(checkExpiration, 1000);
 
 app.post('/api/verify', async (req, res) => {
     checkExpiration();
@@ -118,7 +118,8 @@ app.get('/', (req, res) => {
             if (diff > 0) {
                 const hours = Math.floor(diff / 3600000);
                 const minutes = Math.floor((diff % 3600000) / 60000);
-                timeLeft = `<br><span class="time-tag">⏱️ Expires in: ${hours}h ${minutes}m (IL Time)</span>`;
+                const seconds = Math.floor((diff % 60000) / 1000);
+                timeLeft = `<br><span class="time-tag target-timer" data-expire="${item.expiresAt}">⏱️ Expires in: ${hours}h ${minutes}m ${seconds}s (IL Time)</span>`;
             }
         }
         return `
@@ -297,6 +298,22 @@ app.get('/', (req, res) => {
                     }
                 }
             }
+            function updateLiveTimers() {
+                const timers = document.querySelectorAll('.target-timer');
+                timers.forEach(timer => {
+                    const expireTime = parseInt(timer.getAttribute('data-expire'));
+                    const diff = expireTime - Date.now();
+                    if (diff <= 0) {
+                        timer.innerHTML = '⏱️ Expired';
+                    } else {
+                        const hours = Math.floor(diff / 3600000);
+                        const minutes = Math.floor((diff % 3600000) / 60000);
+                        const seconds = Math.floor((diff % 60000) / 1000);
+                        timer.innerHTML = \`⏱️ Expires in: \${hours}h \${minutes}m \${seconds}s (IL Time)\`;
+                    }
+                });
+            }
+            setInterval(updateLiveTimers, 1000);
         </script>
     </body>
     </html>
