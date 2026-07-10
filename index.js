@@ -6,7 +6,7 @@ const PORT = process.env.PORT || 3000;
 
 const whitelist = {
     creators: [
-        3162453207,
+        0000,
     ],
     places: [
         0000,
