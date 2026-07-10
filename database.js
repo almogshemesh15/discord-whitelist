@@ -10,7 +10,7 @@ async function loadData() {
             data = JSON.parse(JSON.stringify(res.data)); 
         }
     } catch (e) {
-        console.error("Error loading:", e);
+        console.error(e);
     }
 }
 
