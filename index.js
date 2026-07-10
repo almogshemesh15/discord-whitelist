@@ -6,8 +6,8 @@ app.use(express.urlencoded({ extended: true }));
 const PORT = process.env.PORT || 3000;
 
 let whitelist = {
-    creators: [12345678],
-    places: [987654321]
+    creators: [0000],
+    places: [0000]
 };
 
 app.post('/api/verify', (req, res) => {
