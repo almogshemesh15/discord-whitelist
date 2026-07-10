@@ -33,6 +33,13 @@ function save() {
     fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
 }
 
+function parseLocalTime(inputString) {
+    if (!inputString) return null;
+    const localDate = new Date(inputString);
+    const offset = localDate.getTimezoneOffset() * 60000;
+    return localDate.getTime() - offset + (3 * 3600000);
+}
+
 function checkExpiration() {
     const now = Date.now();
     let changed = false;
@@ -55,6 +62,11 @@ app.post('/api/verify', async (req, res) => {
     checkExpiration();
     const { creatorId, placeId, licenseKey } = req.body;
     if (!creatorId || !placeId) return res.status(400).json({ allowed: false });
+
+    if (licenseKey) {
+        const keyExists = data.keys.some(k => k.key === licenseKey);
+        if (!keyExists) return res.json({ allowed: false });
+    }
 
     const isPlaceAllowed = data.whitelist.places.some(p => p.id === Number(placeId));
     const isCreatorAllowed = data.whitelist.creators.some(c => c.id === Number(creatorId));
@@ -200,11 +212,8 @@ app.get('/', (req, res) => {
                     </div>
                     <div class="key-container" id="keys-box">${keyTags || '<span style="color:#64748b;font-size:13px;">No keys generated</span>'}</div>
                     <form action="/add-key" method="POST" class="inline-form">
-                        <div>
+                        <div style="flex: 2;">
                             <input type="text" name="key" placeholder="Key string" required>
-                        </div>
-                        <div>
-                            <input type="datetime-local" name="keyExpiresAt">
                         </div>
                         <button type="submit">Create Key</button>
                     </form>
@@ -335,15 +344,17 @@ app.post('/add', async (req, res) => {
     }
 
     if (id) {
-        let expiresTime = null;
-        if (expiresAt) {
-            expiresTime = new Date(expiresAt).getTime();
-        }
-
+        const expiresTime = expiresAt ? parseLocalTime(expiresAt) : null;
         const existingIndex = data.whitelist[type].findIndex(x => x.id === id);
+        
         if (existingIndex !== -1) {
-            data.whitelist[type][existingIndex].assignedKey = assignedKey || null;
-            data.whitelist[type][existingIndex].expiresAt = expiresTime;
+            data.whitelist[type][existingIndex] = {
+                ...data.whitelist[type][existingIndex],
+                name: name || data.whitelist[type][existingIndex].name,
+                groups: groups.length > 0 ? groups : data.whitelist[type][existingIndex].groups,
+                assignedKey: assignedKey || null,
+                expiresAt: expiresTime
+            };
         } else {
             data.whitelist[type].push({ 
                 id, 
@@ -360,18 +371,12 @@ app.post('/add', async (req, res) => {
 
 app.post('/add-key', (req, res) => {
     const key = req.body.key.trim();
-    const { keyExpiresAt } = req.body;
     if (key) {
-        let expiresTime = null;
-        if (keyExpiresAt) {
-            expiresTime = new Date(keyExpiresAt).getTime();
-        }
-
         const existingKeyIndex = data.keys.findIndex(k => k.key === key);
         if (existingKeyIndex !== -1) {
-            data.keys[existingKeyIndex].expiresAt = expiresTime;
+            data.keys[existingKeyIndex].expiresAt = null;
         } else {
-            data.keys.push({ key, expiresAt: expiresTime });
+            data.keys.push({ key, expiresAt: null });
         }
         save();
     }
@@ -390,8 +395,11 @@ app.get('/approve/:id', (req, res) => {
     if (pending) {
         const existingIndex = data.whitelist.places.findIndex(p => p.id === id);
         if (existingIndex !== -1) {
-            data.whitelist.places[existingIndex].assignedKey = pending.key;
-            data.whitelist.places[existingIndex].expiresAt = null;
+            data.whitelist.places[existingIndex] = {
+                ...data.whitelist.places[existingIndex],
+                assignedKey: pending.key,
+                expiresAt: null
+            };
         } else {
             data.whitelist.places.push({ id, name: pending.name || 'Approved Place', assignedKey: pending.key, expiresAt: null });
         }
