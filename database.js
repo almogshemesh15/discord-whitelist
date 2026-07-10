@@ -1,6 +1,6 @@
 const axios = require('axios');
 
-const GOOGLE_SHEET_URL = 'https://script.google.com/macros/s/AKfycbykhq41FQ9ZKTUjlMyey2puj9O4aMZdpgMS9aJKHma_Pz8KOt90mLD0FvOCSHpgh-Ir/exec';
+const GOOGLE_SHEET_URL = 'https://script.google.com/macros/s/AKfycbzlYXcPdq5BtPttfrHBC290DK6tzS69fdc95GKwDD8cSbsiZzmkD-rVogxuUeia0HeL/exec';
 
 let data = {
     whitelist: { creators: [], places: [] },
