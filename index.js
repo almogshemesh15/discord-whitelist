@@ -142,10 +142,15 @@ app.get('/', (req, res) => {
                     <span class="key-badge">🔑 Used Key: ${item.key}</span>
                 </td>
                 <td>
-                    <form action="/approve/${item.id}" method="POST" style="display:flex; gap:5px; align-items:center;">
-                        <input type="datetime-local" name="expiresAt" style="padding:4px; margin-bottom:0; width:160px; font-size:12px;">
-                        <button type="submit" class="btn-approve" style="background:none; border:none; padding:0; width:auto; font-size:14px;">Approve</button>
-                    </form>
+                    <div style="display:flex; flex-direction:column; gap:8px;">
+                        <form action="/approve/${item.id}" method="POST" style="display:flex; gap:5px; align-items:center; margin-bottom:0;">
+                            <input type="datetime-local" name="expiresAt" style="padding:4px; margin-bottom:0; width:160px; font-size:12px; height:28px;">
+                            <button type="submit" class="btn-approve" style="background:none; border:none; padding:0; width:auto; font-size:14px; cursor:pointer;">Approve</button>
+                        </form>
+                        <form action="/reject/${item.id}" method="POST" style="margin-bottom:0;">
+                            <button type="submit" class="btn-delete" style="background:none; border:none; padding:0; width:auto; font-size:14px; cursor:pointer; text-align:left;">Decline</button>
+                        </form>
+                    </div>
                 </td>
             </tr>
         `;
@@ -500,6 +505,14 @@ app.post('/approve/:id', (req, res) => {
         data.pendingPlaces = data.pendingPlaces.filter(p => p.id !== id);
         db.save();
     }
+    res.redirect('/');
+});
+
+app.post('/reject/:id', (req, res) => {
+    const data = db.getData();
+    const id = Number(req.params.id);
+    data.pendingPlaces = data.pendingPlaces.filter(p => p.id !== id);
+    db.save();
     res.redirect('/');
 });
 
