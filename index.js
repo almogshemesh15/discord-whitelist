@@ -25,6 +25,10 @@ function save() {
     fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
 }
 
+function getIsraelTime() {
+    return Date.now() + (3 * 60 * 60 * 1000);
+}
+
 function checkExpiration() {
     const now = Date.now();
     let changed = false;
@@ -42,31 +46,37 @@ app.post('/api/verify', async (req, res) => {
     const { creatorId, placeId, licenseKey } = req.body;
     if (!creatorId || !placeId) return res.status(400).json({ allowed: false });
 
-    if (licenseKey && data.keys.includes(licenseKey) && !data.whitelist.places.some(p => p.id === Number(placeId))) {
-        if (!data.pendingPlaces.some(p => p.id === Number(placeId))) {
-            let placeName = 'Unknown Place';
-            let creatorName = 'Unknown';
-            try {
-                const placeRes = await axios.get(`https://games.roblox.com/v1/games/multiget-place-details?placeIds=${placeId}`);
-                if (placeRes.data && placeRes.data[0]) {
-                    placeName = placeRes.data[0].name;
-                    creatorName = placeRes.data[0].builder;
-                }
-            } catch (e) {}
-            data.pendingPlaces.push({ id: Number(placeId), creatorId: Number(creatorId), key: licenseKey, name: placeName, creatorName });
-            save();
-        }
-    }
-
-    if (data.whitelist.places.some(p => p.id === Number(placeId)) || data.whitelist.creators.some(c => c.id === Number(creatorId))) {
-        return res.json({ allowed: true });
-    }
+    const isPlaceAllowed = data.whitelist.places.some(p => p.id === Number(placeId));
+    const isCreatorAllowed = data.whitelist.creators.some(c => c.id === Number(creatorId));
+    if (isPlaceAllowed || isCreatorAllowed) return res.json({ allowed: true });
 
     try {
         const groupsRes = await axios.get(`https://groups.roblox.com/v2/users/${creatorId}/groups/roles`);
         const ownedGroups = groupsRes.data.data.filter(g => g.role.rank === 255).map(g => g.group.id);
         if (data.whitelist.creators.some(c => ownedGroups.includes(c.id))) return res.json({ allowed: true });
     } catch (e) {}
+
+    if (licenseKey && data.keys.includes(licenseKey)) {
+        if (!data.pendingPlaces.some(p => p.id === Number(placeId))) {
+            let placeName = 'Unknown Place';
+            let creatorName = 'Unknown';
+            try {
+                const placeRes = await axios.get(`https://games.roblox.com/v1/games/v2/places/${placeId}/details`);
+                if (placeRes.data && placeRes.data.name) {
+                    placeName = placeRes.data.name;
+                    const builderId = placeRes.data.builderId;
+                    if (builderId) {
+                        const userRes = await axios.get(`https://users.roblox.com/v1/users/${builderId}`);
+                        if (userRes.data && userRes.data.name) {
+                            creatorName = userRes.data.name;
+                        }
+                    }
+                }
+            } catch (e) {}
+            data.pendingPlaces.push({ id: Number(placeId), creatorId: Number(creatorId), key: licenseKey, name: placeName, creatorName });
+            save();
+        }
+    }
 
     return res.json({ allowed: false });
 });
@@ -76,21 +86,22 @@ app.get('/', (req, res) => {
     
     const keyOptions = data.keys.map(k => `<option value="${k}">${k}</option>`).join('');
     const keyTags = data.keys.map(k => `
-        <span class="key-tag-manage">${k} <a href="/delete-key/${k}" style="color:#f43f5e;margin-left:5px;text-decoration:none;">×</a></span>
+        <span class="key-tag-manage" data-search="${k.toLowerCase()}">${k} <a href="/delete-key/${k}" style="color:#f43f5e;margin-left:5px;text-decoration:none;">×</a></span>
     `).join('');
 
     const createRows = (arr, type) => arr.map(item => {
         let timeLeft = '';
+        let searchData = `${item.name || ''} ${item.id} ${item.assignedKey || ''}`.toLowerCase();
         if (item.expiresAt) {
             const diff = item.expiresAt - Date.now();
             if (diff > 0) {
                 const hours = Math.floor(diff / 3600000);
                 const minutes = Math.floor((diff % 3600000) / 60000);
-                timeLeft = `<br><span class="time-tag">⏱️ Expires in: ${hours}h ${minutes}m</span>`;
+                timeLeft = `<br><span class="time-tag">⏱️ Expires in: ${hours}h ${minutes}m (IL Time)</span>`;
             }
         }
         return `
-            <tr>
+            <tr data-search="${searchData}">
                 <td>
                     <strong>${item.name || 'Unknown'}</strong> (${item.id})
                     ${item.assignedKey ? `<br><span class="key-badge">🔑 Key: ${item.assignedKey}</span>` : ''}
@@ -102,16 +113,19 @@ app.get('/', (req, res) => {
         `;
     }).join('');
 
-    const pendingRows = data.pendingPlaces.map(item => `
-        <tr>
-            <td>
-                🎮 Game: <strong>${item.name}</strong> (${item.id})<br>
-                👤 Owner: <strong>${item.creatorName}</strong> (${item.creatorId})<br>
-                <span class="key-badge">🔑 Used Key: ${item.key}</span>
-            </td>
-            <td><a href="/approve/${item.id}" class="btn-approve">Approve</a></td>
-        </tr>
-    `).join('');
+    const pendingRows = data.pendingPlaces.map(item => {
+        let searchData = `${item.name} ${item.id} ${item.creatorName} ${item.creatorId} ${item.key}`.toLowerCase();
+        return `
+            <tr data-search="${searchData}">
+                <td>
+                    🎮 Game: <strong>${item.name}</strong> (${item.id})<br>
+                    👤 Owner: <strong>${item.creatorName}</strong> (${item.creatorId})<br>
+                    <span class="key-badge">🔑 Used Key: ${item.key}</span>
+                </td>
+                <td><a href="/approve/${item.id}" class="btn-approve">Approve</a></td>
+            </tr>
+        `;
+    }).join('');
 
     res.send(`
     <!DOCTYPE html>
@@ -126,8 +140,9 @@ app.get('/', (req, res) => {
             h1 { font-size: 26px; color: #38bdf8; margin: 0; }
             .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
             .card { background: #111827; padding: 20px; border-radius: 10px; border: 1px solid #1e293b; position: relative; }
-            .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
-            h3 { margin: 0; color: #e2e8f0; font-size: 16px; }
+            .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 10px; }
+            h3 { margin: 0; color: #e2e8f0; font-size: 16px; white-space: nowrap; }
+            .search-input { width: 60%; padding: 6px 12px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: white; font-size: 13px; box-sizing: border-box; }
             input, select { width: 100%; padding: 10px; margin-bottom: 12px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: white; box-sizing: border-box; }
             .inline-form { display: flex; gap: 10px; margin-bottom: 12px; }
             .inline-form input { margin-bottom: 0; }
@@ -144,7 +159,7 @@ app.get('/', (req, res) => {
             .group-tag { font-size: 11px; color: #38bdf8; background: #0c4a6e; padding: 2px 6px; border-radius: 4px; display: inline-block; margin-top: 4px; }
             .key-badge { font-size: 11px; color: #fbbf24; background: #78350f; padding: 2px 6px; border-radius: 4px; display: inline-block; margin-top: 4px; }
             .time-tag { font-size: 11px; color: #a78bfa; background: #4c1d95; padding: 2px 6px; border-radius: 4px; display: inline-block; margin-top: 4px; }
-            .key-container { background: #1f2937; padding: 12px; border-radius: 6px; border: 1px solid #374151; margin-bottom: 15px; display: flex; flex-wrap: wrap; gap: 8px; }
+            .key-container { background: #1f2937; padding: 12px; border-radius: 6px; border: 1px solid #374151; margin-bottom: 15px; display: flex; flex-wrap: wrap; gap: 8px; max-height: 120px; overflow-y: auto; }
             .key-tag-manage { background: #111827; padding: 4px 10px; border-radius: 4px; font-size: 12px; border: 1px solid #475569; display: flex; align-items: center; }
         </style>
     </head>
@@ -156,18 +171,24 @@ app.get('/', (req, res) => {
             </div>
             <div class="grid">
                 <div class="card">
-                    <div class="card-header"><h3>🔑 System License Keys</h3></div>
-                    <div class="key-container">${keyTags || '<span style="color:#64748b;font-size:13px;">No keys generated</span>'}</div>
+                    <div class="card-header">
+                        <h3>🔑 System License Keys</h3>
+                        <input type="text" class="search-input" placeholder="Search keys..." oninput="searchKeys(this)">
+                    </div>
+                    <div class="key-container" id="keys-box">${keyTags || '<span style="color:#64748b;font-size:13px;">No keys generated</span>'}</div>
                     <form action="/add-key" method="POST" class="inline-form">
                         <input type="text" name="key" placeholder="Generate new license key string" required>
                         <button type="submit">Create Key</button>
                     </form>
                 </div>
                 <div class="card">
-                    <div class="card-header"><h3>📡 Pending Game Authorization Requests</h3><a href="/" class="btn-refresh">Refresh</a></div>
+                    <div class="card-header">
+                        <h3>📡 Pending Game Requests</h3>
+                        <input type="text" class="search-input" placeholder="Search requests..." oninput="searchTable(this, 'pending-table')">
+                    </div>
                     <table>
                         <thead><tr><th>Request Metadata</th><th>Action</th></tr></thead>
-                        <tbody>${pendingRows || '<tr><td colspan="2" style="color:#64748b; text-align:center;">No pending requests incoming</td></tr>'}</tbody>
+                        <tbody id="pending-table">${pendingRows || '<tr><td colspan="2" style="color:#64748b; text-align:center;">No pending requests incoming</td></tr>'}</tbody>
                     </table>
                 </div>
                 <div class="card" style="grid-column: span 2;">
@@ -192,28 +213,64 @@ app.get('/', (req, res) => {
                             </select>
                         </div>
                         <div>
-                            <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:5px;">Expiration (Optional)</label>
+                            <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:5px;">Expiration (Israel Time)</label>
                             <input type="datetime-local" name="expiresAt" style="margin-bottom:0;">
                         </div>
                         <button type="submit" style="grid-column: span 4; margin-top:5px;">Authorize Entity</button>
                     </form>
                 </div>
                 <div class="card">
-                    <div class="card-header"><h3>👥 Authorized Creators</h3><a href="/" class="btn-refresh">Refresh</a></div>
+                    <div class="card-header">
+                        <h3>👥 Authorized Creators</h3>
+                        <input type="text" class="search-input" placeholder="Search creators..." oninput="searchTable(this, 'creators-table')">
+                    </div>
                     <table>
                         <thead><tr><th>Identity</th><th>Action</th></tr></thead>
-                        <tbody>${createRows(data.whitelist.creators, 'creators') || '<tr><td colspan="2" style="color:#64748b;">Empty list</td></tr>'}</tbody>
+                        <tbody id="creators-table">${createRows(data.whitelist.creators, 'creators') || '<tr><td colspan="2" style="color:#64748b;">Empty list</td></tr>'}</tbody>
                     </table>
                 </div>
                 <div class="card">
-                    <div class="card-header"><h3>🏢 Authorized Places</h3><a href="/" class="btn-refresh">Refresh</a></div>
+                    <div class="card-header">
+                        <h3>🏢 Authorized Places</h3>
+                        <input type="text" class="search-input" placeholder="Search places..." oninput="searchTable(this, 'places-table')">
+                    </div>
                     <table>
                         <thead><tr><th>Place Records</th><th>Action</th></tr></thead>
-                        <tbody>${createRows(data.whitelist.places, 'places') || '<tr><td colspan="2" style="color:#64748b;">Empty list</td></tr>'}</tbody>
+                        <tbody id="places-table">${createRows(data.whitelist.places, 'places') || '<tr><td colspan="2" style="color:#64748b;">Empty list</td></tr>'}</tbody>
                     </table>
                 </div>
             </div>
         </div>
+        <script>
+            function searchTable(input, tableId) {
+                let filter = input.value.toLowerCase();
+                let rows = document.getElementById(tableId).getElementsByTagName('tr');
+                for (let i = 0; i < rows.length; i++) {
+                    let searchAttr = rows[i].getAttribute('data-search');
+                    if (searchAttr) {
+                        if (searchAttr.includes(filter)) {
+                            rows[i].style.display = "";
+                        } else {
+                            rows[i].style.display = "none";
+                        }
+                    }
+                }
+            }
+            function searchKeys(input) {
+                let filter = input.value.toLowerCase();
+                let tags = document.getElementById('keys-box').getElementsByClassName('key-tag-manage');
+                for (let i = 0; i < tags.length; i++) {
+                    let searchAttr = tags[i].getAttribute('data-search');
+                    if (searchAttr) {
+                        if (searchAttr.includes(filter)) {
+                            tags[i].style.display = "flex";
+                        } else {
+                            tags[i].style.display = "none";
+                        }
+                    }
+                }
+            }
+        </script>
     </body>
     </html>
     `);
@@ -250,7 +307,10 @@ app.post('/add', async (req, res) => {
     }
 
     if (id && !data.whitelist[type].some(x => x.id === id)) {
-        const expiresTime = expiresAt ? new Date(expiresAt).getTime() : null;
+        let expiresTime = null;
+        if (expiresAt) {
+            expiresTime = new Date(expiresAt).getTime();
+        }
         data.whitelist[type].push({ 
             id, 
             name: name || 'Place', 
