@@ -6,10 +6,12 @@ let data = { whitelist: { creators: [], places: [] }, pendingPlaces: [], keys: [
 async function loadData() {
     try {
         const res = await axios.get(GOOGLE_SHEET_URL);
-        if (res.data && res.data[1]) {
-            data = JSON.parse(res.data[1][0]);
+        if (res.data) {
+            data = JSON.parse(JSON.stringify(res.data)); 
         }
-    } catch (e) {}
+    } catch (e) {
+        console.error("Error loading:", e);
+    }
 }
 
 async function save() {
