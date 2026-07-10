@@ -166,6 +166,7 @@ app.get('/', (req, res) => {
             body { font-family: system-ui, sans-serif; background: #0b0f19; color: #f1f5f9; margin: 0; padding: 30px; }
             .container { max-width: 1200px; margin: 0 auto; }
             .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 15px; margin-bottom: 25px; }
+            .header-actions { display: flex; gap: 10px; align-items: center; }
             h1 { font-size: 26px; color: #38bdf8; margin: 0; }
             .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
             .card { background: #111827; padding: 20px; border-radius: 10px; border: 1px solid #1e293b; position: relative; }
@@ -179,8 +180,10 @@ app.get('/', (req, res) => {
             .inline-form button { width: auto; white-space: nowrap; height: 38px; }
             button { width: 100%; background: #0284c7; color: white; border: none; padding: 10px; border-radius: 6px; font-weight: bold; cursor: pointer; }
             button:hover { background: #0369a1; }
-            .btn-refresh { background: #1f2937; border: 1px solid #374151; color: #94a3b8; padding: 4px 10px; border-radius: 4px; font-size: 12px; cursor: pointer; text-decoration: none; }
+            .btn-refresh { background: #1f2937; border: 1px solid #374151; color: #94a3b8; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; height: 38px; box-sizing: border-box; font-weight: bold; }
             .btn-refresh:hover { background: #374151; color: white; }
+            .btn-save-db { background: #10b981; border: 1px solid #059669; color: white; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; height: 38px; box-sizing: border-box; font-weight: bold; }
+            .btn-save-db:hover { background: #059669; }
             table { width: 100%; border-collapse: collapse; margin-top: 5px; }
             th, td { padding: 12px; text-align: left; border-bottom: 1px solid #1e293b; font-size: 14px; vertical-align: top; }
             th { background: #1f2937; color: #94a3b8; }
@@ -202,7 +205,10 @@ app.get('/', (req, res) => {
         <div class="container">
             <div class="header">
                 <h1>🛡️ Universal Whitelist Hub</h1>
-                <a href="/" class="btn-refresh">🔄 Global Refresh</a>
+                <div class="header-actions">
+                    <a href="/force-save" class="btn-save-db">💾 Save File</a>
+                    <a href="/" class="btn-refresh">🔄 Global Refresh</a>
+                </div>
             </div>
             <div class="grid">
                 <div class="card">
@@ -360,6 +366,11 @@ app.get('/', (req, res) => {
     </body>
     </html>
     `);
+});
+
+app.get('/force-save', (req, res) => {
+    db.save();
+    res.redirect('/');
 });
 
 app.post('/add', async (req, res) => {
