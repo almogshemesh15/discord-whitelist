@@ -69,49 +69,26 @@ app.post('/api/verify', async (req, res) => {
     return res.json({ allowed: false });
 });
 
-app.post('/api/obfuscate', (req, res) => {
-    const { code, key } = req.body;
-    const template = `local function verifyServer()
-local payload = {
-creatorId = game.CreatorId,
-placeId = game.PlaceId,
-licenseKey = "${key}"
-}
-local success, response = pcall(function()
-return game:GetService("HttpService"):PostAsync(
-"https://discord-whitelist-ow56.onrender.com/api/verify",
-game:GetService("HttpService"):JSONEncode(payload),
-Enum.HttpContentType.ApplicationJson
-)
-end)
-if not success then
-script:Destroy()
-return false
-end
-local data = game:GetService("HttpService"):JSONDecode(response)
-return data and data.allowed
-end
-if verifyServer() then
-${code}
-end`;
-    const b64 = Buffer.from(template).toString('base64');
-    const finalObfuscated = `loadstring(game:GetService("HttpService"):JSONDecode('{"data":"${b64}"}').data)()`;
-    res.json({ obfuscated: finalObfuscated });
-});
-
 app.get('/', (req, res) => {
     db.checkExpiration();
     const data = db.getData();
+    
     const keyOptions = data.keys.map(k => `<option value="${k.key}">${k.key}</option>`).join('');
     const keyTags = data.keys.map(k => {
-        return `<span class="key-tag-manage" data-search="${k.key.toLowerCase()}">${k.key} <a href="/delete-key/${k.key}" style="color:#f43f5e;margin-left:5px;text-decoration:none;">×</a></span>`;
+        return `
+            <span class="key-tag-manage" data-search="${k.key.toLowerCase()}">${k.key} <a href="/delete-key/${k.key}" style="color:#f43f5e;margin-left:5px;text-decoration:none;">×</a></span>
+        `;
     }).join('');
 
     const createRows = (arr, type) => arr.map(item => {
         let timeLeft = '';
         let keysListHtml = '';
         let searchData = `${item.name || ''} ${item.id}`.toLowerCase();
-        if (item.assignedKey) searchData += ` ${item.assignedKey}`;
+        
+        if (item.assignedKey) {
+            searchData += ` ${item.assignedKey}`;
+        }
+
         if (item.expiresAt) {
             const diff = item.expiresAt - Date.now();
             if (diff > 0) {
@@ -121,6 +98,7 @@ app.get('/', (req, res) => {
                 timeLeft = `<br><span class="time-tag target-timer" data-expire="${item.expiresAt}">⏱️ Expires in: ${hours}h ${minutes}m ${seconds}s (IL Time)</span>`;
             }
         }
+
         if (item.keys && Array.isArray(item.keys) && item.keys.length > 0) {
             keysListHtml = '<div style="margin-top:5px; display:flex; flex-direction:column; gap:3px;">';
             item.keys.forEach(k => {
@@ -139,6 +117,7 @@ app.get('/', (req, res) => {
             });
             keysListHtml += '</div>';
         }
+
         return `
             <tr data-search="${searchData}">
                 <td>
@@ -149,7 +128,8 @@ app.get('/', (req, res) => {
                     ${timeLeft}
                 </td>
                 <td><a href="/delete/${type}/${item.id}" class="btn-delete">Remove</a></td>
-            </tr>`;
+            </tr>
+        `;
     }).join('');
 
     const pendingRows = data.pendingPlaces.map(item => {
@@ -172,10 +152,12 @@ app.get('/', (req, res) => {
                         </form>
                     </div>
                 </td>
-            </tr>`;
+            </tr>
+        `;
     }).join('');
 
-    res.send(`<!DOCTYPE html>
+    res.send(`
+    <!DOCTYPE html>
     <html lang="en">
     <head>
         <meta charset="UTF-8">
@@ -184,39 +166,206 @@ app.get('/', (req, res) => {
             body { font-family: system-ui, sans-serif; background: #0b0f19; color: #f1f5f9; margin: 0; padding: 30px; }
             .container { max-width: 1200px; margin: 0 auto; }
             .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 15px; margin-bottom: 25px; }
+            .header-actions { display: flex; gap: 10px; align-items: center; }
+            h1 { font-size: 26px; color: #38bdf8; margin: 0; }
             .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-            .card { background: #111827; padding: 20px; border-radius: 10px; border: 1px solid #1e293b; }
+            .card { background: #111827; padding: 20px; border-radius: 10px; border: 1px solid #1e293b; position: relative; }
+            .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 10px; }
+            h3 { margin: 0; color: #e2e8f0; font-size: 16px; white-space: nowrap; }
+            .search-input { width: 60%; padding: 6px 12px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: white; font-size: 13px; box-sizing: border-box; }
+            input, select { width: 100%; padding: 10px; margin-bottom: 12px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: white; box-sizing: border-box; }
+            .inline-form { display: flex; gap: 10px; margin-bottom: 12px; align-items: end; width: 100%; }
+            .inline-form div { flex: 1; }
+            .inline-form input { margin-bottom: 0; }
+            .inline-form button { width: auto; white-space: nowrap; height: 38px; }
             button { width: 100%; background: #0284c7; color: white; border: none; padding: 10px; border-radius: 6px; font-weight: bold; cursor: pointer; }
+            button:hover { background: #0369a1; }
+            .btn-refresh { background: #1f2937; border: 1px solid #374151; color: #94a3b8; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; height: 38px; box-sizing: border-box; font-weight: bold; }
+            .btn-refresh:hover { background: #374151; color: white; }
+            .btn-save-db { background: #10b981; border: 1px solid #059669; color: white; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; height: 38px; box-sizing: border-box; font-weight: bold; }
+            .btn-save-db:hover { background: #059669; }
+            table { width: 100%; border-collapse: collapse; margin-top: 5px; }
+            th, td { padding: 12px; text-align: left; border-bottom: 1px solid #1e293b; font-size: 14px; vertical-align: top; }
+            th { background: #1f2937; color: #94a3b8; }
+            .btn-delete { color: #f43f5e; text-decoration: none; font-weight: bold; }
+            .btn-approve { color: #10b981; text-decoration: none; font-weight: bold; }
+            .group-tag { font-size: 11px; color: #38bdf8; background: #0c4a6e; padding: 2px 6px; border-radius: 4px; display: inline-block; margin-top: 4px; }
+            .key-badge { font-size: 11px; color: #fbbf24; background: #78350f; padding: 2px 6px; border-radius: 4px; display: inline-block; margin-top: 4px; }
+            .time-tag { font-size: 11px; color: #a78bfa; background: #4c1d95; padding: 2px 6px; border-radius: 4px; display: inline-block; margin-top: 4px; }
+            .key-container { background: #1f2937; padding: 12px; border-radius: 6px; border: 1px solid #374151; margin-bottom: 15px; display: flex; flex-wrap: wrap; gap: 8px; max-height: 120px; overflow-y: auto; }
+            .key-tag-manage { background: #111827; padding: 4px 10px; border-radius: 4px; font-size: 12px; border: 1px solid #475569; display: flex; align-items: center; }
+            .dynamic-key-row { display: flex; gap: 10px; margin-bottom: 8px; align-items: center; }
+            .btn-add-row { background: #10b981; margin-bottom: 10px; padding: 6px; font-size: 13px; width: auto; display: inline-block; }
+            .btn-add-row:hover { background: #059669; }
+            .btn-remove-row { background: #f43f5e !important; color: white !important; width: 38px !important; height: 38px !important; display: flex !important; align-items: center !important; justify-content: center !important; border-radius: 6px !important; cursor: pointer !important; font-weight: bold !important; border: none !important; padding: 0 !important; font-size: 20px !important; line-height: 1 !important; flex-shrink: 0; }
+            .btn-remove-row:hover { background: #e11d48 !important; }
         </style>
     </head>
     <body>
         <div class="container">
-            <div class="header"><h1>🛡️ Universal Whitelist Hub</h1></div>
+            <div class="header">
+                <h1>🛡️ Universal Whitelist Hub</h1>
+                <div class="header-actions">
+                    <a href="/force-save" class="btn-save-db">💾 Save File</a>
+                    <a href="/" class="btn-refresh">🔄 Global Refresh</a>
+                </div>
+            </div>
             <div class="grid">
+                <div class="card">
+                    <div class="card-header">
+                        <h3>🔑 System License Keys</h3>
+                        <input type="text" class="search-input" placeholder="Search keys..." oninput="searchKeys(this)">
+                    </div>
+                    <div class="key-container" id="keys-box">${keyTags || '<span style="color:#64748b;font-size:13px;">No keys generated</span>'}</div>
+                    <form action="/add-key" method="POST" class="inline-form" style="display: flex; flex-direction: column; gap: 8px; align-items: stretch;">
+                        <input type="text" name="key" placeholder="Key string" required style="margin-bottom:0;">
+                        <button type="submit">Create Key</button>
+                    </form>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <h3>📡 Pending Game Requests</h3>
+                        <input type="text" class="search-input" placeholder="Search requests..." oninput="searchTable(this, 'pending-table')">
+                    </div>
+                    <table>
+                        <thead><tr><th>Request Metadata</th><th>Action</th></tr></thead>
+                        <tbody id="pending-table">${pendingRows || '<tr><td colspan="2" style="color:#64748b; text-align:center;">No pending requests incoming</td></tr>'}</tbody>
+                    </table>
+                </div>
                 <div class="card" style="grid-column: span 2;">
-                    <h3>🔐 Script Obfuscator</h3>
-                    <textarea id="luaCode" placeholder="Paste Lua..." style="width:100%; height:100px; background:#1f2937; color:#fff; border-radius:6px; padding:10px;"></textarea>
-                    <select id="keySelect" style="width:100%; padding:10px; background:#1f2937; color:white; margin:10px 0;">${keyOptions}</select>
-                    <button onclick="obfuscateScript()">Generate</button>
-                    <textarea id="resultOutput" style="width:100%; height:100px; margin-top:10px; background:#000; color:#0f0;"></textarea>
+                    <div class="card-header"><h3>➕ Direct Whitelist Access Grant</h3></div>
+                    <form action="/add" method="POST" style="display: flex; flex-direction: column; gap: 12px;">
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                            <div>
+                                <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:5px;">Target Entity</label>
+                                <select name="type" style="margin-bottom:0;">
+                                    <option value="creators">Creator (User/Group)</option>
+                                    <option value="places">Place ID</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:5px;">Input Name/ID</label>
+                                <input type="text" name="input" placeholder="Name or numerical ID" style="margin-bottom:0;" required>
+                            </div>
+                        </div>
+                        
+                        <div style="border-top: 1px solid #1e293b; padding-top: 10px;">
+                            <label style="font-size:14px;color:#e2e8f0;display:block;margin-bottom:8px;">Keys & Expirations Mapping</label>
+                            <button type="button" class="btn-add-row" onclick="addKeyRow()">➕ Add Key & Date</button>
+                            <div id="dynamic-keys-container">
+                                <div class="dynamic-key-row">
+                                    <select name="assignedKeys" style="margin-bottom:0; flex: 1; height: 38px;">
+                                        <option value="">None</option>
+                                        ${keyOptions}
+                                    </select>
+                                    <input type="datetime-local" name="expiresAtKeys" style="margin-bottom:0; flex: 1; height: 38px;">
+                                    <button type="button" class="btn-remove-row" onclick="removeKeyRow(this)">×</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <button type="submit" style="margin-top:10px;">Authorize Entity</button>
+                    </form>
                 </div>
+                <div class="card">
+                    <div class="card-header">
+                        <h3>👥 Authorized Creators</h3>
+                        <input type="text" class="search-input" placeholder="Search creators..." oninput="searchTable(this, 'creators-table')">
+                    </div>
+                    <table>
+                        <thead><tr><th>Identity</th><th>Action</th></tr></thead>
+                        <tbody id="creators-table">${createRows(data.whitelist.creators, 'creators') || '<tr><td colspan="2" style="color:#64748b;">Empty list</td></tr>'}</tbody>
+                    </table>
                 </div>
+                <div class="card">
+                    <div class="card-header">
+                        <h3>🏢 Authorized Places</h3>
+                        <input type="text" class="search-input" placeholder="Search places..." oninput="searchTable(this, 'places-table')">
+                    </div>
+                    <table>
+                        <thead><tr><th>Place Records</th><th>Action</th></tr></thead>
+                        <tbody id="places-table">${createRows(data.whitelist.places, 'places') || '<tr><td colspan="2" style="color:#64748b;">Empty list</td></tr>'}</tbody>
+                    </table>
+                </div>
+            </div>
         </div>
         <script>
-            async function obfuscateScript() {
-                const code = document.getElementById('luaCode').value;
-                const key = document.getElementById('keySelect').value;
-                const res = await fetch('/api/obfuscate', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ code, key })
+            function updateTimers() {
+                const now = Date.now();
+                document.querySelectorAll('.target-timer').forEach(el => {
+                    const expire = parseInt(el.getAttribute('data-expire'));
+                    const diff = expire - now;
+                    if (diff <= 0) {
+                        el.innerHTML = "Expired";
+                    } else {
+                        const hours = Math.floor(diff / 3600000);
+                        const minutes = Math.floor((diff % 3600000) / 60000);
+                        const seconds = Math.floor((diff % 60000) / 1000);
+                        if (el.tagName === 'SPAN' && !el.classList.contains('time-tag')) {
+                            el.innerHTML = \`(⏱️ \${hours}h \${minutes}m \${seconds}s)\`;
+                        } else {
+                            el.innerHTML = \`⏱️ Expires in: \${hours}h \${minutes}m \${seconds}s (IL Time)\`;
+                        }
+                    }
                 });
-                const data = await res.json();
-                document.getElementById('resultOutput').value = data.obfuscated;
+            }
+            setInterval(updateTimers, 1000);
+
+            function addKeyRow() {
+                const container = document.getElementById('dynamic-keys-container');
+                const div = document.createElement('div');
+                div.className = 'dynamic-key-row';
+                div.innerHTML = \`
+                    <select name="assignedKeys" style="margin-bottom:0; flex: 1; height: 38px;">
+                        <option value="">None</option>
+                        ${keyOptions.replace(/"/g, '\\"')}
+                    </select>
+                    <input type="datetime-local" name="expiresAtKeys" style="margin-bottom:0; flex: 1; height: 38px;">
+                    <button type="button" class="btn-remove-row" onclick="removeKeyRow(this)">×</button>
+                \`;
+                container.appendChild(div);
+            }
+            function removeKeyRow(button) {
+                const row = button.parentElement;
+                if (document.querySelectorAll('.dynamic-key-row').length > 1) {
+                    row.remove();
+                } else {
+                    row.querySelector('select').value = '';
+                    row.querySelector('input').value = '';
+                }
+            }
+            function searchTable(input, tableId) {
+                let filter = input.value.toLowerCase();
+                let rows = document.getElementById(tableId).getElementsByTagName('tr');
+                for (let i = 0; i < rows.length; i++) {
+                    let searchAttr = rows[i].getAttribute('data-search');
+                    if (searchAttr) {
+                        if (searchAttr.includes(filter)) {
+                            rows[i].style.display = "";
+                        } else {
+                            rows[i].style.display = "none";
+                        }
+                    }
+                }
+            }
+            function searchKeys(input) {
+                let filter = input.value.toLowerCase();
+                let tags = document.getElementById('keys-box').getElementsByClassName('key-tag-manage');
+                for (let i = 0; i < tags.length; i++) {
+                    let searchAttr = tags[i].getAttribute('data-search');
+                    if (searchAttr) {
+                        if (searchAttr.includes(filter)) {
+                            tags[i].style.display = "flex";
+                        } else {
+                            tags[i].style.display = "none";
+                        }
+                    }
+                }
             }
         </script>
     </body>
-    </html>`);
+    </html>
+    `);
 });
 
 app.get('/force-save', (req, res) => {
