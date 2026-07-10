@@ -1,23 +1,96 @@
 const express = require('express');
 const axios = require('axios');
-const db = require('./database');
+const fs = require('fs');
 const app = express();
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 const PORT = process.env.PORT || 3000;
+const DB_FILE = './database.json';
+const BACKUP_FILE = './database_backup.json';
+
+let data = {
+    whitelist: { creators: [], places: [] },
+    pendingPlaces: [],
+    keys: []
+};
+
+function loadData() {
+    if (fs.existsSync(DB_FILE)) {
+        try {
+            const fileContent = fs.readFileSync(DB_FILE, 'utf8');
+            return JSON.parse(fileContent);
+        } catch (e) {
+            if (fs.existsSync(BACKUP_FILE)) {
+                try {
+                    const backupContent = fs.readFileSync(BACKUP_FILE, 'utf8');
+                    return JSON.parse(backupContent);
+                } catch (err) {}
+            }
+        }
+    } else if (fs.existsSync(BACKUP_FILE)) {
+        try {
+            const backupContent = fs.readFileSync(BACKUP_FILE, 'utf8');
+            return JSON.parse(backupContent);
+        } catch (err) {}
+    }
+    return null;
+}
+
+const parsed = loadData();
+if (parsed) {
+    if (parsed.whitelist) data.whitelist = parsed.whitelist;
+    if (parsed.pendingPlaces) data.pendingPlaces = parsed.pendingPlaces;
+    if (parsed.keys) {
+        data.keys = parsed.keys.map(k => typeof k === 'string' ? { key: k } : { key: k.key });
+    }
+} else {
+    fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
+    fs.writeFileSync(BACKUP_FILE, JSON.stringify(data, null, 2));
+}
+
+function save() {
+    const stringified = JSON.stringify(data, null, 2);
+    fs.writeFileSync(DB_FILE, stringified);
+    fs.writeFileSync(BACKUP_FILE, stringified);
+}
 
 function parseLocalTime(inputString) {
     if (!inputString) return null;
-    const localDate = new Date(inputString);
-    const offset = localDate.getTimezoneOffset() * 60000;
-    return localDate.getTime() - offset - (3 * 3600000);
+    return new Date(inputString + ':00+03:00').getTime();
 }
 
+function checkExpiration() {
+    const now = Date.now();
+    let changed = false;
+
+    ['creators', 'places'].forEach(type => {
+        data.whitelist[type].forEach(item => {
+            if (item.keys && Array.isArray(item.keys)) {
+                const initialLength = item.keys.length;
+                item.keys = item.keys.filter(k => !k.expiresAt || k.expiresAt > now);
+                if (item.keys.length !== initialLength) changed = true;
+            }
+        });
+
+        const initialLength = data.whitelist[type].length;
+        data.whitelist[type] = data.whitelist[type].filter(item => {
+            if (item.keys && Array.isArray(item.keys) && item.keys.length > 0) {
+                return true;
+            }
+            return !item.expiresAt || item.expiresAt > now;
+        });
+
+        if (data.whitelist[type].length !== initialLength) changed = true;
+    });
+
+    if (changed) save();
+}
+setInterval(checkExpiration, 1000);
+
 app.post('/api/verify', async (req, res) => {
-    db.checkExpiration();
-    const data = db.getData();
+    checkExpiration();
     const { creatorId, placeId, licenseKey } = req.body;
     if (!creatorId || !placeId) return res.status(400).json({ allowed: false });
 
@@ -64,7 +137,7 @@ app.post('/api/verify', async (req, res) => {
                 }
             } catch (e) {}
             data.pendingPlaces.push({ id: Number(placeId), creatorId: Number(creatorId), key: licenseKey, name: placeName, creatorName });
-            db.save();
+            save();
         }
     }
 
@@ -72,8 +145,7 @@ app.post('/api/verify', async (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    db.checkExpiration();
-    const data = db.getData();
+    checkExpiration();
     
     const keyOptions = data.keys.map(k => `<option value="${k.key}">${k.key}</option>`).join('');
     const keyTags = data.keys.map(k => {
@@ -97,7 +169,7 @@ app.get('/', (req, res) => {
                 const hours = Math.floor(diff / 3600000);
                 const minutes = Math.floor((diff % 3600000) / 60000);
                 const seconds = Math.floor((diff % 60000) / 1000);
-                timeLeft = `<br><span class="time-tag target-timer" data-expire="${item.expiresAt}">⏱️ Expires in: ${hours}h ${minutes}m ${seconds}s</span>`;
+                timeLeft = `<br><span class="time-tag target-timer" data-expire="${item.expiresAt}">⏱️ Expires in: ${hours}h ${minutes}m ${seconds}s (IL Time)</span>`;
             }
         }
 
@@ -112,7 +184,7 @@ app.get('/', (req, res) => {
                         const hours = Math.floor(diff / 3600000);
                         const minutes = Math.floor((diff % 3600000) / 60000);
                         const seconds = Math.floor((diff % 60000) / 1000);
-                        kTime = ` <span class="target-timer" data-expire="${k.expiresAt}">(⏱️ ${hours}h ${minutes}m ${seconds}s)</span>`;
+                        kTime = ` (⏱️ ${hours}h ${minutes}m ${seconds}s)`;
                     }
                 }
                 keysListHtml += `<span class="key-badge" style="width:fit-content;">🔑 Key: ${k.key}${kTime}</span>`;
@@ -281,27 +353,6 @@ app.get('/', (req, res) => {
             </div>
         </div>
         <script>
-            function updateTimers() {
-                const now = Date.now();
-                document.querySelectorAll('.target-timer').forEach(el => {
-                    const expire = parseInt(el.getAttribute('data-expire'));
-                    const diff = expire - now;
-                    if (diff <= 0) {
-                        el.innerHTML = "Expired";
-                    } else {
-                        const hours = Math.floor(diff / 3600000);
-                        const minutes = Math.floor((diff % 3600000) / 60000);
-                        const seconds = Math.floor((diff % 60000) / 1000);
-                        if (el.tagName === 'SPAN' && !el.classList.contains('time-tag')) {
-                            el.innerHTML = \`(⏱️ \${hours}h \${minutes}m \${seconds}s)\`;
-                        } else {
-                            el.innerHTML = \`⏱️ Expires in: \${hours}h \${minutes}m \${seconds}s\`;
-                        }
-                    }
-                });
-            }
-            setInterval(updateTimers, 1000);
-
             function addKeyRow() {
                 const container = document.getElementById('dynamic-keys-container');
                 const div = document.createElement('div');
@@ -360,7 +411,6 @@ app.get('/', (req, res) => {
 });
 
 app.post('/add', async (req, res) => {
-    const data = db.getData();
     const { type, input } = req.body;
     let assignedKeys = req.body['assignedKeys[]'];
     let expiresAtKeys = req.body['expiresAtKeys[]'];
@@ -446,33 +496,30 @@ app.post('/add', async (req, res) => {
                 expiresAt: overallExpiresAt
             });
         }
-        db.save();
+        save();
     }
     res.redirect('/');
 });
 
 app.post('/add-key', (req, res) => {
-    const data = db.getData();
     const key = req.body.key.trim();
     if (key) {
         const existingKeyIndex = data.keys.findIndex(k => k.key === key);
         if (existingKeyIndex === -1) {
             data.keys.push({ key });
-            db.save();
+            save();
         }
     }
     res.redirect('/');
 });
 
 app.get('/delete-key/:key', (req, res) => {
-    const data = db.getData();
     data.keys = data.keys.filter(k => k.key !== req.params.key);
-    db.save();
+    save();
     res.redirect('/');
 });
 
 app.post('/approve/:id', (req, res) => {
-    const data = db.getData();
     const id = Number(req.params.id);
     const expiresAtRaw = req.body.expiresAt;
     const pending = data.pendingPlaces.find(p => p.id === id);
@@ -500,16 +547,15 @@ app.post('/approve/:id', (req, res) => {
             });
         }
         data.pendingPlaces = data.pendingPlaces.filter(p => p.id !== id);
-        db.save();
+        save();
     }
     res.redirect('/');
 });
 
 app.get('/delete/:type/:id', (req, res) => {
-    const data = db.getData();
     const { type, id } = req.params;
     data.whitelist[type] = data.whitelist[type].filter(item => item.id !== Number(id));
-    db.save();
+    save();
     res.redirect('/');
 });
 
