@@ -265,7 +265,8 @@ app.get('/', (req, res) => {
             .dynamic-key-row { display: flex; gap: 10px; margin-bottom: 8px; align-items: center; }
             .btn-add-row { background: #10b981; margin-bottom: 10px; padding: 6px; font-size: 13px; width: auto; display: inline-block; }
             .btn-add-row:hover { background: #059669; }
-            .btn-remove-row { background: #f43f5e; color: white; padding: 8px; border-radius: 6px; cursor: pointer; font-weight: bold; border: none; }
+            .btn-remove-row { background: #f43f5e !important; color: white !important; width: 38px !important; height: 38px !important; display: flex !important; align-items: center !important; justify-content: center !important; border-radius: 6px !important; cursor: pointer !important; font-weight: bold !important; border: none !important; padding: 0 !important; font-size: 20px !important; line-height: 1 !important; flex-shrink: 0; }
+            .btn-remove-row:hover { background: #e11d48 !important; }
         </style>
     </head>
     <body>
@@ -318,11 +319,11 @@ app.get('/', (req, res) => {
                             <button type="button" class="btn-add-row" onclick="addKeyRow()">➕ Add Key & Date</button>
                             <div id="dynamic-keys-container">
                                 <div class="dynamic-key-row">
-                                    <select name="assignedKeys[]" style="margin-bottom:0; flex: 1;">
+                                    <select name="assignedKeys[]" style="margin-bottom:0; flex: 1; height: 38px;">
                                         <option value="">None</option>
                                         ${keyOptions}
                                     </select>
-                                    <input type="datetime-local" name="expiresAtKeys[]" style="margin-bottom:0; flex: 1;">
+                                    <input type="datetime-local" name="expiresAtKeys[]" style="margin-bottom:0; flex: 1; height: 38px;">
                                     <button type="button" class="btn-remove-row" onclick="removeKeyRow(this)">×</button>
                                 </div>
                             </div>
@@ -359,11 +360,11 @@ app.get('/', (req, res) => {
                 const div = document.createElement('div');
                 div.className = 'dynamic-key-row';
                 div.innerHTML = \`
-                    <select name="assignedKeys[]" style="margin-bottom:0; flex: 1;">
+                    <select name="assignedKeys[]" style="margin-bottom:0; flex: 1; height: 38px;">
                         <option value="">None</option>
                         ${keyOptions.replace(/"/g, '\\"')}
                     </select>
-                    <input type="datetime-local" name="expiresAtKeys[]" style="margin-bottom:0; flex: 1;">
+                    <input type="datetime-local" name="expiresAtKeys[]" style="margin-bottom:0; flex: 1; height: 38px;">
                     <button type="button" class="btn-remove-row" onclick="removeKeyRow(this)">×</button>
                 \`;
                 container.appendChild(div);
