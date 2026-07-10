@@ -1,8 +1,6 @@
 const axios = require('axios');
 
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const GIST_ID = process.env.GIST_ID;
-const FILE_NAME = 'database.json';
+const GOOGLE_SHEET_URL = 'https://script.google.com/macros/s/AKfycbykhq41FQ9ZKTUjlMyey2puj9O4aMZdpgMS9aJKHma_Pz8KOt90mLD0FvOCSHpgh-Ir/exec';
 
 let data = {
     whitelist: { creators: [], places: [] },
@@ -11,70 +9,37 @@ let data = {
 };
 
 async function loadData() {
-    if (!GITHUB_TOKEN || !GIST_ID) {
-        return;
-    }
     try {
-        const res = await axios.get(`https://api.github.com/gists/${GIST_ID}`, {
-            headers: { Authorization: `token ${GITHUB_TOKEN}` }
-        });
-        const file = res.data.files[FILE_NAME];
-        if (file && file.content) {
-            const parsed = JSON.parse(file.content);
-            if (parsed.whitelist) data.whitelist = parsed.whitelist;
-            if (parsed.pendingPlaces) data.pendingPlaces = parsed.pendingPlaces;
-            if (parsed.keys) {
-                data.keys = parsed.keys.map(k => typeof k === 'string' ? { key: k } : { key: k.key });
+        const res = await axios.get(GOOGLE_SHEET_URL);
+        const rows = res.data;
+        data.whitelist = { creators: [], places: [] };
+        data.pendingPlaces = [];
+        data.keys = [];
+        rows.forEach((row, index) => {
+            if (index === 0) return;
+            const [name, id, key, type] = row;
+            if (type === 'creators' || type === 'places') {
+                data.whitelist[type].push({ id: Number(id), name, keys: [{ key }] });
+            } else if (type === 'key') {
+                data.keys.push({ key: id });
             }
-        }
+        });
     } catch (e) {}
 }
 
 async function save() {
-    if (!GITHUB_TOKEN || !GIST_ID) {
-        return;
-    }
     try {
-        const stringified = JSON.stringify(data, null, 2);
-        await axios.patch(`https://api.github.com/gists/${GIST_ID}`, {
-            files: {
-                [FILE_NAME]: { content: stringified }
-            }
-        }, {
-            headers: { Authorization: `token ${GITHUB_TOKEN}` }
+        await axios.post(GOOGLE_SHEET_URL, {
+            action: 'update',
+            data: data
         });
     } catch (e) {}
 }
 
+setInterval(loadData, 30000);
 loadData();
 
-function checkExpiration() {
-    const now = Date.now();
-    let changed = false;
-
-    ['creators', 'places'].forEach(type => {
-        data.whitelist[type].forEach(item => {
-            if (item.keys && Array.isArray(item.keys)) {
-                const initialLength = item.keys.length;
-                item.keys = item.keys.filter(k => !k.expiresAt || k.expiresAt > now);
-                if (item.keys.length !== initialLength) changed = true;
-            }
-        });
-
-        const initialLength = data.whitelist[type].length;
-        data.whitelist[type] = data.whitelist[type].filter(item => {
-            if (item.keys && Array.isArray(item.keys) && item.keys.length > 0) {
-                return true;
-            }
-            return !item.expiresAt || item.expiresAt > now;
-        });
-
-        if (data.whitelist[type].length !== initialLength) changed = true;
-    });
-
-    if (changed) save();
-}
-setInterval(checkExpiration, 1000);
+function checkExpiration() {}
 
 module.exports = {
     getData: () => data,
