@@ -1,7 +1,8 @@
-const fs = require('fs');
+const axios = require('axios');
 
-const DB_FILE = './database.json';
-const BACKUP_FILE = './database_backup.json';
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const GIST_ID = process.env.GIST_ID;
+const FILE_NAME = 'database.json';
 
 let data = {
     whitelist: { creators: [], places: [] },
@@ -9,42 +10,43 @@ let data = {
     keys: []
 };
 
-function loadData() {
-    if (fs.existsSync(DB_FILE)) {
-        try {
-            return JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
-        } catch (e) {
-            if (fs.existsSync(BACKUP_FILE)) {
-                try {
-                    return JSON.parse(fs.readFileSync(BACKUP_FILE, 'utf8'));
-                } catch (err) {}
+async function loadData() {
+    if (!GITHUB_TOKEN || !GIST_ID) {
+        return;
+    }
+    try {
+        const res = await axios.get(`https://api.github.com/gists/${GIST_ID}`, {
+            headers: { Authorization: `token ${GITHUB_TOKEN}` }
+        });
+        const file = res.data.files[FILE_NAME];
+        if (file && file.content) {
+            const parsed = JSON.parse(file.content);
+            if (parsed.whitelist) data.whitelist = parsed.whitelist;
+            if (parsed.pendingPlaces) data.pendingPlaces = parsed.pendingPlaces;
+            if (parsed.keys) {
+                data.keys = parsed.keys.map(k => typeof k === 'string' ? { key: k } : { key: k.key });
             }
         }
-    } else if (fs.existsSync(BACKUP_FILE)) {
-        try {
-            return JSON.parse(fs.readFileSync(BACKUP_FILE, 'utf8'));
-        } catch (err) {}
-    }
-    return null;
+    } catch (e) {}
 }
 
-const parsed = loadData();
-if (parsed) {
-    if (parsed.whitelist) data.whitelist = parsed.whitelist;
-    if (parsed.pendingPlaces) data.pendingPlaces = parsed.pendingPlaces;
-    if (parsed.keys) {
-        data.keys = parsed.keys.map(k => typeof k === 'string' ? { key: k } : { key: k.key });
+async function save() {
+    if (!GITHUB_TOKEN || !GIST_ID) {
+        return;
     }
-} else {
-    fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
-    fs.writeFileSync(BACKUP_FILE, JSON.stringify(data, null, 2));
+    try {
+        const stringified = JSON.stringify(data, null, 2);
+        await axios.patch(`https://api.github.com/gists/${GIST_ID}`, {
+            files: {
+                [FILE_NAME]: { content: stringified }
+            }
+        }, {
+            headers: { Authorization: `token ${GITHUB_TOKEN}` }
+        });
+    } catch (e) {}
 }
 
-function save() {
-    const stringified = JSON.stringify(data, null, 2);
-    fs.writeFileSync(DB_FILE, stringified);
-    fs.writeFileSync(BACKUP_FILE, stringified);
-}
+loadData();
 
 function checkExpiration() {
     const now = Date.now();
