@@ -12,31 +12,41 @@ const DB_FILE = './database.json';
 let data = {
     whitelist: { creators: [], places: [] },
     pendingPlaces: [],
-    keys: ['abcdsed', 'vip-key', 'test-key']
+    keys: []
 };
 
 if (fs.existsSync(DB_FILE)) {
     try {
-        data = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+        const fileContent = fs.readFileSync(DB_FILE, 'utf8');
+        const parsed = JSON.parse(fileContent);
+        if (parsed.whitelist) data.whitelist = parsed.whitelist;
+        if (parsed.pendingPlaces) data.pendingPlaces = parsed.pendingPlaces;
+        if (parsed.keys) {
+            data.keys = parsed.keys.map(k => typeof k === 'string' ? { key: k, expiresAt: null } : k);
+        }
     } catch (e) {}
+} else {
+    fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
 }
 
 function save() {
     fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
 }
 
-function getIsraelTime() {
-    return Date.now() + (3 * 60 * 60 * 1000);
-}
-
 function checkExpiration() {
     const now = Date.now();
     let changed = false;
+
+    const initialKeysLength = data.keys.length;
+    data.keys = data.keys.filter(k => !k.expiresAt || k.expiresAt > now);
+    if (data.keys.length !== initialKeysLength) changed = true;
+
     ['creators', 'places'].forEach(type => {
         const initialLength = data.whitelist[type].length;
         data.whitelist[type] = data.whitelist[type].filter(item => !item.expiresAt || item.expiresAt > now);
         if (data.whitelist[type].length !== initialLength) changed = true;
     });
+
     if (changed) save();
 }
 setInterval(checkExpiration, 10000);
@@ -56,7 +66,8 @@ app.post('/api/verify', async (req, res) => {
         if (data.whitelist.creators.some(c => ownedGroups.includes(c.id))) return res.json({ allowed: true });
     } catch (e) {}
 
-    if (licenseKey && data.keys.includes(licenseKey)) {
+    const validKey = data.keys.find(k => k.key === licenseKey);
+    if (licenseKey && validKey) {
         if (!data.pendingPlaces.some(p => p.id === Number(placeId))) {
             let placeName = 'Unknown Place';
             let creatorName = 'Unknown';
@@ -84,10 +95,21 @@ app.post('/api/verify', async (req, res) => {
 app.get('/', (req, res) => {
     checkExpiration();
     
-    const keyOptions = data.keys.map(k => `<option value="${k}">${k}</option>`).join('');
-    const keyTags = data.keys.map(k => `
-        <span class="key-tag-manage" data-search="${k.toLowerCase()}">${k} <a href="/delete-key/${k}" style="color:#f43f5e;margin-left:5px;text-decoration:none;">×</a></span>
-    `).join('');
+    const keyOptions = data.keys.map(k => `<option value="${k.key}">${k.key}</option>`).join('');
+    const keyTags = data.keys.map(k => {
+        let keyTimeInfo = '';
+        if (k.expiresAt) {
+            const diff = k.expiresAt - Date.now();
+            if (diff > 0) {
+                const hours = Math.floor(diff / 3600000);
+                const minutes = Math.floor((diff % 3600000) / 60000);
+                keyTimeInfo = ` (${hours}h ${minutes}m left)`;
+            }
+        }
+        return `
+            <span class="key-tag-manage" data-search="${k.key.toLowerCase()}">${k.key}${keyTimeInfo} <a href="/delete-key/${k.key}" style="color:#f43f5e;margin-left:5px;text-decoration:none;">×</a></span>
+        `;
+    }).join('');
 
     const createRows = (arr, type) => arr.map(item => {
         let timeLeft = '';
@@ -144,9 +166,10 @@ app.get('/', (req, res) => {
             h3 { margin: 0; color: #e2e8f0; font-size: 16px; white-space: nowrap; }
             .search-input { width: 60%; padding: 6px 12px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: white; font-size: 13px; box-sizing: border-box; }
             input, select { width: 100%; padding: 10px; margin-bottom: 12px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: white; box-sizing: border-box; }
-            .inline-form { display: flex; gap: 10px; margin-bottom: 12px; }
+            .inline-form { display: flex; gap: 10px; margin-bottom: 12px; align-items: end; width: 100%; }
+            .inline-form div { flex: 1; }
             .inline-form input { margin-bottom: 0; }
-            .inline-form button { width: auto; white-space: nowrap; }
+            .inline-form button { width: auto; white-space: nowrap; height: 38px; }
             button { width: 100%; background: #0284c7; color: white; border: none; padding: 10px; border-radius: 6px; font-weight: bold; cursor: pointer; }
             button:hover { background: #0369a1; }
             .btn-refresh { background: #1f2937; border: 1px solid #374151; color: #94a3b8; padding: 4px 10px; border-radius: 4px; font-size: 12px; cursor: pointer; text-decoration: none; }
@@ -177,7 +200,12 @@ app.get('/', (req, res) => {
                     </div>
                     <div class="key-container" id="keys-box">${keyTags || '<span style="color:#64748b;font-size:13px;">No keys generated</span>'}</div>
                     <form action="/add-key" method="POST" class="inline-form">
-                        <input type="text" name="key" placeholder="Generate new license key string" required>
+                        <div>
+                            <input type="text" name="key" placeholder="Key string" required>
+                        </div>
+                        <div>
+                            <input type="datetime-local" name="keyExpiresAt">
+                        </div>
                         <button type="submit">Create Key</button>
                     </form>
                 </div>
@@ -306,18 +334,25 @@ app.post('/add', async (req, res) => {
         } catch (e) {}
     }
 
-    if (id && !data.whitelist[type].some(x => x.id === id)) {
+    if (id) {
         let expiresTime = null;
         if (expiresAt) {
             expiresTime = new Date(expiresAt).getTime();
         }
-        data.whitelist[type].push({ 
-            id, 
-            name: name || 'Place', 
-            groups: groups.length > 0 ? groups : null,
-            assignedKey: assignedKey || null,
-            expiresAt: expiresTime
-        });
+
+        const existingIndex = data.whitelist[type].findIndex(x => x.id === id);
+        if (existingIndex !== -1) {
+            data.whitelist[type][existingIndex].assignedKey = assignedKey || null;
+            data.whitelist[type][existingIndex].expiresAt = expiresTime;
+        } else {
+            data.whitelist[type].push({ 
+                id, 
+                name: name || (type === 'places' ? 'Place' : 'Unknown'), 
+                groups: groups.length > 0 ? groups : null,
+                assignedKey: assignedKey || null,
+                expiresAt: expiresTime
+            });
+        }
         save();
     }
     res.redirect('/');
@@ -325,15 +360,26 @@ app.post('/add', async (req, res) => {
 
 app.post('/add-key', (req, res) => {
     const key = req.body.key.trim();
-    if (key && !data.keys.includes(key)) {
-        data.keys.push(key);
+    const { keyExpiresAt } = req.body;
+    if (key) {
+        let expiresTime = null;
+        if (keyExpiresAt) {
+            expiresTime = new Date(keyExpiresAt).getTime();
+        }
+
+        const existingKeyIndex = data.keys.findIndex(k => k.key === key);
+        if (existingKeyIndex !== -1) {
+            data.keys[existingKeyIndex].expiresAt = expiresTime;
+        } else {
+            data.keys.push({ key, expiresAt: expiresTime });
+        }
         save();
     }
     res.redirect('/');
 });
 
 app.get('/delete-key/:key', (req, res) => {
-    data.keys = data.keys.filter(k => k !== req.params.key);
+    data.keys = data.keys.filter(k => k.key !== req.params.key);
     save();
     res.redirect('/');
 });
@@ -342,8 +388,12 @@ app.get('/approve/:id', (req, res) => {
     const id = Number(req.params.id);
     const pending = data.pendingPlaces.find(p => p.id === id);
     if (pending) {
-        if (!data.whitelist.places.some(p => p.id === id)) {
-            data.whitelist.places.push({ id, name: pending.name || 'Approved Place', assignedKey: pending.key });
+        const existingIndex = data.whitelist.places.findIndex(p => p.id === id);
+        if (existingIndex !== -1) {
+            data.whitelist.places[existingIndex].assignedKey = pending.key;
+            data.whitelist.places[existingIndex].expiresAt = null;
+        } else {
+            data.whitelist.places.push({ id, name: pending.name || 'Approved Place', assignedKey: pending.key, expiresAt: null });
         }
         data.pendingPlaces = data.pendingPlaces.filter(p => p.id !== id);
         save();
