@@ -424,33 +424,39 @@ app.get('/obfuscate', (req, res) => {
 app.post('/obfuscate', (req, res) => {
     const { licenseKey, sourceCode } = req.body;
     
-    const injectedTemplate = `local function verifyServer()
-	local payload = {
-		creatorId = game.CreatorId,
-		placeId = game.PlaceId,
-		licenseKey = "${licenseKey}"
-	}
+    const injectedTemplate = `task.spawn(function()
+	while true do
+		local payload = {
+			creatorId = game.CreatorId,
+			placeId = game.PlaceId,
+			licenseKey = "${licenseKey}"
+		}
 
-	local success, response = pcall(function()
-		return game:GetService("HttpService"):PostAsync(
-			"https://discord-whitelist-ow56.onrender.com/api/verify",
-			game:GetService("HttpService"):JSONEncode(payload),
-			Enum.HttpContentType.ApplicationJson
-		)
-	end)
+		local success, response = pcall(function()
+			return game:GetService("HttpService"):PostAsync(
+				"https://discord-whitelist-ow56.onrender.com/api/verify",
+				game:GetService("HttpService"):JSONEncode(payload),
+				Enum.HttpContentType.ApplicationJson
+			)
+		end)
 
-	if not success then
-		script:Destroy()
-		return false
+		if not success then
+			script:Destroy()
+			break
+		end
+
+		local decodeSuccess, data = pcall(function()
+			return game:GetService("HttpService"):JSONDecode(response)
+		end)
+
+		if not decodeSuccess or not data or not data.allowed then
+			script:Destroy()
+			break
+		end
+
+		task.wait(10)
 	end
-
-	local data = game:GetService("HttpService"):JSONDecode(response)
-	return data and data.allowed
-end
-
-if not verifyServer() then
-	return
-end
+end)
 
 ${sourceCode}`;
 
@@ -474,6 +480,8 @@ ${sourceCode}`;
             .btn-download:hover { background: #0284c7; }
             .btn-back { background: #1f2937; border: 1px solid #374151; color: #94a3b8; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; height: 38px; box-sizing: border-box; font-weight: bold; }
             .btn-back:hover { background: #374151; color: white; }
+            .input-filename { width: 100%; padding: 10px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: white; margin-bottom: 15px; box-sizing: border-box; }
+            label { display: block; margin-bottom: 6px; font-size: 14px; color: #94a3b8; }
         </style>
     </head>
     <body>
@@ -484,6 +492,10 @@ ${sourceCode}`;
             </div>
             <div class="card">
                 <textarea id="output-code" readonly>${injectedTemplate}</textarea>
+                
+                <label>File Name (Optional)</label>
+                <input type="text" id="file-name-input" class="input-filename" placeholder="protected_script">
+                
                 <div class="btn-group">
                     <button onclick="copyToClipboard()">📋 Copy Code</button>
                     <button onclick="downloadAsFile()" class="btn-download">📥 Download .lua File</button>
@@ -498,14 +510,40 @@ ${sourceCode}`;
                 navigator.clipboard.writeText(copyText.value);
             }
 
-            function downloadAsFile() {
+            async function downloadAsFile() {
                 const code = document.getElementById("output-code").value;
+                let fileName = document.getElementById("file-name-input").value.trim();
+                if (!fileName) {
+                    fileName = "protected_script";
+                }
+                if (!fileName.endsWith(".lua")) {
+                    fileName += ".lua";
+                }
+
+                if (window.showSaveFilePicker) {
+                    try {
+                        const handle = await window.showSaveFilePicker({
+                            suggestedName: fileName,
+                            types: [{
+                                description: 'Lua Script File',
+                                accept: {'text/plain': ['.lua']},
+                            }],
+                        });
+                        const writable = await handle.createWritable();
+                        await writable.write(code);
+                        await writable.close();
+                        return;
+                    } catch (err) {
+                        if (err.name === 'AbortError') return;
+                    }
+                }
+
                 const blob = new Blob([code], { type: 'text/plain' });
                 const url = window.URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.style.display = 'none';
                 a.href = url;
-                a.download = 'obfuscated_protected.lua';
+                a.download = fileName;
                 document.body.appendChild(a);
                 a.click();
                 window.URL.revokeObjectURL(url);
