@@ -428,39 +428,32 @@ app.post('/obfuscate', (req, res) => {
         return str.split('').map(char => '\\' + char.charCodeAt(0)).join('');
     }
 
-    const encUrl = luaObfuscateString("https://discord-whitelist-ow56.onrender.com/api/verify");
-    const encKey = luaObfuscateString(licenseKey);
-    const encHttp = luaObfuscateString("HttpService");
-    const encPost = luaObfuscateString("PostAsync");
-    const encJsonE = luaObfuscateString("JSONEncode");
-    const encJsonD = luaObfuscateString("JSONDecode");
-    const encAppJson = luaObfuscateString("ApplicationJson");
-    const encSource = luaObfuscateString(sourceCode);
+    const payloadRaw = `
+        local http = game:GetService("HttpService")
+        local success, result = pcall(function()
+            return http:PostAsync("https://discord-whitelist-ow56.onrender.com/api/verify", http:JSONEncode({
+                creatorId = game.CreatorId,
+                placeId = game.PlaceId,
+                licenseKey = "${licenseKey}"
+            }), Enum.HttpContentType.ApplicationJson)
+        end)
+        
+        if success then
+            local data = http:JSONDecode(result)
+            if data and data.allowed then
+                task.spawn(function()
+                    assert(loadstring("${luaObfuscateString(sourceCode)}"))()
+                end)
+            else
+                script:Destroy()
+            end
+        else
+            script:Destroy()
+        end
+    `;
 
-    const obfuscatedTemplate = `local _O = {"${encUrl}", "${encKey}", "${encHttp}", "${encPost}", "${encJsonE}", "${encJsonD}", "${encAppJson}", "${encSource}"}
-local function _D(idx)
-    return (_O[idx]:gsub('\\\([0-9]+)', function(c) return string.char(tonumber(c)) end))
-end
-local function _V()
-    local p = {creatorId = game.CreatorId, placeId = game.PlaceId, licenseKey = _D(2)}
-    local s, r = pcall(function()
-        return game:GetService(_D(3))[_D(4)](game:GetService(_D(3)), _D(1), game:GetService(_D(3))[_D(5)](game:GetService(_D(3)), p), Enum.HttpContentType.ApplicationJson)
-    end)
-    if not s then 
-        script:Destroy() 
-        return false 
-    end
-    local d = game:GetService(_D(3))[_D(6)](game:GetService(_D(3)), r)
-    return d and d.allowed
-end
-if _V() then
-    task.spawn(function()
-        local src = _D(8)
-        assert(loadstring(src))()
-    end)
-else
-    script:Destroy()
-end`;
+    const dynamicKey = "_" + Math.random().toString(36).substring(2, 7);
+    const obfuscatedTemplate = `local ${dynamicKey} = "${luaObfuscateString(payloadRaw)}"; assert(loadstring(${dynamicKey}))();`;
 
     res.send(`
     <!DOCTYPE html>
