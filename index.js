@@ -424,41 +424,33 @@ app.get('/obfuscate', (req, res) => {
 app.post('/obfuscate', (req, res) => {
     const { licenseKey, sourceCode } = req.body;
     
-    const injectedTemplate = `task.spawn(function()
-	local function verifyServer()
-		local payload = {
-			creatorId = game.CreatorId,
-			placeId = game.PlaceId,
-			licenseKey = "${licenseKey}"
-		}
+    const injectedTemplate = `local function verifyServer()
+	local payload = {
+		creatorId = game.CreatorId,
+		placeId = game.PlaceId,
+		licenseKey = "${licenseKey}"
+	}
 
-		local success, response = pcall(function()
-			return game:GetService("HttpService"):PostAsync(
-				"https://discord-whitelist-ow56.onrender.com/api/verify",
-				game:GetService("HttpService"):JSONEncode(payload),
-				Enum.HttpContentType.ApplicationJson
-			)
-		end)
+	local success, response = pcall(function()
+		return game:GetService("HttpService"):PostAsync(
+			"https://discord-whitelist-ow56.onrender.com/api/verify",
+			game:GetService("HttpService"):JSONEncode(payload),
+			Enum.HttpContentType.ApplicationJson
+		)
+	end)
 
-		if not success then
-			script.Parent.Parent:Destroy()
-			return false
-		end
-
-		local data = game:GetService("HttpService"):JSONDecode(response)
-		return data and data.allowed
+	if not success then
+		script:Destroy()
+		return false
 	end
-	
-	while true do
-		if not verifyServer() then
-			script.Enabled = false
-			return
-		else
-			script.Enabled = true
-		end
-		task.wait(5)
-	end
-end)
+
+	local data = game:GetService("HttpService"):JSONDecode(response)
+	return data and data.allowed
+end
+
+if not verifyServer() then
+	return
+end
 
 ${sourceCode}`;
 
@@ -513,7 +505,7 @@ ${sourceCode}`;
                 navigator.clipboard.writeText(copyText.value);
             }
 
-            function downloadAsFile() {
+            async function downloadAsFile() {
                 const code = document.getElementById("output-code").value;
                 let fileName = document.getElementById("file-name").value.trim();
                 if (!fileName) {
@@ -522,6 +514,30 @@ ${sourceCode}`;
                 if (!fileName.endsWith('.lua')) {
                     fileName += '.lua';
                 }
+
+                if ('showSaveFilePicker' in window) {
+                    try {
+                        const handle = await window.showSaveFilePicker({
+                            suggestedName: fileName,
+                            types: [{
+                                description: 'Lua Script',
+                                accept: {'text/plain': ['.lua']},
+                            }],
+                        });
+                        const writable = await handle.createWritable();
+                        await writable.write(code);
+                        await writable.close();
+                    } catch (err) {
+                        if (err.name !== 'AbortError') {
+                            fallbackDownload(code, fileName);
+                        }
+                    }
+                } else {
+                    fallbackDownload(code, fileName);
+                }
+            }
+
+            function fallbackDownload(code, fileName) {
                 const blob = new Blob([code], { type: 'text/plain' });
                 const url = window.URL.createObjectURL(blob);
                 const a = document.createElement('a');
