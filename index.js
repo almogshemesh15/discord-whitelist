@@ -424,33 +424,41 @@ app.get('/obfuscate', (req, res) => {
 app.post('/obfuscate', (req, res) => {
     const { licenseKey, sourceCode } = req.body;
     
-    const injectedTemplate = `local function verifyServer()
-	local payload = {
-		creatorId = game.CreatorId,
-		placeId = game.PlaceId,
-		licenseKey = "${licenseKey}"
-	}
+    const injectedTemplate = `task.spawn(function()
+	local function verifyServer()
+		local payload = {
+			creatorId = game.CreatorId,
+			placeId = game.PlaceId,
+			licenseKey = "${licenseKey}"
+		}
 
-	local success, response = pcall(function()
-		return game:GetService("HttpService"):PostAsync(
-			"https://discord-whitelist-ow56.onrender.com/api/verify",
-			game:GetService("HttpService"):JSONEncode(payload),
-			Enum.HttpContentType.ApplicationJson
-		)
-	end)
+		local success, response = pcall(function()
+			return game:GetService("HttpService"):PostAsync(
+				"https://discord-whitelist-ow56.onrender.com/api/verify",
+				game:GetService("HttpService"):JSONEncode(payload),
+				Enum.HttpContentType.ApplicationJson
+			)
+		end)
 
-	if not success then
-		script:Destroy()
-		return false
+		if not success then
+			script.Parent.Parent:Destroy()
+			return false
+		end
+
+		local data = game:GetService("HttpService"):JSONDecode(response)
+		return data and data.allowed
 	end
 
-	local data = game:GetService("HttpService"):JSONDecode(response)
-	return data and data.allowed
-end
-
-if not verifyServer() then
-	return
-end
+	while true do
+		if not verifyServer() then
+			script.Enabled = false
+			return
+		else
+			script.Enabled = true
+		end
+		task.wait(5)
+	end
+end)
 
 ${sourceCode}`;
 
