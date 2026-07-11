@@ -428,32 +428,14 @@ app.post('/obfuscate', (req, res) => {
         return str.split('').map(char => '\\' + char.charCodeAt(0)).join('');
     }
 
-    const payloadRaw = `
-        local http = game:GetService("HttpService")
-        local success, result = pcall(function()
-            return http:PostAsync("https://discord-whitelist-ow56.onrender.com/api/verify", http:JSONEncode({
-                creatorId = game.CreatorId,
-                placeId = game.PlaceId,
-                licenseKey = "${licenseKey}"
-            }), Enum.HttpContentType.ApplicationJson)
-        end)
-        
-        if success then
-            local data = http:JSONDecode(result)
-            if data and data.allowed then
-                task.spawn(function()
-                    assert(loadstring("${luaObfuscateString(sourceCode)}"))()
-                end)
-            else
-                script:Destroy()
-            end
-        else
-            script:Destroy()
-        end
-    `;
+    const encUrl = luaObfuscateString("https://discord-whitelist-ow56.onrender.com/api/verify");
+    const encKey = luaObfuscateString(licenseKey);
+    const encHttpService = luaObfuscateString("HttpService");
+    const encPostAsync = luaObfuscateString("PostAsync");
+    const encJSONEncode = luaObfuscateString("JSONEncode");
+    const encJSONDecode = luaObfuscateString("JSONDecode");
 
-    const dynamicKey = "_" + Math.random().toString(36).substring(2, 7);
-    const obfuscatedTemplate = `local ${dynamicKey} = "${luaObfuscateString(payloadRaw)}"; assert(loadstring(${dynamicKey}))();`;
+    const obfuscatedTemplate = `local success, result = pcall(function() return game:GetService("${encHttpService}")["${encPostAsync}"](game:GetService("${encHttpService}"), "${encUrl}", game:GetService("${encHttpService}")["${encJSONEncode}"](game:GetService("${encHttpService}"), {creatorId = game.CreatorId, placeId = game.PlaceId, licenseKey = "${encKey}"}), Enum.HttpContentType.ApplicationJson) end) if success then let data = game:GetService("${encHttpService}")["${encJSONDecode}"](game:GetService("${encHttpService}"), result) if data and data.allowed then ${sourceCode} else script:Destroy() end else script:Destroy() end`;
 
     res.send(`
     <!DOCTYPE html>
