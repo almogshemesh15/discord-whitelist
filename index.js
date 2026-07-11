@@ -424,35 +424,43 @@ app.get('/obfuscate', (req, res) => {
 app.post('/obfuscate', (req, res) => {
     const { licenseKey, sourceCode } = req.body;
     
-    const injectedTemplate = `local function verifyServer()
-	local payload = {
-		creatorId = game.CreatorId,
-		placeId = game.PlaceId,
-		licenseKey = "${licenseKey}"
-	}
+    function luaObfuscateString(str) {
+        return str.split('').map(char => '\\' + char.charCodeAt(0)).join('');
+    }
 
-	local success, response = pcall(function()
-		return game:GetService("HttpService"):PostAsync(
-			"https://discord-whitelist-ow56.onrender.com/api/verify",
-			game:GetService("HttpService"):JSONEncode(payload),
-			Enum.HttpContentType.ApplicationJson
-		)
-	end)
+    const encUrl = luaObfuscateString("https://discord-whitelist-ow56.onrender.com/api/verify");
+    const encKey = luaObfuscateString(licenseKey);
+    const encHttp = luaObfuscateString("HttpService");
+    const encPost = luaObfuscateString("PostAsync");
+    const encJsonE = luaObfuscateString("JSONEncode");
+    const encJsonD = luaObfuscateString("JSONDecode");
+    const encAppJson = luaObfuscateString("ApplicationJson");
+    const encSource = luaObfuscateString(sourceCode);
 
-	if not success then
-		script:Destroy()
-		return false
-	end
-
-	local data = game:GetService("HttpService"):JSONDecode(response)
-	return data and data.allowed
+    const obfuscatedTemplate = `local _O = {"${encUrl}", "${encKey}", "${encHttp}", "${encPost}", "${encJsonE}", "${encJsonD}", "${encAppJson}", "${encSource}"}
+local function _D(idx)
+    return (_O[idx]:gsub('\\\([0-9]+)', function(c) return string.char(tonumber(c)) end))
 end
-
-if not verifyServer() then
-	return
+local function _V()
+    local p = {creatorId = game.CreatorId, placeId = game.PlaceId, licenseKey = _D(2)}
+    local s, r = pcall(function()
+        return game:GetService(_D(3))[_D(4)](game:GetService(_D(3)), _D(1), game:GetService(_D(3))[_D(5)](game:GetService(_D(3)), p), Enum.HttpContentType.ApplicationJson)
+    end)
+    if not s then 
+        script:Destroy() 
+        return false 
+    end
+    local d = game:GetService(_D(3))[_D(6)](game:GetService(_D(3)), r)
+    return d and d.allowed
 end
-
-${sourceCode}`;
+if _V() then
+    task.spawn(function()
+        local src = _D(8)
+        assert(loadstring(src))()
+    end)
+else
+    script:Destroy()
+end`;
 
     res.send(`
     <!DOCTYPE html>
@@ -480,7 +488,7 @@ ${sourceCode}`;
                 <a href="/obfuscate" class="btn-back">⬅️ Back</a>
             </div>
             <div class="card">
-                <textarea id="output-code" readonly>${injectedTemplate}</textarea>
+                <textarea id="output-code" readonly>${obfuscatedTemplate}</textarea>
                 <button onclick="copyToClipboard()">📋 Copy Code</button>
             </div>
         </div>
@@ -490,7 +498,6 @@ ${sourceCode}`;
                 copyText.select();
                 copyText.setSelectionRange(0, 99999);
                 navigator.clipboard.writeText(copyText.value);
-                alert("Protected code copied to clipboard!");
             }
         </script>
     </body>
@@ -611,56 +618,6 @@ app.post('/add-key', (req, res) => {
 app.get('/delete-key/:key', (req, res) => {
     const data = db.getData();
     data.keys = data.keys.filter(k => k.key !== req.params.key);
-    db.save();
-    res.redirect('/');
-});
-
-app.post('/approve/:id', (req, res) => {
-    const data = db.getData();
-    const id = Number(req.params.id);
-    const expiresAtRaw = req.body.expiresAt;
-    const pending = data.pendingPlaces.find(p => p.id === id);
-    if (pending) {
-        const expiresTime = expiresAtRaw ? parseLocalTime(expiresAtRaw) : null;
-        const existingIndex = data.whitelist.places.findIndex(p => p.id === id);
-        
-        if (existingIndex !== -1) {
-            const currentItem = data.whitelist.places[existingIndex];
-            const updatedKeys = currentItem.keys && Array.isArray(currentItem.keys) ? [...currentItem.keys] : [];
-            if (!updatedKeys.some(k => k.key === pending.key)) {
-                updatedKeys.push({ key: pending.key, expiresAt: expiresTime });
-            }
-            data.whitelist.places[existingIndex] = {
-                ...currentItem,
-                keys: updatedKeys,
-                expiresAt: expiresTime || currentItem.expiresAt
-            };
-        } else {
-            data.whitelist.places.push({ 
-                id, 
-                name: pending.name || 'Approved Place', 
-                keys: [{ key: pending.key, expiresAt: expiresTime }],
-                expiresAt: expiresTime 
-            });
-        }
-        data.pendingPlaces = data.pendingPlaces.filter(p => p.id !== id);
-        db.save();
-    }
-    res.redirect('/');
-});
-
-app.post('/reject/:id', (req, res) => {
-    const data = db.getData();
-    const id = Number(req.params.id);
-    data.pendingPlaces = data.pendingPlaces.filter(p => p.id !== id);
-    db.save();
-    res.redirect('/');
-});
-
-app.get('/delete/:type/:id', (req, res) => {
-    const data = db.getData();
-    const { type, id } = req.params;
-    data.whitelist[type] = data.whitelist[type].filter(item => item.id !== Number(id));
     db.save();
     res.redirect('/');
 });
