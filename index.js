@@ -173,7 +173,7 @@ app.get('/', (req, res) => {
             .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 10px; }
             h3 { margin: 0; color: #e2e8f0; font-size: 16px; white-space: nowrap; }
             .search-input { width: 60%; padding: 6px 12px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: white; font-size: 13px; box-sizing: border-box; }
-            input, select { width: 100%; padding: 10px; margin-bottom: 12px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: white; box-sizing: border-box; }
+            input, select, textarea { width: 100%; padding: 10px; margin-bottom: 12px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: white; box-sizing: border-box; }
             .inline-form { display: flex; gap: 10px; margin-bottom: 12px; align-items: end; width: 100%; }
             .inline-form div { flex: 1; }
             .inline-form input { margin-bottom: 0; }
@@ -184,6 +184,8 @@ app.get('/', (req, res) => {
             .btn-refresh:hover { background: #374151; color: white; }
             .btn-save-db { background: #10b981; border: 1px solid #059669; color: white; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; height: 38px; box-sizing: border-box; font-weight: bold; }
             .btn-save-db:hover { background: #059669; }
+            .btn-obfuscate-page { background: #a855f7; border: 1px solid #9333ea; color: white; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; height: 38px; box-sizing: border-box; font-weight: bold; }
+            .btn-obfuscate-page:hover { background: #9333ea; }
             table { width: 100%; border-collapse: collapse; margin-top: 5px; }
             th, td { padding: 12px; text-align: left; border-bottom: 1px solid #1e293b; font-size: 14px; vertical-align: top; }
             th { background: #1f2937; color: #94a3b8; }
@@ -206,6 +208,7 @@ app.get('/', (req, res) => {
             <div class="header">
                 <h1>🛡️ Universal Whitelist Hub</h1>
                 <div class="header-actions">
+                    <a href="/obfuscate" class="btn-obfuscate-page">🔒 Obfuscate Code</a>
                     <a href="/force-save" class="btn-save-db">💾 Save File</a>
                     <a href="/" class="btn-refresh">🔄 Global Refresh</a>
                 </div>
@@ -361,6 +364,133 @@ app.get('/', (req, res) => {
                         }
                     }
                 }
+            }
+        </script>
+    </body>
+    </html>
+    `);
+});
+
+app.get('/obfuscate', (req, res) => {
+    const data = db.getData();
+    const keyOptions = data.keys.map(k => `<option value="${k.key}">${k.key}</option>`).join('');
+    
+    res.send(`
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>Obfuscate & Inject Whitelist</title>
+        <style>
+            body { font-family: system-ui, sans-serif; background: #0b0f19; color: #f1f5f9; margin: 0; padding: 30px; }
+            .container { max-width: 800px; margin: 0 auto; }
+            .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 15px; margin-bottom: 25px; }
+            h1 { font-size: 26px; color: #a855f7; margin: 0; }
+            .card { background: #111827; padding: 20px; border-radius: 10px; border: 1px solid #1e293b; }
+            select, textarea { width: 100%; padding: 10px; margin-bottom: 15px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: white; box-sizing: border-box; }
+            textarea { font-family: monospace; height: 250px; resize: vertical; }
+            button { width: 100%; background: #a855f7; color: white; border: none; padding: 12px; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 15px; }
+            button:hover { background: #9333ea; }
+            .btn-back { background: #1f2937; border: 1px solid #374151; color: #94a3b8; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; height: 38px; box-sizing: border-box; font-weight: bold; }
+            .btn-back:hover { background: #374151; color: white; }
+            label { display: block; margin-bottom: 6px; font-size: 14px; color: #94a3b8; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>🔒 Whitelist Code Injector</h1>
+                <a href="/" class="btn-back">⬅️ Back to Hub</a>
+            </div>
+            <div class="card">
+                <form action="/obfuscate" method="POST">
+                    <label>Select License Key</label>
+                    <select name="licenseKey" required>
+                        ${keyOptions || '<option value="">No keys available - create one first</option>'}
+                    </select>
+                    
+                    <label>Paste your Lua Source Code</label>
+                    <textarea name="sourceCode" placeholder="-- Paste your script here" required></textarea>
+                    
+                    <button type="submit">Inject Whitelist Verification</button>
+                </form>
+            </div>
+        </div>
+    </body>
+    </html>
+    `);
+});
+
+app.post('/obfuscate', (req, res) => {
+    const { licenseKey, sourceCode } = req.body;
+    
+    const injectedTemplate = `local function verifyServer()
+	local payload = {
+		creatorId = game.CreatorId,
+		placeId = game.PlaceId,
+		licenseKey = "${licenseKey}"
+	}
+
+	local success, response = pcall(function()
+		return game:GetService("HttpService"):PostAsync(
+			"https://discord-whitelist-ow56.onrender.com/api/verify",
+			game:GetService("HttpService"):JSONEncode(payload),
+			Enum.HttpContentType.ApplicationJson
+		)
+	end)
+
+	if not success then
+		script:Destroy()
+		return false
+	end
+
+	local data = game:GetService("HttpService"):JSONDecode(response)
+	return data and data.allowed
+end
+
+if not verifyServer() then
+	return
+end
+
+${sourceCode}`;
+
+    res.send(`
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>Output Protected Code</title>
+        <style>
+            body { font-family: system-ui, sans-serif; background: #0b0f19; color: #f1f5f9; margin: 0; padding: 30px; }
+            .container { max-width: 800px; margin: 0 auto; }
+            .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 15px; margin-bottom: 25px; }
+            h1 { font-size: 26px; color: #10b981; margin: 0; }
+            .card { background: #111827; padding: 20px; border-radius: 10px; border: 1px solid #1e293b; }
+            textarea { width: 100%; padding: 10px; margin-bottom: 15px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: #10b981; box-sizing: border-box; font-family: monospace; height: 350px; }
+            button { width: 100%; background: #10b981; color: white; border: none; padding: 12px; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 15px; }
+            button:hover { background: #059669; }
+            .btn-back { background: #1f2937; border: 1px solid #374151; color: #94a3b8; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; height: 38px; box-sizing: border-box; font-weight: bold; }
+            .btn-back:hover { background: #374151; color: white; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>✅ Code Protected Successfully</h1>
+                <a href="/obfuscate" class="btn-back">⬅️ Back</a>
+            </div>
+            <div class="card">
+                <textarea id="output-code" readonly>${injectedTemplate}</textarea>
+                <button onclick="copyToClipboard()">📋 Copy Code</button>
+            </div>
+        </div>
+        <script>
+            function copyToClipboard() {
+                const copyText = document.getElementById("output-code");
+                copyText.select();
+                copyText.setSelectionRange(0, 99999);
+                navigator.clipboard.writeText(copyText.value);
+                alert("Protected code copied to clipboard!");
             }
         </script>
     </body>
