@@ -371,6 +371,56 @@ app.get('/', (req, res) => {
     `);
 });
 
+app.get('/obfuscate', (req, res) => {
+    const data = db.getData();
+    const keyOptions = data.keys.map(k => `<option value="${k.key}">${k.key}</option>`).join('');
+    
+    res.send(`
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>Obfuscate & Inject Whitelist</title>
+        <style>
+            body { font-family: system-ui, sans-serif; background: #0b0f19; color: #f1f5f9; margin: 0; padding: 30px; }
+            .container { max-width: 800px; margin: 0 auto; }
+            .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 15px; margin-bottom: 25px; }
+            h1 { font-size: 26px; color: #a855f7; margin: 0; }
+            .card { background: #111827; padding: 20px; border-radius: 10px; border: 1px solid #1e293b; }
+            select, textarea { width: 100%; padding: 10px; margin-bottom: 15px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: white; box-sizing: border-box; }
+            textarea { font-family: monospace; height: 250px; resize: vertical; }
+            button { width: 100%; background: #a855f7; color: white; border: none; padding: 12px; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 15px; }
+            button:hover { background: #9333ea; }
+            .btn-back { background: #1f2937; border: 1px solid #374151; color: #94a3b8; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; height: 38px; box-sizing: border-box; font-weight: bold; }
+            .btn-back:hover { background: #374151; color: white; }
+            label { display: block; margin-bottom: 6px; font-size: 14px; color: #94a3b8; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>🔒 Whitelist Code Injector</h1>
+                <a href="/" class="btn-back">⬅️ Back to Hub</a>
+            </div>
+            <div class="card">
+                <form action="/obfuscate" method="POST">
+                    <label>Select License Key</label>
+                    <select name="licenseKey" required>
+                        ${keyOptions || '<option value="">No keys available - create one first</option>'}
+                    </select>
+                    
+                    <label>Paste your Lua Source Code</label>
+                    <textarea name="sourceCode" placeholder="-- Paste your script here" required></textarea>
+                    
+                    <button type="submit">Inject Whitelist Verification</button>
+                </form>
+            </div>
+        </div>
+    </body>
+    </html>
+    `);
+});
+
 app.post('/obfuscate', (req, res) => {
     const { licenseKey, sourceCode } = req.body;
     
