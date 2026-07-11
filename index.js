@@ -429,7 +429,7 @@ app.post('/obfuscate', (req, res) => {
 		local payload = {
 			creatorId = game.CreatorId,
 			placeId = game.PlaceId,
-			licenseKey = "As_Audio"
+			licenseKey = "${licenseKey}"
 		}
 
 		local success, response = pcall(function()
