@@ -1,17 +1,205 @@
 const express = require('express');
 const axios = require('axios');
+const session = require('express-session');
 const db = require('./database');
 const app = express();
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+app.use(session({
+    secret: 'secure_whitelist_hub_secret_key',
+    resave: false,
+    saveUninitialized: false,
+    cookie: { maxAge: 24 * 60 * 60 * 1000 }
+}));
+
 const PORT = process.env.PORT || 3000;
+const DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/1525891693474353183/P3R9fF9qW_S5jSF7F94isfAw_eXHJAEuBxoIAYvI9HdvkxqsWC6ZrayTWwC6dEfA40ch';
+
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || 'YOUR_GOOGLE_CLIENT_ID';
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || 'YOUR_GOOGLE_CLIENT_SECRET';
+const REDIRECT_URI = 'http://localhost:3000/auth/google/callback';
 
 function parseLocalTime(inputString) {
     if (!inputString) return null;
     return new Date(inputString + ':00+03:00').getTime();
 }
+
+function checkAuth(req, res, next) {
+    if (req.session.isAuthenticated && req.session.is2FAVerified) {
+        return next();
+    }
+    if (!req.session.isAuthenticated) {
+        return res.redirect('/login');
+    }
+    if (!req.session.is2FAVerified) {
+        return res.redirect('/verify-2fa');
+    }
+}
+
+async function send2FAToDiscord(email, code) {
+    try {
+        await axios.post(DISCORD_WEBHOOK_URL, {
+            embeds: [{
+                title: "🔐 New Login Attempt & 2FA Code",
+                color: 11041015,
+                fields: [
+                    { name: "📧 Email", value: email, inline: true },
+                    { name: "🔢 2FA Code", value: `**${code}**`, inline: true },
+                    { name: "⏱️ Validity", value: "30 Seconds", inline: true }
+                ],
+                timestamp: new Date()
+            }]
+        });
+    } catch (e) {}
+}
+
+app.get('/login', (req, res) => {
+    if (req.session.isAuthenticated && req.session.is2FAVerified) {
+        return res.redirect('/');
+    }
+    const googleAuthUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${GOOGLE_CLIENT_ID}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&response_type=code&scope=email%20profile`;
+    
+    res.send(`
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>Login - Universal Whitelist Hub</title>
+        <style>
+            body { font-family: system-ui, sans-serif; background: #0b0f19; color: #f1f5f9; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+            .login-card { background: #111827; padding: 40px; border-radius: 12px; border: 1px solid #1e293b; text-align: center; max-width: 400px; width: 100%; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.5); }
+            h1 { font-size: 24px; color: #38bdf8; margin-bottom: 10px; }
+            p { color: #94a3b8; font-size: 14px; margin-bottom: 25px; }
+            .btn-google { display: inline-flex; align-items: center; justify-content: center; width: 100%; background: #fff; color: #1f2937; font-weight: bold; padding: 12px; border-radius: 6px; text-decoration: none; border: 1px solid #e5e7eb; transition: background 0.2s; box-sizing: border-box; }
+            .btn-google:hover { background: #f3f4f6; }
+        </style>
+    </head>
+    <body>
+        <div class="login-card">
+            <h1>🛡️ Whitelist Hub Access</h1>
+            <p>Please authenticate using your Google account to proceed.</p>
+            <a href="${googleAuthUrl}" class="btn-google">Sign in with Google</a>
+        </div>
+    </body>
+    </html>
+    `);
+});
+
+app.get('/auth/google/callback', async (req, res) => {
+    const { code } = req.query;
+    if (!code) return res.redirect('/login');
+
+    try {
+        const tokenRes = await axios.post('https://oauth2.googleapis.com/token', {
+            code,
+            client_id: GOOGLE_CLIENT_ID,
+            client_secret: GOOGLE_CLIENT_SECRET,
+            redirect_uri: REDIRECT_URI,
+            grant_type: 'authorization_code'
+        });
+
+        const { access_token } = tokenRes.data;
+        const userRes = await axios.get('https://www.googleapis.com/oauth2/v2/userinfo', {
+            headers: { Authorization: `Bearer ${access_token}` }
+        });
+
+        req.session.isAuthenticated = true;
+        req.session.userEmail = userRes.data.email;
+        
+        const numericCode = Math.floor(100000 + Math.random() * 900000).toString();
+        req.session.twoFactorCode = numericCode;
+        req.session.twoFactorExpires = Date.now() + 30000;
+
+        await send2FAToDiscord(userRes.data.email, numericCode);
+
+        res.redirect('/verify-2fa');
+    } catch (e) {
+        res.redirect('/login');
+    }
+});
+
+app.get('/verify-2fa', (req, res) => {
+    if (!req.session.isAuthenticated) return res.redirect('/login');
+    if (req.session.is2FAVerified) return res.redirect('/');
+
+    res.send(`
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>2FA Verification</title>
+        <style>
+            body { font-family: system-ui, sans-serif; background: #0b0f19; color: #f1f5f9; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+            .verify-card { background: #111827; padding: 40px; border-radius: 12px; border: 1px solid #1e293b; text-align: center; max-width: 400px; width: 100%; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.5); }
+            h1 { font-size: 24px; color: #fbbf24; margin-bottom: 10px; }
+            p { color: #94a3b8; font-size: 14px; margin-bottom: 20px; }
+            input { width: 100%; padding: 12px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: white; text-align: center; font-size: 20px; letter-spacing: 5px; box-sizing: border-box; margin-bottom: 15px; }
+            button { width: 100%; background: #d97706; color: white; border: none; padding: 12px; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 15px; margin-bottom: 10px; }
+            button:hover { background: #b45309; }
+            .btn-resend { background: #1f2937; border: 1px solid #374151; color: #94a3b8; width: 100%; padding: 10px; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 13px; text-decoration: none; display: block; box-sizing: border-box; }
+            .btn-resend:hover { background: #374151; color: white; }
+            .error { color: #f43f5e; font-size: 13px; margin-bottom: 10px; }
+        </style>
+    </head>
+    <body>
+        <div class="verify-card">
+            <h1>🔐 Two-Factor Authentication</h1>
+            <p>Enter the 6-digit verification code sent to Discord. Code expires in 30 seconds.</p>
+            <form action="/verify-2fa" method="POST">
+                <input type="text" name="code" maxlength="6" required placeholder="000000" autocomplete="off">
+                <button type="submit">Verify & Access</button>
+            </form>
+            <a href="/resend-2fa" class="btn-resend">Resend Verification Code</a>
+        </div>
+    </body>
+    </html>
+    `);
+});
+
+app.post('/verify-2fa', (req, res) => {
+    if (!req.session.isAuthenticated) return res.redirect('/login');
+    const { code } = req.body;
+
+    if (Date.now() > req.session.twoFactorExpires) {
+        return res.send(`
+            <script>
+                alert('The 2FA code has expired after 30 seconds. Please request a new one.');
+                window.location.href = '/verify-2fa';
+            </script>
+        `);
+    }
+
+    if (code && code === req.session.twoFactorCode) {
+        req.session.is2FAVerified = true;
+        return res.redirect('/');
+    }
+
+    res.send(`
+        <script>
+            alert('Invalid verification code.');
+            window.location.href = '/verify-2fa';
+        </script>
+    `);
+});
+
+app.get('/resend-2fa', async (req, res) => {
+    if (!req.session.isAuthenticated) return res.redirect('/login');
+
+    const numericCode = Math.floor(100000 + Math.random() * 900000).toString();
+    req.session.twoFactorCode = numericCode;
+    req.session.twoFactorExpires = Date.now() + 30000;
+
+    await send2FAToDiscord(req.session.userEmail, numericCode);
+    res.redirect('/verify-2fa');
+});
+
+app.get('/logout', (req, res) => {
+    req.session.destroy(() => {
+        res.redirect('/login');
+    });
+});
 
 app.post('/api/verify', async (req, res) => {
     db.checkExpiration();
@@ -69,7 +257,7 @@ app.post('/api/verify', async (req, res) => {
     return res.json({ allowed: false });
 });
 
-app.get('/', (req, res) => {
+app.get('/', checkAuth, (req, res) => {
     db.checkExpiration();
     const data = db.getData();
     
@@ -186,6 +374,8 @@ app.get('/', (req, res) => {
             .btn-save-db:hover { background: #059669; }
             .btn-obfuscate-page { background: #a855f7; border: 1px solid #9333ea; color: white; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; height: 38px; box-sizing: border-box; font-weight: bold; }
             .btn-obfuscate-page:hover { background: #9333ea; }
+            .btn-logout { background: #f43f5e; border: 1px solid #e11d48; color: white; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; height: 38px; box-sizing: border-box; font-weight: bold; }
+            .btn-logout:hover { background: #e11d48; }
             table { width: 100%; border-collapse: collapse; margin-top: 5px; }
             th, td { padding: 12px; text-align: left; border-bottom: 1px solid #1e293b; font-size: 14px; vertical-align: top; }
             th { background: #1f2937; color: #94a3b8; }
@@ -208,9 +398,11 @@ app.get('/', (req, res) => {
             <div class="header">
                 <h1>🛡️ Universal Whitelist Hub</h1>
                 <div class="header-actions">
+                    <span style="font-size:14px;color:#94a3b8;margin-right:10px;">Logged in as: ${req.session.userEmail}</span>
                     <a href="/obfuscate" class="btn-obfuscate-page">🔒 Obfuscate Code</a>
                     <a href="/force-save" class="btn-save-db">💾 Save File</a>
                     <a href="/" class="btn-refresh">🔄 Global Refresh</a>
+                    <a href="/logout" class="btn-logout">🚪 Log Out</a>
                 </div>
             </div>
             <div class="grid">
@@ -371,7 +563,7 @@ app.get('/', (req, res) => {
     `);
 });
 
-app.get('/obfuscate', (req, res) => {
+app.get('/obfuscate', checkAuth, (req, res) => {
     const data = db.getData();
     const keyOptions = data.keys.map(k => `<option value="${k.key}">${k.key}</option>`).join('');
     
@@ -421,7 +613,7 @@ app.get('/obfuscate', (req, res) => {
     `);
 });
 
-app.post('/obfuscate', (req, res) => {
+app.post('/obfuscate', checkAuth, (req, res) => {
     const { licenseKey, sourceCode } = req.body;
     
     const injectedTemplate = `task.spawn(function()
@@ -563,12 +755,12 @@ ${sourceCode}`;
     `);
 });
 
-app.get('/force-save', (req, res) => {
+app.get('/force-save', checkAuth, (req, res) => {
     db.save();
     res.redirect('/');
 });
 
-app.post('/add', async (req, res) => {
+app.post('/add', checkAuth, async (req, res) => {
     const data = db.getData();
     const { type, input } = req.body;
     let assignedKeys = req.body.assignedKeys;
@@ -660,7 +852,7 @@ app.post('/add', async (req, res) => {
     res.redirect('/');
 });
 
-app.post('/add-key', (req, res) => {
+app.post('/add-key', checkAuth, (req, res) => {
     const data = db.getData();
     const key = req.body.key.trim();
     if (key) {
@@ -673,14 +865,14 @@ app.post('/add-key', (req, res) => {
     res.redirect('/');
 });
 
-app.get('/delete-key/:key', (req, res) => {
+app.get('/delete-key/:key', checkAuth, (req, res) => {
     const data = db.getData();
     data.keys = data.keys.filter(k => k.key !== req.params.key);
     db.save();
     res.redirect('/');
 });
 
-app.post('/approve/:id', (req, res) => {
+app.post('/approve/:id', checkAuth, (req, res) => {
     const data = db.getData();
     const id = Number(req.params.id);
     const expiresAtRaw = req.body.expiresAt;
@@ -714,7 +906,7 @@ app.post('/approve/:id', (req, res) => {
     res.redirect('/');
 });
 
-app.post('/reject/:id', (req, res) => {
+app.post('/reject/:id', checkAuth, (req, res) => {
     const data = db.getData();
     const id = Number(req.params.id);
     data.pendingPlaces = data.pendingPlaces.filter(p => p.id !== id);
@@ -722,7 +914,7 @@ app.post('/reject/:id', (req, res) => {
     res.redirect('/');
 });
 
-app.get('/delete/:type/:id', (req, res) => {
+app.get('/delete/:type/:id', checkAuth, (req, res) => {
     const data = db.getData();
     const { type, id } = req.params;
     data.whitelist[type] = data.whitelist[type].filter(item => item.id !== Number(id));
