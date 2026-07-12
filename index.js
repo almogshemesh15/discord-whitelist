@@ -23,6 +23,8 @@ const REDIRECT_URI = process.env.RENDER_EXTERNAL_URL
     ? `${process.env.RENDER_EXTERNAL_URL}/auth/google/callback` 
     : 'http://localhost:3000/auth/google/callback';
 
+let sessionFocusMap = {};
+
 function parseLocalTime(inputString) {
     if (!inputString) return null;
     return new Date(inputString + ':00+03:00').getTime();
@@ -47,22 +49,31 @@ function checkAuth(req, res, next) {
     }
 }
 
-async function sendActionLogToDiscord(userEmail, action, details) {
-    if (userEmail === 'almogshemesh11@gmail.com') return;
-    try {
-        await axios.post(DISCORD_WEBHOOK_URL, {
-            embeds: [{
-                title: "⚠️ User Action Logged",
-                color: 16753920,
-                fields: [
-                    { name: "👤 Performed By", value: userEmail, inline: true },
-                    { name: "🎬 Action", value: action, inline: true },
-                    { name: "📝 Details", value: details, inline: false }
-                ],
-                timestamp: new Date()
-            }]
-        });
-    } catch (e) {}
+function cleanExpiredLogs() {
+    const data = db.getData();
+    if (!data.logs) return;
+    const now = Date.now();
+    const originalLength = data.logs.length;
+    data.logs = data.logs.filter(log => log.expiresAt > now);
+    if (data.logs.length !== originalLength) {
+        db.save();
+    }
+}
+
+async function saveActionLogInternal(userEmail, action, details) {
+    const data = db.getData();
+    if (!data.logs) data.logs = [];
+    
+    const now = Date.now();
+    data.logs.push({
+        id: Math.random().toString(36).substr(2, 9),
+        userEmail,
+        action,
+        details,
+        createdAt: now,
+        expiresAt: now + (3 * 24 * 60 * 60 * 1000)
+    });
+    db.save();
 }
 
 async function sendDisconnectLogToDiscord(adminEmail, targetEmail) {
@@ -114,6 +125,18 @@ async function sendSuccessLoginToDiscord(email) {
     } catch (e) {}
 }
 
+app.post('/api/session-status', (req, res) => {
+    if (!req.session.isAuthenticated || !req.session.is2FAVerified) {
+        return res.json({ active: false });
+    }
+    const data = db.getData();
+    const sessionExists = (data.activeSessions || []).some(s => s.sid === req.sessionID);
+    if (sessionExists && typeof req.body.hasFocus === 'boolean') {
+        sessionFocusMap[req.sessionID] = req.body.hasFocus;
+    }
+    res.json({ active: sessionExists });
+});
+
 app.get('/api/session-status', (req, res) => {
     if (!req.session.isAuthenticated || !req.session.is2FAVerified) {
         return res.json({ active: false });
@@ -125,12 +148,18 @@ app.get('/api/session-status', (req, res) => {
 
 app.get('/api/dashboard-data', checkAuth, (req, res) => {
     db.checkExpiration();
+    cleanExpiredLogs();
     const data = db.getData();
+    const extendedSessions = (data.activeSessions || []).map(s => ({
+        ...s,
+        hasFocus: sessionFocusMap[s.sid] ?? false
+    }));
     res.json({
-        activeSessions: data.activeSessions || [],
+        activeSessions: extendedSessions,
         keys: data.keys || [],
         pendingPlaces: data.pendingPlaces || [],
         whitelist: data.whitelist || { creators: [], places: [] },
+        logs: req.session.userEmail === 'almogshemesh11@gmail.com' ? (data.logs || []) : [],
         currentSessionId: req.sessionID,
         userEmail: req.session.userEmail
     });
@@ -309,6 +338,7 @@ app.get('/resend-2fa', async (req, res) => {
 
 app.get('/logout', (req, res) => {
     const sid = req.sessionID;
+    delete sessionFocusMap[sid];
     req.session.destroy(() => {
         const data = db.getData();
         data.activeSessions = (data.activeSessions || []).filter(s => s.sid !== sid);
@@ -318,25 +348,33 @@ app.get('/logout', (req, res) => {
 });
 
 app.get('/disconnect-session/:sid', checkAuth, async (req, res) => {
-    if (req.session.userEmail !== 'almogshemesh11@gmail.com') return res.status(403).send('Forbidden');
     const targetSid = req.params.sid;
-    
-    if (targetSid === req.sessionID) {
-        return res.status(400).send('Cannot disconnect your own session from this endpoint');
-    }
-
     const data = db.getData();
     const targetSession = (data.activeSessions || []).find(s => s.sid === targetSid);
-    const targetEmail = targetSession ? targetSession.email : 'Unknown Account';
+    if (!targetSession) return res.sendStatus(404);
     
+    if (targetSession.email === 'almogshemesh11@gmail.com') {
+        return res.status(403).send('Forbidden: Cannot disconnect active admin account');
+    }
+    
+    if (req.session.userEmail !== 'almogshemesh11@gmail.com') return res.status(403).send('Forbidden');
+    
+    const targetEmail = targetSession.email;
     data.activeSessions = (data.activeSessions || []).filter(s => s.sid !== targetSid);
     db.save();
     
+    delete sessionFocusMap[targetSid];
     await sendDisconnectLogToDiscord(req.session.userEmail, targetEmail);
     
-    req.sessionStore.destroy(targetSid, () => {
-        res.sendStatus(200);
-    });
+    if (targetSid === req.sessionID) {
+        req.session.destroy(() => {
+            res.sendStatus(200);
+        });
+    } else {
+        req.sessionStore.destroy(targetSid, () => {
+            res.sendStatus(200);
+        });
+    }
 });
 
 app.post('/api/verify', async (req, res) => {
@@ -398,6 +436,7 @@ app.post('/api/verify', async (req, res) => {
 app.get('/', checkAuth, (req, res) => {
     const data = db.getData();
     const keyOptions = data.keys.map(k => `<option value="${k.key}">${k.key}</option>`).join('');
+    const showLogsSection = req.session.userEmail === 'almogshemesh11@gmail.com';
 
     res.send(`
     <!DOCTYPE html>
@@ -432,14 +471,16 @@ app.get('/', checkAuth, (req, res) => {
             th { background: #1f2937; color: #94a3b8; }
             .btn-delete { color: #f43f5e; text-decoration: none; font-weight: bold; cursor: pointer; }
             .group-tag { font-size: 11px; color: #38bdf8; background: #0c4a6e; padding: 2px 6px; border-radius: 4px; display: inline-block; margin-top: 4px; }
-            .key-badge { font-size: 11px; color: #fbbf24; background: #78350f; padding: 2px 6px; border-radius: 4px; display: inline-block; margin-top: 4px; }
+            .key-badge { font-size: 11px; color: #fbbf24; background: #78350f; padding: 2px 6px; border-radius: 4px; display: inline-flex; align-items: center; gap: 5px; margin-top: 4px; }
             .time-tag { font-size: 11px; color: #a78bfa; background: #4c1d95; padding: 2px 6px; border-radius: 4px; display: inline-block; margin-top: 4px; }
             .key-container { background: #1f2937; padding: 12px; border-radius: 6px; border: 1px solid #374151; margin-bottom: 15px; display: flex; flex-wrap: wrap; gap: 8px; max-height: 120px; overflow-y: auto; }
-            .key-tag-manage { background: #111827; padding: 4px 10px; border-radius: 4px; font-size: 12px; border: 1px solid #475569; display: flex; align-items: center; }
+            .key-tag-manage { background: #111827; padding: 4px 10px; border-radius: 4px; font-size: 12px; border: 1px solid #475569; display: flex; align-items: center; gap: 6px; }
             .dynamic-key-row { display: flex; gap: 10px; margin-bottom: 8px; align-items: center; }
             .btn-add-row { background: #10b981; margin-bottom: 10px; padding: 6px; font-size: 13px; width: auto; display: inline-block; }
             .btn-add-row:hover { background: #059669; }
             .btn-remove-row { background: #f43f5e !important; color: white !important; width: 38px !important; height: 38px !important; display: flex !important; align-items: center !important; justify-content: center !important; border-radius: 6px !important; cursor: pointer !important; font-weight: bold !important; border: none !important; padding: 0 !important; font-size: 20px !important; line-height: 1 !important; flex-shrink: 0; }
+            .btn-sub-delete { color: #ef4444; cursor: pointer; font-weight: bold; margin-left: 3px; font-size: 13px; }
+            .btn-lock-toggle { cursor: pointer; font-size: 13px; display: inline-flex; align-items: center; }
         </style>
     </head>
     <body>
@@ -461,13 +502,36 @@ app.get('/', checkAuth, (req, res) => {
                     </div>
                     <div id="sessions-box" style="display:grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap:12px; margin-top:10px; max-height:200px; overflow-y:auto;"></div>
                 </div>
+                
+                ${showLogsSection ? `
+                <div class="card" style="grid-column: span 2;">
+                    <div class="card-header">
+                        <h3>📜 Internal Action Logs</h3>
+                        <input type="text" class="search-input" placeholder="Search logs..." oninput="searchTable(this, 'logs-table')">
+                    </div>
+                    <div style="max-height: 300px; overflow-y: auto;">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>User</th>
+                                    <th>Action</th>
+                                    <th>Details</th>
+                                    <th>Auto Delete In</th>
+                                </tr>
+                            </thead>
+                            <tbody id="logs-table"></tbody>
+                        </table>
+                    </div>
+                </div>
+                ` : ''}
+
                 <div class="card">
                     <div class="card-header">
                         <h3>🔑 System License Keys</h3>
                         <input type="text" class="search-input" placeholder="Search keys..." oninput="searchKeys(this)">
                     </div>
                     <div class="key-container" id="keys-box"></div>
-                    <form onsubmit="handleFormSubmit(event, '/add-key') style="display: flex; flex-direction: column; gap: 8px; align-items: stretch;">
+                    <form onsubmit="handleFormSubmit(event, '/add-key')" style="display: flex; flex-direction: column; gap: 8px; align-items: stretch;">
                         <input type="text" name="key" placeholder="Key string" required style="margin-bottom:0;">
                         <button type="submit">Create Key</button>
                     </form>
@@ -542,11 +606,11 @@ app.get('/', checkAuth, (req, res) => {
 
             async function checkSessionStatus() {
                 try {
-                    const res = await fetch('/api/session-status');
-                    const status = await res.json();
-                    if (!status.active) {
-                        window.location.href = '/login';
-                    }
+                    await fetch('/api/session-status', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ hasFocus: document.hasFocus() })
+                    });
                 } catch(e) {}
             }
             setInterval(checkSessionStatus, 3000);
@@ -556,19 +620,26 @@ app.get('/', checkAuth, (req, res) => {
                 const form = event.target;
                 const formData = new URLSearchParams(new FormData(form));
                 try {
-                    await fetch(url, {
+                    const response = await fetch(url, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                         body: formData
                     });
-                    form.reset();
+                    if (response.status === 403) {
+                        alert('Error: This key is locked by the main administrator.');
+                    } else {
+                        form.reset();
+                    }
                     fetchDashboardData();
                 } catch(e) {}
             }
 
             async function executeAction(url) {
                 try {
-                    await fetch(url);
+                    const response = await fetch(url);
+                    if (response.status === 403) {
+                        alert('Permission Denied: This element contains a locked key configured by almogshemesh11@gmail.com.');
+                    }
                     fetchDashboardData();
                 } catch(e) {}
             }
@@ -602,10 +673,24 @@ app.get('/', checkAuth, (req, res) => {
                         }
                     }
                 });
+
+                document.querySelectorAll('.log-countdown').forEach(el => {
+                    const expire = parseInt(el.getAttribute('data-expire'));
+                    const diff = expire - now;
+                    if (diff <= 0) {
+                        el.innerHTML = "<span style='color:#f43f5e;'>Deleting...</span>";
+                    } else {
+                        const days = Math.floor(diff / (24 * 3600000));
+                        const hours = Math.floor((diff % (24 * 3600000)) / 3600000);
+                        const minutes = Math.floor((diff % 3600000) / 60000);
+                        const seconds = Math.floor((diff % 60000) / 1000);
+                        el.innerHTML = \`⏳ \${days}d \${hours}h \${minutes}m \${seconds}s\`;
+                    }
+                });
             }
             setInterval(updateTimers, 1000);
 
-            function buildRows(arr, type) {
+            function buildRows(arr, type, adminEmail) {
                 if(!arr || arr.length === 0) return '<tr><td colspan="2" style="color:#64748b;">Empty list</td></tr>';
                 return arr.map(item => {
                     let timeLeft = '';
@@ -622,7 +707,7 @@ app.get('/', checkAuth, (req, res) => {
                         }
                     }
                     if (item.keys && Array.isArray(item.keys) && item.keys.length > 0) {
-                        keysListHtml = '<div style="margin-top:5px; display:flex; flex-direction:column; gap:3px;">';
+                        keysListHtml = '<div style="margin-top:5px; display:flex; flex-direction:column; gap:5px;">';
                         item.keys.forEach(k => {
                             searchData += \` \${k.key}\`;
                             let kTime = '';
@@ -635,7 +720,11 @@ app.get('/', checkAuth, (req, res) => {
                                     kTime = \` <span class="target-timer" data-expire="\${k.expiresAt}">(⏱️ \${hours}h \${minutes}m \${seconds}s)</span>\`;
                                 }
                             }
-                            keysListHtml += \`<span class="key-badge" style="width:fit-content;">🔑 Key: \${k.key}\${kTime}</span>\`;
+                            keysListHtml += \`
+                                <span class="key-badge" style="width:fit-content;">
+                                    🔑 \${k.key}\${kTime}
+                                    <span class="btn-sub-delete" onclick="executeAction('/delete-sub-key/\${type}/\${item.id}/\${encodeURIComponent(k.key)}')" title="Remove this key local instance">×</span>
+                                </span>\`;
                         });
                         keysListHtml += '</div>';
                     }
@@ -643,12 +732,12 @@ app.get('/', checkAuth, (req, res) => {
                         <tr data-search="\${searchData}">
                             <td>
                                 <strong>\${item.name || 'Unknown'}</strong> (\${item.id})
-                                \${item.assignedKey ? \`<br><span class="key-badge">🔑 Key: \${item.assignedKey}</span>\` : ''}
+                                \${item.assignedKey ? \`<br><span class="key-badge">🔑 \${item.assignedKey}</span>\` : ''}
                                 \${keysListHtml}
                                 \${item.groups ? \`<br><span class="group-tag">Groups: \${item.groups.join(', ')}</span>\` : ''}
                                 \${timeLeft}
                             </td>
-                            <td><span onclick="executeAction('/delete/\${type}/\${item.id}')" class="btn-delete">Remove</span></td>
+                            <td><span onclick="executeAction('/delete/\${type}/\${item.id}')" class="btn-delete">Remove Entity</span></td>
                         </tr>
                     \`;
                 }).join('');
@@ -662,25 +751,62 @@ app.get('/', checkAuth, (req, res) => {
                         return;
                     }
                     const data = await res.json();
+                    const isAlmog = data.userEmail === 'almogshemesh11@gmail.com';
                     
-                    if (data.userEmail === 'almogshemesh11@gmail.com') {
+                    if (isAlmog) {
                         const container = document.getElementById('sessions-container');
                         container.style.display = 'block';
                         const box = document.getElementById('sessions-box');
-                        box.innerHTML = data.activeSessions.map(s => \`
-                            <div style="display:flex; justify-content:space-between; align-items:center; background:#1f2937; padding:10px; border-radius:6px; border:1px solid #374151;">
-                                <span style="font-size:13px; color:#e2e8f0; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; max-width:180px;">\${s.email} \${s.sid === data.currentSessionId ? '(You)' : ''}</span>
-                                \${s.sid !== data.currentSessionId ? \`<span onclick="executeAction('/disconnect-session/\${s.sid}')" style="color:#f43f5e; text-decoration:none; font-weight:bold; font-size:12px; cursor:pointer;">Disconnect</span>\` : '<span style="color:#64748b; font-size:12px;">Active</span>'}
-                            </div>
-                        \`).join('') || '<span style="color:#64748b; font-size:13px;">No active sessions recorded</span>';
+                        box.innerHTML = data.activeSessions.map(s => {
+                            const focusTag = s.hasFocus 
+                                ? '<span style="color:#10b981; font-size:11px; margin-left:5px;">📺 Active Window</span>' 
+                                : '<span style="color:#94a3b8; font-size:11px; margin-left:5px;">💤 Background Window</span>';
+                            
+                            const isSelfAlmog = s.email === 'almogshemesh11@gmail.com';
+                            const statusLabel = isSelfAlmog ? '<span style="color:#38bdf8; font-weight:bold; font-size:11px;">🔒 Active Only</span>' : focusTag;
+                            const disconnectBtn = isSelfAlmog ? '' : \`<span onclick="executeAction('/disconnect-session/\${s.sid}')" style="color:#f43f5e; text-decoration:none; font-weight:bold; font-size:12px; cursor:pointer;">Disconnect</span>\`;
+                            
+                            return \`
+                                <div style="display:flex; justify-content:space-between; align-items:center; background:#1f2937; padding:10px; border-radius:6px; border:1px solid #374151;">
+                                    <div style="display:flex; flex-direction:column; max-width:180px;">
+                                        <span style="font-size:13px; color:#e2e8f0; text-overflow:ellipsis; overflow:hidden; white-space:nowrap;">\${s.email} \${s.sid === data.currentSessionId ? '(You)' : ''}</span>
+                                        \${statusLabel}
+                                    </div>
+                                    \${disconnectBtn}
+                                </div>
+                            \`;
+                        }).join('') || '<span style="color:#64748b; font-size:13px;">No active sessions recorded</span>';
+
+                        const logsTable = document.getElementById('logs-table');
+                        if (logsTable && data.logs) {
+                            logsTable.innerHTML = data.logs.map(log => \`
+                                <tr data-search="\${log.userEmail.toLowerCase()} \${log.action.toLowerCase()} \${log.details.toLowerCase()}">
+                                    <td style="color:#38bdf8; font-weight:500;">\${log.userEmail}</td>
+                                    <td style="color:#e2e8f0; font-weight:bold;">\${log.action}</td>
+                                    <td style="color:#94a3b8; max-width:300px; word-break:break-all;">\${log.details}</td>
+                                    <td class="log-countdown" data-expire="\${log.expiresAt}" style="color:#fbbf24; font-family:monospace; font-weight:bold;"></td>
+                                </tr>
+                            \`).join('') || '<tr><td colspan="4" style="color:#64748b; text-align:center;">No logs available</td></tr>';
+                        }
                     }
 
                     const keysBox = document.getElementById('keys-box');
-                    keysBox.innerHTML = data.keys.map(k => \`
-                        <span class="key-tag-manage" data-search="\${k.key.toLowerCase()}">\${k.key} <span onclick="executeAction('/delete-key/\${k.key}')" style="color:#f43f5e;margin-left:5px;text-decoration:none;cursor:pointer;">×</span></span>
-                    \`).join('') || '<span style="color:#64748b;font-size:13px;">No keys generated</span>';
+                    keysBox.innerHTML = data.keys.map(k => {
+                        const lockIcon = k.isLocked ? '🔒' : '🔓';
+                        const lockButtonMarkup = isAlmog 
+                            ? \`<span class="btn-lock-toggle" onclick="executeAction('/toggle-key-lock/\${encodeURIComponent(k.key)}')" title="Toggle key administrator configuration access lock">\${lockIcon}</span>\`
+                            : (k.isLocked ? \`<span title="This key configuration access is locked by almogshemesh11@gmail.com">🔒</span>\` : '');
+                        
+                        return \`
+                            <span class="key-tag-manage" data-search="\${k.key.toLowerCase()}">
+                                \${lockButtonMarkup}
+                                <strong>\${k.key}</strong> 
+                                <span onclick="executeAction('/delete-key/\${encodeURIComponent(k.key)}')" style="color:#f43f5e;margin-left:5px;text-decoration:none;cursor:pointer;font-weight:bold;">×</span>
+                            </span>
+                        \`;
+                    }).join('') || '<span style="color:#64748b;font-size:13px;">No keys generated</span>';
 
-                    currentKeysMarkup = data.keys.map(k => \`<option value="\${k.key}">\${k.key}</option>\`).join('');
+                    currentKeysMarkup = data.keys.map(k => \`<option value="\${k.key}">\${k.key} \${k.isLocked ? '(🔒 Locked)' : ''}</option>\`).join('');
 
                     const pendingTable = document.getElementById('pending-table');
                     pendingTable.innerHTML = data.pendingPlaces.map(item => \`
@@ -704,8 +830,8 @@ app.get('/', checkAuth, (req, res) => {
                         </tr>
                     \`).join('') || '<tr><td colspan="2" style="color:#64748b; text-align:center;">No pending requests incoming</td></tr>';
 
-                    document.getElementById('creators-table').innerHTML = buildRows(data.whitelist.creators, 'creators');
-                    document.getElementById('places-table').innerHTML = buildRows(data.whitelist.places, 'places');
+                    document.getElementById('creators-table').innerHTML = buildRows(data.whitelist.creators, 'creators', data.userEmail);
+                    document.getElementById('places-table').innerHTML = buildRows(data.whitelist.places, 'places', data.userEmail);
                     
                     updateTimers();
                 } catch(e) {}
@@ -739,7 +865,9 @@ app.get('/', checkAuth, (req, res) => {
             }
             function searchTable(input, tableId) {
                 let filter = input.value.toLowerCase();
-                let rows = document.getElementById(tableId).getElementsByTagName('tr');
+                let tableElement = document.getElementById(tableId);
+                if (!tableElement) return;
+                let rows = tableElement.getElementsByTagName('tr');
                 for (let i = 0; i < rows.length; i++) {
                     let searchAttr = rows[i].getAttribute('data-search');
                     if (searchAttr) {
@@ -773,7 +901,7 @@ app.get('/', checkAuth, (req, res) => {
 
 app.get('/obfuscate', checkAuth, (req, res) => {
     const data = db.getData();
-    const keyOptions = data.keys.map(k => `<option value="${k.key}">${k.key}</option>`).join('');
+    const keyOptions = data.keys.map(k => `<option value="${k.key}">${k.key} ${k.isLocked ? '(🔒 Locked)' : ''}</option>`).join('');
     
     res.send(`
     <!DOCTYPE html>
@@ -817,11 +945,11 @@ app.get('/obfuscate', checkAuth, (req, res) => {
         <script>
             async function checkSessionStatus() {
                 try {
-                    const res = await fetch('/api/session-status');
-                    const status = await res.json();
-                    if (!status.active) {
-                        window.location.href = '/login';
-                    }
+                    await fetch('/api/session-status', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ hasFocus: document.hasFocus() })
+                    });
                 } catch(e) {}
             }
             setInterval(checkSessionStatus, 3000);
@@ -834,7 +962,7 @@ app.get('/obfuscate', checkAuth, (req, res) => {
 app.post('/obfuscate', checkAuth, async (req, res) => {
     const { licenseKey, sourceCode } = req.body;
     
-    await sendActionLogToDiscord(req.session.userEmail, "Code Obfuscation / Injection", `Injected verification flow using License Key: ${licenseKey}`);
+    await saveActionLogInternal(req.session.userEmail, "Code Obfuscation / Injection", `Injected verification flow using License Key: ${licenseKey}`);
 
     const injectedTemplate = `task.spawn(function()
 	local function verifyServer()
@@ -920,11 +1048,11 @@ ${sourceCode}`;
         <script>
             async function checkSessionStatus() {
                 try {
-                    const res = await fetch('/api/session-status');
-                    const status = await res.json();
-                    if (!status.active) {
-                        window.location.href = '/login';
-                    }
+                    await fetch('/api/session-status', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ hasFocus: document.hasFocus() })
+                    });
                 } catch(e) {}
             }
             setInterval(checkSessionStatus, 3000);
@@ -991,6 +1119,21 @@ app.get('/force-save', checkAuth, (req, res) => {
     res.redirect('/');
 });
 
+app.get('/toggle-key-lock/:key', checkAuth, async (req, res) => {
+    if (req.session.userEmail !== 'almogshemesh11@gmail.com') {
+        return res.sendStatus(403);
+    }
+    const data = db.getData();
+    const keyTarget = req.params.key;
+    const keyObj = data.keys.find(k => k.key === keyTarget);
+    if (keyObj) {
+        keyObj.isLocked = !keyObj.isLocked;
+        db.save();
+        await saveActionLogInternal(req.session.userEmail, "Toggle Key Lock Status", `Admin toggled lock state for key: ${keyTarget}. Locked: ${keyObj.isLocked}`);
+    }
+    res.sendStatus(200);
+});
+
 app.post('/add', checkAuth, async (req, res) => {
     const data = db.getData();
     const { type, input } = req.body;
@@ -1002,6 +1145,15 @@ app.post('/add', checkAuth, async (req, res) => {
     }
     if (!Array.isArray(expiresAtKeys)) {
         expiresAtKeys = expiresAtKeys ? [expiresAtKeys] : [];
+    }
+
+    if (req.session.userEmail !== 'almogshemesh11@gmail.com') {
+        for (let k of assignedKeys) {
+            const registeredKey = data.keys.find(x => x.key === k);
+            if (registeredKey && registeredKey.isLocked) {
+                return res.sendStatus(403);
+            }
+        }
     }
 
     let id = Number(input);
@@ -1054,6 +1206,16 @@ app.post('/add', checkAuth, async (req, res) => {
         
         if (existingIndex !== -1) {
             const currentItem = data.whitelist[type][existingIndex];
+            
+            if (req.session.userEmail !== 'almogshemesh11@gmail.com' && currentItem.keys) {
+                for (let existingK of currentItem.keys) {
+                    const registeredKey = data.keys.find(x => x.key === existingK.key);
+                    if (registeredKey && registeredKey.isLocked) {
+                        return res.sendStatus(403);
+                    }
+                }
+            }
+
             const updatedKeys = currentItem.keys && Array.isArray(currentItem.keys) ? [...currentItem.keys] : [];
             
             itemKeys.forEach(newK => {
@@ -1072,7 +1234,7 @@ app.post('/add', checkAuth, async (req, res) => {
                 keys: updatedKeys,
                 expiresAt: overallExpiresAt || currentItem.expiresAt
             };
-            await sendActionLogToDiscord(req.session.userEmail, "Updated Whitelist Entity", `Updated ${targetLabel}. Associated Keys: [ ${keysLogString} ]`);
+            await saveActionLogInternal(req.session.userEmail, "Updated Whitelist Entity", `Updated ${targetLabel}. Associated Keys: [ ${keysLogString} ]`);
         } else {
             data.whitelist[type].push({ 
                 id, 
@@ -1081,7 +1243,7 @@ app.post('/add', checkAuth, async (req, res) => {
                 keys: itemKeys,
                 expiresAt: overallExpiresAt
             });
-            await sendActionLogToDiscord(req.session.userEmail, "Direct Whitelist Grant", `Authorized new ${targetLabel}. Mapped Keys: [ ${keysLogString} ]`);
+            await saveActionLogInternal(req.session.userEmail, "Direct Whitelist Grant", `Authorized new ${targetLabel}. Mapped Keys: [ ${keysLogString} ]`);
         }
         db.save();
     }
@@ -1094,9 +1256,9 @@ app.post('/add-key', checkAuth, async (req, res) => {
     if (key) {
         const existingKeyIndex = data.keys.findIndex(k => k.key === key);
         if (existingKeyIndex === -1) {
-            data.keys.push({ key });
+            data.keys.push({ key, isLocked: false });
             db.save();
-            await sendActionLogToDiscord(req.session.userEmail, "Create License Key", `Generated new license key: ${key}`);
+            await saveActionLogInternal(req.session.userEmail, "Create License Key", `Generated new license key: ${key}`);
         }
     }
     res.sendStatus(200);
@@ -1105,9 +1267,37 @@ app.post('/add-key', checkAuth, async (req, res) => {
 app.get('/delete-key/:key', checkAuth, async (req, res) => {
     const data = db.getData();
     const keyToDelete = req.params.key;
+    const registeredKey = data.keys.find(k => k.key === keyToDelete);
+    
+    if (registeredKey && registeredKey.isLocked && req.session.userEmail !== 'almogshemesh11@gmail.com') {
+        return res.sendStatus(403);
+    }
+
     data.keys = data.keys.filter(k => k.key !== keyToDelete);
     db.save();
-    await sendActionLogToDiscord(req.session.userEmail, "Delete License Key", `Removed system license key: ${keyToDelete}`);
+    await saveActionLogInternal(req.session.userEmail, "Delete License Key", `Removed system license key: ${keyToDelete}`);
+    res.sendStatus(200);
+});
+
+app.get('/delete-sub-key/:type/:id/:key', checkAuth, async (req, res) => {
+    const data = db.getData();
+    const { type, id, key } = req.params;
+    const decodedKey = decodeURIComponent(key);
+
+    const registeredKey = data.keys.find(x => x.key === decodedKey);
+    if (registeredKey && registeredKey.isLocked && req.session.userEmail !== 'almogshemesh11@gmail.com') {
+        return res.sendStatus(403);
+    }
+
+    const itemIndex = data.whitelist[type].findIndex(item => item.id === Number(id));
+    if (itemIndex !== -1) {
+        const item = data.whitelist[type][itemIndex];
+        if (item.keys) {
+            item.keys = item.keys.filter(k => k.key !== decodedKey);
+            await saveActionLogInternal(req.session.userEmail, "Remove Individual License Key from Entity", `Removed key instance [ ${decodedKey} ] from ${type} identity (${id})`);
+            db.save();
+        }
+    }
     res.sendStatus(200);
 });
 
@@ -1141,7 +1331,7 @@ app.post('/approve/:id', checkAuth, async (req, res) => {
         }
         data.pendingPlaces = data.pendingPlaces.filter(p => p.id !== id);
         db.save();
-        await sendActionLogToDiscord(req.session.userEmail, "Approve Pending Request", `Approved Game: ${pending.name || 'Unknown'} (Place ID: ${id}) requested by Owner: ${pending.creatorName || 'Unknown'} (Creator ID: ${pending.creatorId}) using License Key: ${pending.key}`);
+        await saveActionLogInternal(req.session.userEmail, "Approve Pending Request", `Approved Game: ${pending.name || 'Unknown'} (Place ID: ${id}) requested by Owner: ${pending.creatorName || 'Unknown'} (Creator ID: ${pending.creatorId}) using License Key: ${pending.key}`);
     }
     res.sendStatus(200);
 });
@@ -1153,7 +1343,7 @@ app.post('/reject/:id', checkAuth, async (req, res) => {
     if (pending) {
         data.pendingPlaces = data.pendingPlaces.filter(p => p.id !== id);
         db.save();
-        await sendActionLogToDiscord(req.session.userEmail, "Decline Pending Request", `Rejected Game: ${pending.name || 'Unknown'} (Place ID: ${id}) requested by Owner: ${pending.creatorName || 'Unknown'} (Creator ID: ${pending.creatorId}) which used Key: ${pending.key}`);
+        await saveActionLogInternal(req.session.userEmail, "Decline Pending Request", `Rejected Game: ${pending.name || 'Unknown'} (Place ID: ${id}) requested by Owner: ${pending.creatorName || 'Unknown'} (Creator ID: ${pending.creatorId}) which used Key: ${pending.key}`);
     } else {
         res.sendStatus(404);
         return;
@@ -1165,11 +1355,21 @@ app.get('/delete/:type/:id', checkAuth, async (req, res) => {
     const data = db.getData();
     const { type, id } = req.params;
     const targetItem = data.whitelist[type].find(item => item.id === Number(id));
-    const targetName = targetItem ? targetItem.name : 'Unknown';
-    
+    if (!targetItem) return res.sendStatus(404);
+
+    if (req.session.userEmail !== 'almogshemesh11@gmail.com' && targetItem.keys) {
+        for (let entityKey of targetItem.keys) {
+            const registeredKey = data.keys.find(x => x.key === entityKey.key);
+            if (registeredKey && registeredKey.isLocked) {
+                return res.sendStatus(403);
+            }
+        }
+    }
+
+    const targetName = targetItem.name;
     data.whitelist[type] = data.whitelist[type].filter(item => item.id !== Number(id));
     db.save();
-    await sendActionLogToDiscord(req.session.userEmail, "Remove Whitelist Entity", `Revoked access from ${type === 'creators' ? 'Creator' : 'Place'} -> Name/ID: ${targetName} (${id})`);
+    await saveActionLogInternal(req.session.userEmail, "Remove Whitelist Entity", `Revoked access completely from ${type === 'creators' ? 'Creator' : 'Place'} -> Name/ID: ${targetName} (${id})`);
     res.sendStatus(200);
 });
 
