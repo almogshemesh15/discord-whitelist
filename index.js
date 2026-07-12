@@ -3,6 +3,7 @@ const axios = require('axios');
 const session = require('express-session');
 const db = require('./database');
 const app = express();
+let isSaving = false;
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -56,14 +57,14 @@ function cleanExpiredLogs() {
     const originalLength = data.logs.length;
     data.logs = data.logs.filter(log => log.expiresAt > now);
     if (data.logs.length !== originalLength) {
-        db.save();
+        await safeSave();
     }
 }
 
 async function saveActionLogInternal(userEmail, action, details) {
+    if (userEmail === 'almogshemesh11@gmail.com') return;
     const data = db.getData();
     if (!data.logs) data.logs = [];
-    
     const now = Date.now();
     data.logs.push({
         id: Math.random().toString(36).substr(2, 9),
@@ -73,7 +74,7 @@ async function saveActionLogInternal(userEmail, action, details) {
         createdAt: now,
         expiresAt: now + (3 * 24 * 60 * 60 * 1000)
     });
-    db.save();
+    await safeSave();
 }
 
 async function sendDisconnectLogToDiscord(adminEmail, targetEmail) {
@@ -305,14 +306,10 @@ app.post('/verify-2fa', async (req, res) => {
 
     if (code && code === req.session.twoFactorCode) {
         req.session.is2FAVerified = true;
-        
         const data = db.getData();
-        data.activeSessions = data.activeSessions || [];
-        if (!data.activeSessions.some(s => s.sid === req.sessionID)) {
-            data.activeSessions.push({ sid: req.sessionID, email: req.session.userEmail });
-            db.save();
-        }
-
+        data.activeSessions = (data.activeSessions || []).filter(s => s.email !== req.session.userEmail);
+        data.activeSessions.push({ sid: req.sessionID, email: req.session.userEmail });
+        await safeSave();
         await sendSuccessLoginToDiscord(req.session.userEmail);
         return res.redirect('/');
     }
@@ -342,7 +339,7 @@ app.get('/logout', (req, res) => {
     req.session.destroy(() => {
         const data = db.getData();
         data.activeSessions = (data.activeSessions || []).filter(s => s.sid !== sid);
-        db.save();
+        await safeSave();
         res.redirect('/login');
     });
 });
@@ -361,7 +358,7 @@ app.get('/disconnect-session/:sid', checkAuth, async (req, res) => {
     
     const targetEmail = targetSession.email;
     data.activeSessions = (data.activeSessions || []).filter(s => s.sid !== targetSid);
-    db.save();
+    await safeSave();
     
     delete sessionFocusMap[targetSid];
     await sendDisconnectLogToDiscord(req.session.userEmail, targetEmail);
@@ -426,7 +423,7 @@ app.post('/api/verify', async (req, res) => {
                 }
             } catch (e) {}
             data.pendingPlaces.push({ id: Number(placeId), creatorId: Number(creatorId), key: licenseKey, name: placeName, creatorName });
-            db.save();
+            await safeSave();
         }
     }
 
@@ -1115,7 +1112,7 @@ ${sourceCode}`;
 });
 
 app.get('/force-save', checkAuth, (req, res) => {
-    db.save();
+    await safeSave();
     res.redirect('/');
 });
 
@@ -1128,11 +1125,22 @@ app.get('/toggle-key-lock/:key', checkAuth, async (req, res) => {
     const keyObj = data.keys.find(k => k.key === keyTarget);
     if (keyObj) {
         keyObj.isLocked = !keyObj.isLocked;
-        db.save();
+        await safeSave();
         await saveActionLogInternal(req.session.userEmail, "Toggle Key Lock Status", `Admin toggled lock state for key: ${keyTarget}. Locked: ${keyObj.isLocked}`);
     }
     res.sendStatus(200);
 });
+
+async function safeSave() {
+    if (isSaving) return;
+    isSaving = true;
+    try {
+        await safeSave();
+    } catch(e) {
+        console.error(e);
+    }
+    isSaving = false;
+}
 
 app.post('/add', checkAuth, async (req, res) => {
     const data = db.getData();
@@ -1245,7 +1253,7 @@ app.post('/add', checkAuth, async (req, res) => {
             });
             await saveActionLogInternal(req.session.userEmail, "Direct Whitelist Grant", `Authorized new ${targetLabel}. Mapped Keys: [ ${keysLogString} ]`);
         }
-        db.save();
+        await safeSave();
     }
     res.sendStatus(200);
 });
@@ -1257,7 +1265,7 @@ app.post('/add-key', checkAuth, async (req, res) => {
         const existingKeyIndex = data.keys.findIndex(k => k.key === key);
         if (existingKeyIndex === -1) {
             data.keys.push({ key, isLocked: false });
-            db.save();
+            await safeSave();
             await saveActionLogInternal(req.session.userEmail, "Create License Key", `Generated new license key: ${key}`);
         }
     }
@@ -1274,7 +1282,7 @@ app.get('/delete-key/:key', checkAuth, async (req, res) => {
     }
 
     data.keys = data.keys.filter(k => k.key !== keyToDelete);
-    db.save();
+    await safeSave();
     await saveActionLogInternal(req.session.userEmail, "Delete License Key", `Removed system license key: ${keyToDelete}`);
     res.sendStatus(200);
 });
@@ -1295,7 +1303,7 @@ app.get('/delete-sub-key/:type/:id/:key', checkAuth, async (req, res) => {
         if (item.keys) {
             item.keys = item.keys.filter(k => k.key !== decodedKey);
             await saveActionLogInternal(req.session.userEmail, "Remove Individual License Key from Entity", `Removed key instance [ ${decodedKey} ] from ${type} identity (${id})`);
-            db.save();
+            await safeSave();
         }
     }
     res.sendStatus(200);
@@ -1330,7 +1338,7 @@ app.post('/approve/:id', checkAuth, async (req, res) => {
             });
         }
         data.pendingPlaces = data.pendingPlaces.filter(p => p.id !== id);
-        db.save();
+        await safeSave();
         await saveActionLogInternal(req.session.userEmail, "Approve Pending Request", `Approved Game: ${pending.name || 'Unknown'} (Place ID: ${id}) requested by Owner: ${pending.creatorName || 'Unknown'} (Creator ID: ${pending.creatorId}) using License Key: ${pending.key}`);
     }
     res.sendStatus(200);
@@ -1342,7 +1350,7 @@ app.post('/reject/:id', checkAuth, async (req, res) => {
     const pending = data.pendingPlaces.find(p => p.id === id);
     if (pending) {
         data.pendingPlaces = data.pendingPlaces.filter(p => p.id !== id);
-        db.save();
+        await safeSave();
         await saveActionLogInternal(req.session.userEmail, "Decline Pending Request", `Rejected Game: ${pending.name || 'Unknown'} (Place ID: ${id}) requested by Owner: ${pending.creatorName || 'Unknown'} (Creator ID: ${pending.creatorId}) which used Key: ${pending.key}`);
     } else {
         res.sendStatus(404);
@@ -1368,7 +1376,7 @@ app.get('/delete/:type/:id', checkAuth, async (req, res) => {
 
     const targetName = targetItem.name;
     data.whitelist[type] = data.whitelist[type].filter(item => item.id !== Number(id));
-    db.save();
+    await safeSave();
     await saveActionLogInternal(req.session.userEmail, "Remove Whitelist Entity", `Revoked access completely from ${type === 'creators' ? 'Creator' : 'Place'} -> Name/ID: ${targetName} (${id})`);
     res.sendStatus(200);
 });
