@@ -32,9 +32,10 @@ function parseLocalTime(inputString) {
 
 function checkAuth(req, res, next) {
     if (req.session.isAuthenticated && req.session.is2FAVerified) {
-        const data = db.getData();
+        const data = db.getData() || {};
         if (!data.activeSessions) data.activeSessions = [];
-        const sessionExists = data.activeSessions.some(s => s.sid === req.sessionID);
+        
+        const sessionExists = data.activeSessions.some(s => s && s.sid === req.sessionID);
         if (!sessionExists) {
             return req.session.destroy(() => {
                 res.status(401).json({ error: 'Unauthorized' });
@@ -316,17 +317,15 @@ app.post('/verify-2fa', async (req, res) => {
     if (code && code === req.session.twoFactorCode) {
         req.session.is2FAVerified = true;
         
-        const data = db.getData();
-        // תיקון קריסה: וידוא מערך קיים והשמה פיזית ל-DB
-        if (!data.activeSessions) {
-            data.activeSessions = [];
-        }
+        const data = db.getData() || {};
+        if (!data.activeSessions) data.activeSessions = [];
 
-        // מונע כפילויות: אם כבר קיים סשן עם ה-ID הזה, לא נדחוף אותו שוב
-        if (!data.activeSessions.some(s => s.sid === req.sessionID)) {
-            data.activeSessions.push({ sid: req.sessionID, email: req.session.userEmail });
-            db.save();
-        }
+        // מחיקת חיבורים קודמים של אותו אימייל כדי שלא תופיע פעמיים
+        data.activeSessions = data.activeSessions.filter(s => s && s.email !== req.session.userEmail);
+
+        // הוספת הסשן הנוכחי
+        data.activeSessions.push({ sid: req.sessionID, email: req.session.userEmail });
+        db.save();
 
         await sendSuccessLoginToDiscord(req.session.userEmail);
         return res.redirect('/');
@@ -1424,4 +1423,11 @@ app.get('/delete/:type/:id', checkAuth, async (req, res) => {
     res.sendStatus(200);
 });
 
-app.listen(PORT, () => {});
+db.loadData().then(() => {
+    app.listen(PORT, () => {
+        console.log(`==> Whitelist service successfully running on port ${PORT}`);
+    });
+}).catch(err => {
+    console.error("Critical: Failed to load initial database from Google Sheets", err);
+    app.listen(PORT, () => {});
+});
