@@ -320,8 +320,12 @@ app.get('/logout', (req, res) => {
 app.get('/disconnect-session/:sid', checkAuth, async (req, res) => {
     if (req.session.userEmail !== 'almogshemesh11@gmail.com') return res.status(403).send('Forbidden');
     const targetSid = req.params.sid;
-    const data = db.getData();
     
+    if (targetSid === req.sessionID) {
+        return res.status(400).send('Cannot disconnect your own session from this endpoint');
+    }
+
+    const data = db.getData();
     const targetSession = (data.activeSessions || []).find(s => s.sid === targetSid);
     const targetEmail = targetSession ? targetSession.email : 'Unknown Account';
     
@@ -331,7 +335,7 @@ app.get('/disconnect-session/:sid', checkAuth, async (req, res) => {
     await sendDisconnectLogToDiscord(req.session.userEmail, targetEmail);
     
     req.sessionStore.destroy(targetSid, () => {
-        res.redirect('/');
+        res.sendStatus(200);
     });
 });
 
@@ -426,7 +430,7 @@ app.get('/', checkAuth, (req, res) => {
             table { width: 100%; border-collapse: collapse; margin-top: 5px; }
             th, td { padding: 12px; text-align: left; border-bottom: 1px solid #1e293b; font-size: 14px; vertical-align: top; }
             th { background: #1f2937; color: #94a3b8; }
-            .btn-delete { color: #f43f5e; text-decoration: none; font-weight: bold; }
+            .btn-delete { color: #f43f5e; text-decoration: none; font-weight: bold; cursor: pointer; }
             .group-tag { font-size: 11px; color: #38bdf8; background: #0c4a6e; padding: 2px 6px; border-radius: 4px; display: inline-block; margin-top: 4px; }
             .key-badge { font-size: 11px; color: #fbbf24; background: #78350f; padding: 2px 6px; border-radius: 4px; display: inline-block; margin-top: 4px; }
             .time-tag { font-size: 11px; color: #a78bfa; background: #4c1d95; padding: 2px 6px; border-radius: 4px; display: inline-block; margin-top: 4px; }
@@ -463,7 +467,7 @@ app.get('/', checkAuth, (req, res) => {
                         <input type="text" class="search-input" placeholder="Search keys..." oninput="searchKeys(this)">
                     </div>
                     <div class="key-container" id="keys-box"></div>
-                    <form action="/add-key" method="POST" style="display: flex; flex-direction: column; gap: 8px; align-items: stretch;">
+                    <form onsubmit="handleFormSubmit(event, '/add-key') style="display: flex; flex-direction: column; gap: 8px; align-items: stretch;">
                         <input type="text" name="key" placeholder="Key string" required style="margin-bottom:0;">
                         <button type="submit">Create Key</button>
                     </form>
@@ -480,7 +484,7 @@ app.get('/', checkAuth, (req, res) => {
                 </div>
                 <div class="card" style="grid-column: span 2;">
                     <div class="card-header"><h3>➕ Direct Whitelist Access Grant</h3></div>
-                    <form action="/add" method="POST" style="display: flex; flex-direction: column; gap: 12px;">
+                    <form onsubmit="handleFormSubmit(event, '/add')" style="display: flex; flex-direction: column; gap: 12px;">
                         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
                             <div>
                                 <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:5px;">Target Entity</label>
@@ -547,6 +551,39 @@ app.get('/', checkAuth, (req, res) => {
             }
             setInterval(checkSessionStatus, 3000);
 
+            async function handleFormSubmit(event, url) {
+                event.preventDefault();
+                const form = event.target;
+                const formData = new URLSearchParams(new FormData(form));
+                try {
+                    await fetch(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: formData
+                    });
+                    form.reset();
+                    fetchDashboardData();
+                } catch(e) {}
+            }
+
+            async function executeAction(url) {
+                try {
+                    await fetch(url);
+                    fetchDashboardData();
+                } catch(e) {}
+            }
+
+            async function executePostAction(url, bodyData = {}) {
+                try {
+                    await fetch(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(bodyData)
+                    });
+                    fetchDashboardData();
+                } catch(e) {}
+            }
+
             function updateTimers() {
                 const now = Date.now();
                 document.querySelectorAll('.target-timer').forEach(el => {
@@ -611,7 +648,7 @@ app.get('/', checkAuth, (req, res) => {
                                 \${item.groups ? \`<br><span class="group-tag">Groups: \${item.groups.join(', ')}</span>\` : ''}
                                 \${timeLeft}
                             </td>
-                            <td><a href="/delete/\${type}/\${item.id}" class="btn-delete">Remove</a></td>
+                            <td><span onclick="executeAction('/delete/\${type}/\${item.id}')" class="btn-delete">Remove</span></td>
                         </tr>
                     \`;
                 }).join('');
@@ -633,14 +670,14 @@ app.get('/', checkAuth, (req, res) => {
                         box.innerHTML = data.activeSessions.map(s => \`
                             <div style="display:flex; justify-content:space-between; align-items:center; background:#1f2937; padding:10px; border-radius:6px; border:1px solid #374151;">
                                 <span style="font-size:13px; color:#e2e8f0; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; max-width:180px;">\${s.email} \${s.sid === data.currentSessionId ? '(You)' : ''}</span>
-                                \${s.sid !== data.currentSessionId ? \`<a href="/disconnect-session/\${s.sid}" style="color:#f43f5e; text-decoration:none; font-weight:bold; font-size:12px;">Disconnect</a>\` : '<span style="color:#64748b; font-size:12px;">Active</span>'}
+                                \${s.sid !== data.currentSessionId ? \`<span onclick="executeAction('/disconnect-session/\${s.sid}')" style="color:#f43f5e; text-decoration:none; font-weight:bold; font-size:12px; cursor:pointer;">Disconnect</span>\` : '<span style="color:#64748b; font-size:12px;">Active</span>'}
                             </div>
                         \`).join('') || '<span style="color:#64748b; font-size:13px;">No active sessions recorded</span>';
                     }
 
                     const keysBox = document.getElementById('keys-box');
                     keysBox.innerHTML = data.keys.map(k => \`
-                        <span class="key-tag-manage" data-search="\${k.key.toLowerCase()}">\${k.key} <a href="/delete-key/\${k.key}" style="color:#f43f5e;margin-left:5px;text-decoration:none;">×</a></span>
+                        <span class="key-tag-manage" data-search="\${k.key.toLowerCase()}">\${k.key} <span onclick="executeAction('/delete-key/\${k.key}')" style="color:#f43f5e;margin-left:5px;text-decoration:none;cursor:pointer;">×</span></span>
                     \`).join('') || '<span style="color:#64748b;font-size:13px;">No keys generated</span>';
 
                     currentKeysMarkup = data.keys.map(k => \`<option value="\${k.key}">\${k.key}</option>\`).join('');
@@ -655,13 +692,13 @@ app.get('/', checkAuth, (req, res) => {
                             </td>
                             <td>
                                 <div style="display:flex; flex-direction:column; gap:8px;">
-                                    <form action="/approve/\${item.id}" method="POST" style="display:flex; gap:5px; align-items:center; margin-bottom:0;">
-                                        <input type="datetime-local" name="expiresAt" style="padding:4px; margin-bottom:0; width:160px; font-size:12px; height:28px;">
-                                        <button type="submit" style="background:none; border:none; padding:0; width:auto; font-size:14px; cursor:pointer; color:#10b981; font-weight:bold;">Approve</button>
-                                    </form>
-                                    <form action="/reject/\${item.id}" method="POST" style="margin-bottom:0;">
-                                        <button type="submit" style="background:none; border:none; padding:0; width:auto; font-size:14px; cursor:pointer; text-align:left; color:#f43f5e; font-weight:bold;">Decline</button>
-                                    </form>
+                                    <div style="display:flex; gap:5px; align-items:center; margin-bottom:0;">
+                                        <input type="datetime-local" id="exp-\${item.id}" style="padding:4px; margin-bottom:0; width:160px; font-size:12px; height:28px;">
+                                        <span onclick="executePostAction('/approve/\${item.id}', { expiresAt: document.getElementById('exp-\${item.id}').value })" style="font-size:14px; cursor:pointer; color:#10b981; font-weight:bold;">Approve</span>
+                                    </div>
+                                    <div style="margin-bottom:0;">
+                                        <span onclick="executePostAction('/reject/\${item.id}')" style="font-size:14px; cursor:pointer; text-align:left; color:#f43f5e; font-weight:bold;">Decline</span>
+                                    </div>
                                 </div>
                             </td>
                         </tr>
@@ -797,7 +834,7 @@ app.get('/obfuscate', checkAuth, (req, res) => {
 app.post('/obfuscate', checkAuth, async (req, res) => {
     const { licenseKey, sourceCode } = req.body;
     
-    await sendActionLogToDiscord(req.session.userEmail, "Code Obfuscation / Injection", `License Key: ${licenseKey}`);
+    await sendActionLogToDiscord(req.session.userEmail, "Code Obfuscation / Injection", `Injected verification flow using License Key: ${licenseKey}`);
 
     const injectedTemplate = `task.spawn(function()
 	local function verifyServer()
@@ -1010,6 +1047,9 @@ app.post('/add', checkAuth, async (req, res) => {
             }
         }
 
+        const keysLogString = itemKeys.length > 0 ? itemKeys.map(k => `${k.key} (${k.expiresAt ? new Date(k.expiresAt).toLocaleString('he-IL') : 'Permanent'})`).join(', ') : 'None';
+        const targetLabel = type === 'creators' ? `Creator (Name: ${name || 'Unknown'}, ID: ${id})` : `Place ID: ${id}`;
+        
         const existingIndex = data.whitelist[type].findIndex(x => x.id === id);
         
         if (existingIndex !== -1) {
@@ -1032,6 +1072,7 @@ app.post('/add', checkAuth, async (req, res) => {
                 keys: updatedKeys,
                 expiresAt: overallExpiresAt || currentItem.expiresAt
             };
+            await sendActionLogToDiscord(req.session.userEmail, "Updated Whitelist Entity", `Updated ${targetLabel}. Associated Keys: [ ${keysLogString} ]`);
         } else {
             data.whitelist[type].push({ 
                 id, 
@@ -1040,11 +1081,11 @@ app.post('/add', checkAuth, async (req, res) => {
                 keys: itemKeys,
                 expiresAt: overallExpiresAt
             });
+            await sendActionLogToDiscord(req.session.userEmail, "Direct Whitelist Grant", `Authorized new ${targetLabel}. Mapped Keys: [ ${keysLogString} ]`);
         }
         db.save();
-        await sendActionLogToDiscord(req.session.userEmail, "Direct Whitelist Grant", `Type: ${type}, Input: ${input} (ID: ${id})`);
     }
-    res.redirect('/');
+    res.sendStatus(200);
 });
 
 app.post('/add-key', checkAuth, async (req, res) => {
@@ -1055,10 +1096,10 @@ app.post('/add-key', checkAuth, async (req, res) => {
         if (existingKeyIndex === -1) {
             data.keys.push({ key });
             db.save();
-            await sendActionLogToDiscord(req.session.userEmail, "Create License Key", `Key: ${key}`);
+            await sendActionLogToDiscord(req.session.userEmail, "Create License Key", `Generated new license key: ${key}`);
         }
     }
-    res.redirect('/');
+    res.sendStatus(200);
 });
 
 app.get('/delete-key/:key', checkAuth, async (req, res) => {
@@ -1066,8 +1107,8 @@ app.get('/delete-key/:key', checkAuth, async (req, res) => {
     const keyToDelete = req.params.key;
     data.keys = data.keys.filter(k => k.key !== keyToDelete);
     db.save();
-    await sendActionLogToDiscord(req.session.userEmail, "Delete License Key", `Key: ${keyToDelete}`);
-    res.redirect('/');
+    await sendActionLogToDiscord(req.session.userEmail, "Delete License Key", `Removed system license key: ${keyToDelete}`);
+    res.sendStatus(200);
 });
 
 app.post('/approve/:id', checkAuth, async (req, res) => {
@@ -1100,29 +1141,36 @@ app.post('/approve/:id', checkAuth, async (req, res) => {
         }
         data.pendingPlaces = data.pendingPlaces.filter(p => p.id !== id);
         db.save();
-        await sendActionLogToDiscord(req.session.userEmail, "Approve Pending Request", `Place ID: ${id}, Key used: ${pending.key}`);
+        await sendActionLogToDiscord(req.session.userEmail, "Approve Pending Request", `Approved Game: ${pending.name || 'Unknown'} (Place ID: ${id}) requested by Owner: ${pending.creatorName || 'Unknown'} (Creator ID: ${pending.creatorId}) using License Key: ${pending.key}`);
     }
-    res.redirect('/');
+    res.sendStatus(200);
 });
 
 app.post('/reject/:id', checkAuth, async (req, res) => {
     const data = db.getData();
     const id = Number(req.params.id);
     const pending = data.pendingPlaces.find(p => p.id === id);
-    const keyUsed = pending ? pending.key : 'Unknown';
-    data.pendingPlaces = data.pendingPlaces.filter(p => p.id !== id);
-    db.save();
-    await sendActionLogToDiscord(req.session.userEmail, "Decline Pending Request", `Place ID: ${id}, Key used: ${keyUsed}`);
-    res.redirect('/');
+    if (pending) {
+        data.pendingPlaces = data.pendingPlaces.filter(p => p.id !== id);
+        db.save();
+        await sendActionLogToDiscord(req.session.userEmail, "Decline Pending Request", `Rejected Game: ${pending.name || 'Unknown'} (Place ID: ${id}) requested by Owner: ${pending.creatorName || 'Unknown'} (Creator ID: ${pending.creatorId}) which used Key: ${pending.key}`);
+    } else {
+        res.sendStatus(404);
+        return;
+    }
+    res.sendStatus(200);
 });
 
 app.get('/delete/:type/:id', checkAuth, async (req, res) => {
     const data = db.getData();
     const { type, id } = req.params;
+    const targetItem = data.whitelist[type].find(item => item.id === Number(id));
+    const targetName = targetItem ? targetItem.name : 'Unknown';
+    
     data.whitelist[type] = data.whitelist[type].filter(item => item.id !== Number(id));
     db.save();
-    await sendActionLogToDiscord(req.session.userEmail, "Remove Whitelist Entity", `Type: ${type}, ID: ${id}`);
-    res.redirect('/');
+    await sendActionLogToDiscord(req.session.userEmail, "Remove Whitelist Entity", `Revoked access from ${type === 'creators' ? 'Creator' : 'Place'} -> Name/ID: ${targetName} (${id})`);
+    res.sendStatus(200);
 });
 
 app.listen(PORT, () => {});
