@@ -325,7 +325,7 @@ app.post('/verify-2fa', async (req, res) => {
         
         const data = db.getData();
         data.activeSessions = data.activeSessions || [];
-        if (!data.activeSessions.some(s => s.sid === req.sessionID)) {
+        if (data && data.activeSessions && data.activeSessions.some(s => s.sid === req.sessionID)) {
             data.activeSessions.push({ sid: req.sessionID, email: req.session.userEmail });
             db.save();
         }
