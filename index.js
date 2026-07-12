@@ -4,6 +4,19 @@ const session = require('express-session');
 const db = require('./database');
 const app = express();
 
+// If any route throws an error that isn't caught locally, Node will normally
+// kill the entire process on an unhandled promise rejection. On Render that
+// looks exactly like your symptom: the whole site goes down with a 502 for
+// everyone until the platform restarts the process. These two handlers stop
+// that from happening and print the real error to the Render logs so you can
+// see what actually broke.
+process.on('unhandledRejection', (reason) => {
+    console.error('UNHANDLED REJECTION:', reason);
+});
+process.on('uncaughtException', (err) => {
+    console.error('UNCAUGHT EXCEPTION:', err);
+});
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -1256,7 +1269,7 @@ app.post('/add', checkAuth, async (req, res) => {
 
 app.post('/add-key', checkAuth, async (req, res) => {
     const data = db.getData();
-    const key = req.body.key.trim();
+    const key = (req.body.key || '').trim();
     if (key) {
         const existingKeyIndex = data.keys.findIndex(k => k.key === key);
         if (existingKeyIndex === -1) {
@@ -1377,4 +1390,14 @@ app.get('/delete/:type/:id', checkAuth, async (req, res) => {
     res.sendStatus(200);
 });
 
-app.listen(PORT, () => {});
+// Safety net: if a route still throws synchronously and Express catches it,
+// this prints it to the logs and returns a normal error page instead of a
+// silent crash.
+app.use((err, req, res, next) => {
+    console.error('EXPRESS ERROR HANDLER:', err);
+    res.status(500).send('Something went wrong. Check the server logs.');
+});
+
+app.listen(PORT, () => {
+    console.log(`Server listening on port ${PORT}`);
+});
