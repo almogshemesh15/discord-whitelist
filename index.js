@@ -7,9 +7,18 @@ const db = require('./database');
 const app = express();
 
 const redisClient = createClient({
-    url: process.env.REDIS_URL
+    url: process.env.REDIS_URL,
+    socket: {
+        tls: true, // זה פותר את בעיית ה-Socket Closed
+        rejectUnauthorized: false
+    }
 });
-redisClient.connect().catch(console.error);
+
+redisClient.on('error', (err) => console.log('Redis Client Error', err));
+
+redisClient.connect().catch((err) => {
+    console.error("Failed to connect to Redis:", err);
+});
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
