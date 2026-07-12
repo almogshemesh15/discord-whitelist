@@ -57,6 +57,22 @@ async function send2FAToDiscord(email, code) {
     } catch (e) {}
 }
 
+async function sendSuccessLoginToDiscord(email) {
+    try {
+        await axios.post(DISCORD_WEBHOOK_URL, {
+            embeds: [{
+                title: "✅ Successful Login Verified",
+                color: 1049410,
+                fields: [
+                    { name: "📧 Authenticated Email", value: email, inline: true },
+                    { name: "🛡️ Status", value: "Access Granted", inline: true }
+                ],
+                timestamp: new Date()
+            }]
+        });
+    } catch (e) {}
+}
+
 app.get('/login', (req, res) => {
     if (req.session.isAuthenticated && req.session.is2FAVerified) {
         return res.redirect('/');
@@ -126,6 +142,8 @@ app.get('/verify-2fa', (req, res) => {
     if (!req.session.isAuthenticated) return res.redirect('/login');
     if (req.session.is2FAVerified) return res.redirect('/');
 
+    const cooldown = Math.max(0, Math.ceil((req.session.twoFactorExpires - Date.now()) / 1000));
+
     res.send(`
     <!DOCTYPE html>
     <html lang="en">
@@ -140,7 +158,7 @@ app.get('/verify-2fa', (req, res) => {
             input { width: 100%; padding: 12px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: white; text-align: center; font-size: 20px; letter-spacing: 5px; box-sizing: border-box; margin-bottom: 15px; }
             button { width: 100%; background: #d97706; color: white; border: none; padding: 12px; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 15px; margin-bottom: 10px; }
             button:hover { background: #b45309; }
-            .btn-resend { background: #1f2937; border: 1px solid #374151; color: #94a3b8; width: 100%; padding: 10px; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 13px; text-decoration: none; display: block; box-sizing: border-box; }
+            .btn-resend { background: #1f2937; border: 1px solid #374151; color: #94a3b8; width: 100%; padding: 10px; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 13px; text-decoration: none; display: block; box-sizing: border-box; text-align: center; }
             .btn-resend:hover { background: #374151; color: white; }
             .error { color: #f43f5e; font-size: 13px; margin-bottom: 10px; }
         </style>
@@ -153,14 +171,35 @@ app.get('/verify-2fa', (req, res) => {
                 <input type="text" name="code" maxlength="6" required placeholder="000000" autocomplete="off">
                 <button type="submit">Verify & Access</button>
             </form>
-            <a href="/resend-2fa" class="btn-resend">Resend Verification Code</a>
+            <a href="/resend-2fa" id="resend-btn" class="btn-resend">Resend Verification Code</a>
         </div>
+        <script>
+            const cooldownTime = ${cooldown};
+            const resendBtn = document.getElementById('resend-btn');
+            if (cooldownTime > 0) {
+                let timeLeft = cooldownTime;
+                resendBtn.style.pointerEvents = 'none';
+                resendBtn.style.opacity = '0.5';
+                resendBtn.innerText = 'Resend Verification Code (' + timeLeft + 's)';
+                const timer = setInterval(() => {
+                    timeLeft--;
+                    if (timeLeft <= 0) {
+                        clearInterval(timer);
+                        resendBtn.style.pointerEvents = 'auto';
+                        resendBtn.style.opacity = '1';
+                        resendBtn.innerText = 'Resend Verification Code';
+                    } else {
+                        resendBtn.innerText = 'Resend Verification Code (' + timeLeft + 's)';
+                    }
+                }, 1000);
+            }
+        </script>
     </body>
     </html>
     `);
 });
 
-app.post('/verify-2fa', (req, res) => {
+app.post('/verify-2fa', async (req, res) => {
     if (!req.session.isAuthenticated) return res.redirect('/login');
     const { code } = req.body;
 
@@ -175,6 +214,15 @@ app.post('/verify-2fa', (req, res) => {
 
     if (code && code === req.session.twoFactorCode) {
         req.session.is2FAVerified = true;
+        
+        const data = db.getData();
+        data.activeSessions = data.activeSessions || [];
+        if (!data.activeSessions.some(s => s.sid === req.sessionID)) {
+            data.activeSessions.push({ sid: req.sessionID, email: req.session.userEmail });
+            db.save();
+        }
+
+        await sendSuccessLoginToDiscord(req.session.userEmail);
         return res.redirect('/');
     }
 
@@ -198,8 +246,24 @@ app.get('/resend-2fa', async (req, res) => {
 });
 
 app.get('/logout', (req, res) => {
+    const sid = req.sessionID;
     req.session.destroy(() => {
+        const data = db.getData();
+        data.activeSessions = (data.activeSessions || []).filter(s => s.sid !== sid);
+        db.save();
         res.redirect('/login');
+    });
+});
+
+app.get('/disconnect-session/:sid', checkAuth, (req, res) => {
+    if (req.session.userEmail !== 'almogshemesh11@gmail.com') return res.redirect('/');
+    const targetSid = req.params.sid;
+    const data = db.getData();
+    data.activeSessions = (data.activeSessions || []).filter(s => s.sid !== targetSid);
+    db.save();
+    
+    req.sessionStore.destroy(targetSid, () => {
+        res.redirect('/');
     });
 });
 
@@ -262,6 +326,7 @@ app.post('/api/verify', async (req, res) => {
 app.get('/', checkAuth, (req, res) => {
     db.checkExpiration();
     const data = db.getData();
+    data.activeSessions = data.activeSessions || [];
     
     const keyOptions = data.keys.map(k => `<option value="${k.key}">${k.key}</option>`).join('');
     const keyTags = data.keys.map(k => {
@@ -346,6 +411,27 @@ app.get('/', checkAuth, (req, res) => {
         `;
     }).join('');
 
+    let adminActiveSessionsHtml = '';
+    if (req.session.userEmail === 'almogshemesh11@gmail.com') {
+        const sessionRows = data.activeSessions.map(s => `
+            <div style="display:flex; justify-content:space-between; align-items:center; background:#1f2937; padding:10px; border-radius:6px; border:1px solid #374151;">
+                <span style="font-size:13px; color:#e2e8f0; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; max-width:180px;">${s.email} ${s.sid === req.sessionID ? '(You)' : ''}</span>
+                ${s.sid !== req.sessionID ? `<a href="/disconnect-session/${s.sid}" style="color:#f43f5e; text-decoration:none; font-weight:bold; font-size:12px;">Disconnect</a>` : '<span style="color:#64748b; font-size:12px;">Active</span>'}
+            </div>
+        `).join('');
+
+        adminActiveSessionsHtml = `
+            <div class="card" style="grid-column: span 2;">
+                <div class="card-header">
+                    <h3>👥 Active Connected Users</h3>
+                </div>
+                <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap:12px; margin-top:10px; max-height:200px; overflow-y:auto;">
+                    ${sessionRows || '<span style="color:#64748b; font-size:13px;">No active sessions recorded</span>'}
+                </div>
+            </div>
+        `;
+    }
+
     res.send(`
     <!DOCTYPE html>
     <html lang="en">
@@ -408,6 +494,7 @@ app.get('/', checkAuth, (req, res) => {
                 </div>
             </div>
             <div class="grid">
+                ${adminActiveSessionsHtml}
                 <div class="card">
                     <div class="card-header">
                         <h3>🔑 System License Keys</h3>
@@ -604,7 +691,7 @@ app.get('/obfuscate', checkAuth, (req, res) => {
                     </select>
                     
                     <label>Paste your Lua Source Code</label>
-                    <textarea name="sourceCode" placeholder="-- Paste your script here" required></textarea>
+                    <textarea name="sourceCode" placeholder="Paste your script here" required></textarea>
                     
                     <button type="submit">Inject Whitelist Verification</button>
                 </form>
