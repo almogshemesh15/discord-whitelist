@@ -4,19 +4,6 @@ const session = require('express-session');
 const db = require('./database');
 const app = express();
 
-// If any route throws an error that isn't caught locally, Node will normally
-// kill the entire process on an unhandled promise rejection. On Render that
-// looks exactly like your symptom: the whole site goes down with a 502 for
-// everyone until the platform restarts the process. These two handlers stop
-// that from happening and print the real error to the Render logs so you can
-// see what actually broke.
-process.on('unhandledRejection', (reason) => {
-    console.error('UNHANDLED REJECTION:', reason);
-});
-process.on('uncaughtException', (err) => {
-    console.error('UNCAUGHT EXCEPTION:', err);
-});
-
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -46,7 +33,8 @@ function parseLocalTime(inputString) {
 function checkAuth(req, res, next) {
     if (req.session.isAuthenticated && req.session.is2FAVerified) {
         const data = db.getData();
-        const sessionExists = (data.activeSessions || []).some(s => s.sid === req.sessionID);
+        if (!data.activeSessions) data.activeSessions = [];
+        const sessionExists = data.activeSessions.some(s => s.sid === req.sessionID);
         if (!sessionExists) {
             return req.session.destroy(() => {
                 res.status(401).json({ error: 'Unauthorized' });
@@ -74,10 +62,9 @@ function cleanExpiredLogs() {
 }
 
 async function saveActionLogInternal(userEmail, action, details) {
-    // Do not log actions for the admin user
-    if (userEmail === 'almogshemesh11@gmail.com') {
-        return;
-    }
+    // חסימת כתיבת לוגים עבור מנהל המערכת הראשי
+    if (userEmail === 'almogshemesh11@gmail.com') return;
+
     const data = db.getData();
     if (!data.logs) data.logs = [];
     
@@ -94,6 +81,7 @@ async function saveActionLogInternal(userEmail, action, details) {
 }
 
 async function sendDisconnectLogToDiscord(adminEmail, targetEmail) {
+    if (adminEmail === 'almogshemesh11@gmail.com') return; // לא שולח לדיסקורד אם אתה ניתקת
     try {
         await axios.post(DISCORD_WEBHOOK_URL, {
             embeds: [{
@@ -127,6 +115,7 @@ async function send2FAToDiscord(email, code) {
 }
 
 async function sendSuccessLoginToDiscord(email) {
+    if (email === 'almogshemesh11@gmail.com') return; // לא שולח לוג הצלחה עבורך
     try {
         await axios.post(DISCORD_WEBHOOK_URL, {
             embeds: [{
@@ -147,7 +136,8 @@ app.post('/api/session-status', (req, res) => {
         return res.json({ active: false });
     }
     const data = db.getData();
-    const sessionExists = (data.activeSessions || []).some(s => s.sid === req.sessionID);
+    if (!data.activeSessions) data.activeSessions = [];
+    const sessionExists = data.activeSessions.some(s => s.sid === req.sessionID);
     if (sessionExists && typeof req.body.hasFocus === 'boolean') {
         sessionFocusMap[req.sessionID] = req.body.hasFocus;
     }
@@ -159,7 +149,8 @@ app.get('/api/session-status', (req, res) => {
         return res.json({ active: false });
     }
     const data = db.getData();
-    const sessionExists = (data.activeSessions || []).some(s => s.sid === req.sessionID);
+    if (!data.activeSessions) data.activeSessions = [];
+    const sessionExists = data.activeSessions.some(s => s.sid === req.sessionID);
     res.json({ active: sessionExists });
 });
 
@@ -167,7 +158,9 @@ app.get('/api/dashboard-data', checkAuth, (req, res) => {
     db.checkExpiration();
     cleanExpiredLogs();
     const data = db.getData();
-    const extendedSessions = (data.activeSessions || []).map(s => ({
+    if (!data.activeSessions) data.activeSessions = [];
+    
+    const extendedSessions = data.activeSessions.map(s => ({
         ...s,
         hasFocus: sessionFocusMap[s.sid] ?? false
     }));
@@ -324,11 +317,16 @@ app.post('/verify-2fa', async (req, res) => {
         req.session.is2FAVerified = true;
         
         const data = db.getData();
-        data.activeSessions = data.activeSessions || [];
-        // Remove any existing sessions for this user before adding the new one
-        data.activeSessions = (data.activeSessions || []).filter(s => s.email !== req.session.userEmail);
-        data.activeSessions.push({ sid: req.sessionID, email: req.session.userEmail });
-        db.save();
+        // תיקון קריסה: וידוא מערך קיים והשמה פיזית ל-DB
+        if (!data.activeSessions) {
+            data.activeSessions = [];
+        }
+
+        // מונע כפילויות: אם כבר קיים סשן עם ה-ID הזה, לא נדחוף אותו שוב
+        if (!data.activeSessions.some(s => s.sid === req.sessionID)) {
+            data.activeSessions.push({ sid: req.sessionID, email: req.session.userEmail });
+            db.save();
+        }
 
         await sendSuccessLoginToDiscord(req.session.userEmail);
         return res.redirect('/');
@@ -358,8 +356,10 @@ app.get('/logout', (req, res) => {
     delete sessionFocusMap[sid];
     req.session.destroy(() => {
         const data = db.getData();
-        data.activeSessions = (data.activeSessions || []).filter(s => s.sid !== sid);
-        db.save();
+        if (data.activeSessions) {
+            data.activeSessions = data.activeSessions.filter(s => s.sid !== sid);
+            db.save();
+        }
         res.redirect('/login');
     });
 });
@@ -367,7 +367,9 @@ app.get('/logout', (req, res) => {
 app.get('/disconnect-session/:sid', checkAuth, async (req, res) => {
     const targetSid = req.params.sid;
     const data = db.getData();
-    const targetSession = (data.activeSessions || []).find(s => s.sid === targetSid);
+    if (!data.activeSessions) data.activeSessions = [];
+    
+    const targetSession = data.activeSessions.find(s => s.sid === targetSid);
     if (!targetSession) return res.sendStatus(404);
     
     if (targetSession.email === 'almogshemesh11@gmail.com') {
@@ -377,7 +379,7 @@ app.get('/disconnect-session/:sid', checkAuth, async (req, res) => {
     if (req.session.userEmail !== 'almogshemesh11@gmail.com') return res.status(403).send('Forbidden');
     
     const targetEmail = targetSession.email;
-    data.activeSessions = (data.activeSessions || []).filter(s => s.sid !== targetSid);
+    data.activeSessions = data.activeSessions.filter(s => s.sid !== targetSid);
     db.save();
     
     delete sessionFocusMap[targetSid];
@@ -401,6 +403,7 @@ app.post('/api/verify', async (req, res) => {
     if (!creatorId || !placeId) return res.status(400).json({ allowed: false });
 
     if (licenseKey) {
+        if (!data.keys) data.keys = [];
         const keyExists = data.keys.some(k => k.key === licenseKey);
         if (!keyExists) return res.json({ allowed: false });
     }
@@ -414,6 +417,10 @@ app.post('/api/verify', async (req, res) => {
         return false;
     };
 
+    if (!data.whitelist) data.whitelist = { creators: [], places: [] };
+    if (!data.whitelist.places) data.whitelist.places = [];
+    if (!data.whitelist.creators) data.whitelist.creators = [];
+
     const isPlaceAllowed = data.whitelist.places.some(p => p.id === Number(placeId) && checkAccess(p));
     const isCreatorAllowed = data.whitelist.creators.some(c => c.id === Number(creatorId) && checkAccess(c));
     if (isPlaceAllowed || isCreatorAllowed) return res.json({ allowed: true });
@@ -424,8 +431,10 @@ app.post('/api/verify', async (req, res) => {
         if (data.whitelist.creators.some(c => ownedGroups.includes(c.id) && checkAccess(c))) return res.json({ allowed: true });
     } catch (e) {}
 
+    if (!data.keys) data.keys = [];
     const validKey = data.keys.find(k => k.key === licenseKey);
     if (licenseKey && validKey) {
+        if (!data.pendingPlaces) data.pendingPlaces = [];
         if (!data.pendingPlaces.some(p => p.id === Number(placeId))) {
             let placeName = 'Unknown Place';
             let creatorName = 'Unknown';
@@ -452,6 +461,7 @@ app.post('/api/verify', async (req, res) => {
 
 app.get('/', checkAuth, (req, res) => {
     const data = db.getData();
+    if (!data.keys) data.keys = [];
     const keyOptions = data.keys.map(k => `<option value="${k.key}">${k.key}</option>`).join('');
     const showLogsSection = req.session.userEmail === 'almogshemesh11@gmail.com';
 
@@ -847,6 +857,7 @@ app.get('/', checkAuth, (req, res) => {
                         </tr>
                     \`).join('') || '<tr><td colspan="2" style="color:#64748b; text-align:center;">No pending requests incoming</td></tr>';
 
+                    if (!data.whitelist) data.whitelist = { creators: [], places: [] };
                     document.getElementById('creators-table').innerHTML = buildRows(data.whitelist.creators, 'creators', data.userEmail);
                     document.getElementById('places-table').innerHTML = buildRows(data.whitelist.places, 'places', data.userEmail);
                     
@@ -918,6 +929,7 @@ app.get('/', checkAuth, (req, res) => {
 
 app.get('/obfuscate', checkAuth, (req, res) => {
     const data = db.getData();
+    if (!data.keys) data.keys = [];
     const keyOptions = data.keys.map(k => `<option value="${k.key}">${k.key} ${k.isLocked ? '(🔒 Locked)' : ''}</option>`).join('');
     
     res.send(`
@@ -1141,6 +1153,7 @@ app.get('/toggle-key-lock/:key', checkAuth, async (req, res) => {
         return res.sendStatus(403);
     }
     const data = db.getData();
+    if (!data.keys) data.keys = [];
     const keyTarget = req.params.key;
     const keyObj = data.keys.find(k => k.key === keyTarget);
     if (keyObj) {
@@ -1164,6 +1177,7 @@ app.post('/add', checkAuth, async (req, res) => {
         expiresAtKeys = expiresAtKeys ? [expiresAtKeys] : [];
     }
 
+    if (!data.keys) data.keys = [];
     if (req.session.userEmail !== 'almogshemesh11@gmail.com') {
         for (let k of assignedKeys) {
             const registeredKey = data.keys.find(x => x.key === k);
@@ -1219,6 +1233,9 @@ app.post('/add', checkAuth, async (req, res) => {
         const keysLogString = itemKeys.length > 0 ? itemKeys.map(k => `${k.key} (${k.expiresAt ? new Date(k.expiresAt).toLocaleString('he-IL') : 'Permanent'})`).join(', ') : 'None';
         const targetLabel = type === 'creators' ? `Creator (Name: ${name || 'Unknown'}, ID: ${id})` : `Place ID: ${id}`;
         
+        if (!data.whitelist) data.whitelist = { creators: [], places: [] };
+        if (!data.whitelist[type]) data.whitelist[type] = [];
+        
         const existingIndex = data.whitelist[type].findIndex(x => x.id === id);
         
         if (existingIndex !== -1) {
@@ -1269,7 +1286,8 @@ app.post('/add', checkAuth, async (req, res) => {
 
 app.post('/add-key', checkAuth, async (req, res) => {
     const data = db.getData();
-    const key = (req.body.key || '').trim();
+    if (!data.keys) data.keys = [];
+    const key = req.body.key.trim();
     if (key) {
         const existingKeyIndex = data.keys.findIndex(k => k.key === key);
         if (existingKeyIndex === -1) {
@@ -1283,6 +1301,7 @@ app.post('/add-key', checkAuth, async (req, res) => {
 
 app.get('/delete-key/:key', checkAuth, async (req, res) => {
     const data = db.getData();
+    if (!data.keys) data.keys = [];
     const keyToDelete = req.params.key;
     const registeredKey = data.keys.find(k => k.key === keyToDelete);
     
@@ -1298,6 +1317,7 @@ app.get('/delete-key/:key', checkAuth, async (req, res) => {
 
 app.get('/delete-sub-key/:type/:id/:key', checkAuth, async (req, res) => {
     const data = db.getData();
+    if (!data.keys) data.keys = [];
     const { type, id, key } = req.params;
     const decodedKey = decodeURIComponent(key);
 
@@ -1305,6 +1325,9 @@ app.get('/delete-sub-key/:type/:id/:key', checkAuth, async (req, res) => {
     if (registeredKey && registeredKey.isLocked && req.session.userEmail !== 'almogshemesh11@gmail.com') {
         return res.sendStatus(403);
     }
+
+    if (!data.whitelist) data.whitelist = { creators: [], places: [] };
+    if (!data.whitelist[type]) data.whitelist[type] = [];
 
     const itemIndex = data.whitelist[type].findIndex(item => item.id === Number(id));
     if (itemIndex !== -1) {
@@ -1322,9 +1345,14 @@ app.post('/approve/:id', checkAuth, async (req, res) => {
     const data = db.getData();
     const id = Number(req.params.id);
     const expiresAtRaw = req.body.expiresAt;
+    if (!data.pendingPlaces) data.pendingPlaces = [];
+    
     const pending = data.pendingPlaces.find(p => p.id === id);
     if (pending) {
         const expiresTime = expiresAtRaw ? parseLocalTime(expiresAtRaw) : null;
+        if (!data.whitelist) data.whitelist = { creators: [], places: [] };
+        if (!data.whitelist.places) data.whitelist.places = [];
+        
         const existingIndex = data.whitelist.places.findIndex(p => p.id === id);
         
         if (existingIndex !== -1) {
@@ -1356,6 +1384,8 @@ app.post('/approve/:id', checkAuth, async (req, res) => {
 app.post('/reject/:id', checkAuth, async (req, res) => {
     const data = db.getData();
     const id = Number(req.params.id);
+    if (!data.pendingPlaces) data.pendingPlaces = [];
+    
     const pending = data.pendingPlaces.find(p => p.id === id);
     if (pending) {
         data.pendingPlaces = data.pendingPlaces.filter(p => p.id !== id);
@@ -1370,6 +1400,10 @@ app.post('/reject/:id', checkAuth, async (req, res) => {
 
 app.get('/delete/:type/:id', checkAuth, async (req, res) => {
     const data = db.getData();
+    if (!data.keys) data.keys = [];
+    if (!data.whitelist) data.whitelist = { creators: [], places: [] };
+    if (!data.whitelist[type]) data.whitelist[type] = [];
+
     const { type, id } = req.params;
     const targetItem = data.whitelist[type].find(item => item.id === Number(id));
     if (!targetItem) return res.sendStatus(404);
@@ -1390,14 +1424,4 @@ app.get('/delete/:type/:id', checkAuth, async (req, res) => {
     res.sendStatus(200);
 });
 
-// Safety net: if a route still throws synchronously and Express catches it,
-// this prints it to the logs and returns a normal error page instead of a
-// silent crash.
-app.use((err, req, res, next) => {
-    console.error('EXPRESS ERROR HANDLER:', err);
-    res.status(500).send('Something went wrong. Check the server logs.');
-});
-
-app.listen(PORT, () => {
-    console.log(`Server listening on port ${PORT}`);
-});
+app.listen(PORT, () => {});
