@@ -34,7 +34,7 @@ function checkAuth(req, res, next) {
         const sessionExists = (data.activeSessions || []).some(s => s.sid === req.sessionID);
         if (!sessionExists) {
             return req.session.destroy(() => {
-                res.redirect('/login');
+                res.status(401).json({ error: 'Unauthorized' });
             });
         }
         return next();
@@ -113,6 +113,28 @@ async function sendSuccessLoginToDiscord(email) {
         });
     } catch (e) {}
 }
+
+app.get('/api/session-status', (req, res) => {
+    if (!req.session.isAuthenticated || !req.session.is2FAVerified) {
+        return res.json({ active: false });
+    }
+    const data = db.getData();
+    const sessionExists = (data.activeSessions || []).some(s => s.sid === req.sessionID);
+    res.json({ active: sessionExists });
+});
+
+app.get('/api/dashboard-data', checkAuth, (req, res) => {
+    db.checkExpiration();
+    const data = db.getData();
+    res.json({
+        activeSessions: data.activeSessions || [],
+        keys: data.keys || [],
+        pendingPlaces: data.pendingPlaces || [],
+        whitelist: data.whitelist || { creators: [], places: [] },
+        currentSessionId: req.sessionID,
+        userEmail: req.session.userEmail
+    });
+});
 
 app.get('/login', (req, res) => {
     if (req.session.isAuthenticated && req.session.is2FAVerified) {
@@ -201,7 +223,6 @@ app.get('/verify-2fa', (req, res) => {
             button:hover { background: #b45309; }
             .btn-resend { background: #1f2937; border: 1px solid #374151; color: #94a3b8; width: 100%; padding: 10px; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 13px; text-decoration: none; display: block; box-sizing: border-box; text-align: center; }
             .btn-resend:hover { background: #374151; color: white; }
-            .error { color: #f43f5e; font-size: 13px; margin-bottom: 10px; }
         </style>
     </head>
     <body>
@@ -297,7 +318,7 @@ app.get('/logout', (req, res) => {
 });
 
 app.get('/disconnect-session/:sid', checkAuth, async (req, res) => {
-    if (req.session.userEmail !== 'almogshemesh11@gmail.com') return res.redirect('/');
+    if (req.session.userEmail !== 'almogshemesh11@gmail.com') return res.status(403).send('Forbidden');
     const targetSid = req.params.sid;
     const data = db.getData();
     
@@ -371,113 +392,8 @@ app.post('/api/verify', async (req, res) => {
 });
 
 app.get('/', checkAuth, (req, res) => {
-    db.checkExpiration();
     const data = db.getData();
-    data.activeSessions = data.activeSessions || [];
-    
     const keyOptions = data.keys.map(k => `<option value="${k.key}">${k.key}</option>`).join('');
-    const keyTags = data.keys.map(k => {
-        return `
-            <span class="key-tag-manage" data-search="${k.key.toLowerCase()}">${k.key} <a href="/delete-key/${k.key}" style="color:#f43f5e;margin-left:5px;text-decoration:none;">×</a></span>
-        `;
-    }).join('');
-
-    const createRows = (arr, type) => arr.map(item => {
-        let timeLeft = '';
-        let keysListHtml = '';
-        let searchData = `${item.name || ''} ${item.id}`.toLowerCase();
-        
-        if (item.assignedKey) {
-            searchData += ` ${item.assignedKey}`;
-        }
-
-        if (item.expiresAt) {
-            const diff = item.expiresAt - Date.now();
-            if (diff > 0) {
-                const hours = Math.floor(diff / 3600000);
-                const minutes = Math.floor((diff % 3600000) / 60000);
-                const seconds = Math.floor((diff % 60000) / 1000);
-                timeLeft = `<br><span class="time-tag target-timer" data-expire="${item.expiresAt}">⏱️ Expires in: ${hours}h ${minutes}m ${seconds}s (IL Time)</span>`;
-            }
-        }
-
-        if (item.keys && Array.isArray(item.keys) && item.keys.length > 0) {
-            keysListHtml = '<div style="margin-top:5px; display:flex; flex-direction:column; gap:3px;">';
-            item.keys.forEach(k => {
-                searchData += ` ${k.key}`;
-                let kTime = '';
-                if (k.expiresAt) {
-                    const diff = k.expiresAt - Date.now();
-                    if (diff > 0) {
-                        const hours = Math.floor(diff / 3600000);
-                        const minutes = Math.floor((diff % 3600000) / 60000);
-                        const seconds = Math.floor((diff % 60000) / 1000);
-                        kTime = ` <span class="target-timer" data-expire="${k.expiresAt}">(⏱️ ${hours}h ${minutes}m ${seconds}s)</span>`;
-                    }
-                }
-                keysListHtml += `<span class="key-badge" style="width:fit-content;">🔑 Key: ${k.key}${kTime}</span>`;
-            });
-            keysListHtml += '</div>';
-        }
-
-        return `
-            <tr data-search="${searchData}">
-                <td>
-                    <strong>${item.name || 'Unknown'}</strong> (${item.id})
-                    ${item.assignedKey ? `<br><span class="key-badge">🔑 Key: ${item.assignedKey}</span>` : ''}
-                    ${keysListHtml}
-                    ${item.groups ? `<br><span class="group-tag">Groups: ${item.groups.join(', ')}</span>` : ''}
-                    ${timeLeft}
-                </td>
-                <td><a href="/delete/${type}/${item.id}" class="btn-delete">Remove</a></td>
-            </tr>
-        `;
-    }).join('');
-
-    const pendingRows = data.pendingPlaces.map(item => {
-        let searchData = `${item.name} ${item.id} ${item.creatorName} ${item.creatorId} ${item.key}`.toLowerCase();
-        return `
-            <tr data-search="${searchData}">
-                <td>
-                    🎮 Game: <strong>${item.name}</strong> (${item.id})<br>
-                    👤 Owner: <strong>${item.creatorName}</strong> (${item.creatorId})<br>
-                    <span class="key-badge">🔑 Used Key: ${item.key}</span>
-                </td>
-                <td>
-                    <div style="display:flex; flex-direction:column; gap:8px;">
-                        <form action="/approve/${item.id}" method="POST" style="display:flex; gap:5px; align-items:center; margin-bottom:0;">
-                            <input type="datetime-local" name="expiresAt" style="padding:4px; margin-bottom:0; width:160px; font-size:12px; height:28px;">
-                            <button type="submit" class="btn-approve" style="background:none; border:none; padding:0; width:auto; font-size:14px; cursor:pointer;">Approve</button>
-                        </form>
-                        <form action="/reject/${item.id}" method="POST" style="margin-bottom:0;">
-                            <button type="submit" class="btn-delete" style="background:none; border:none; padding:0; width:auto; font-size:14px; cursor:pointer; text-align:left;">Decline</button>
-                        </form>
-                    </div>
-                </td>
-            </tr>
-        `;
-    }).join('');
-
-    let adminActiveSessionsHtml = '';
-    if (req.session.userEmail === 'almogshemesh11@gmail.com') {
-        const sessionRows = data.activeSessions.map(s => `
-            <div style="display:flex; justify-content:space-between; align-items:center; background:#1f2937; padding:10px; border-radius:6px; border:1px solid #374151;">
-                <span style="font-size:13px; color:#e2e8f0; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; max-width:180px;">${s.email} ${s.sid === req.sessionID ? '(You)' : ''}</span>
-                ${s.sid !== req.sessionID ? `<a href="/disconnect-session/${s.sid}" style="color:#f43f5e; text-decoration:none; font-weight:bold; font-size:12px;">Disconnect</a>` : '<span style="color:#64748b; font-size:12px;">Active</span>'}
-            </div>
-        `).join('');
-
-        adminActiveSessionsHtml = `
-            <div class="card" style="grid-column: span 2;">
-                <div class="card-header">
-                    <h3>👥 Active Connected Users</h3>
-                </div>
-                <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap:12px; margin-top:10px; max-height:200px; overflow-y:auto;">
-                    ${sessionRows || '<span style="color:#64748b; font-size:13px;">No active sessions recorded</span>'}
-                </div>
-            </div>
-        `;
-    }
 
     res.send(`
     <!DOCTYPE html>
@@ -497,10 +413,6 @@ app.get('/', checkAuth, (req, res) => {
             h3 { margin: 0; color: #e2e8f0; font-size: 16px; white-space: nowrap; }
             .search-input { width: 60%; padding: 6px 12px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: white; font-size: 13px; box-sizing: border-box; }
             input, select, textarea { width: 100%; padding: 10px; margin-bottom: 12px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: white; box-sizing: border-box; }
-            .inline-form { display: flex; gap: 10px; margin-bottom: 12px; align-items: end; width: 100%; }
-            .inline-form div { flex: 1; }
-            .inline-form input { margin-bottom: 0; }
-            .inline-form button { width: auto; white-space: nowrap; height: 38px; }
             button { width: 100%; background: #0284c7; color: white; border: none; padding: 10px; border-radius: 6px; font-weight: bold; cursor: pointer; }
             button:hover { background: #0369a1; }
             .btn-refresh { background: #1f2937; border: 1px solid #374151; color: #94a3b8; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; height: 38px; box-sizing: border-box; font-weight: bold; }
@@ -515,7 +427,6 @@ app.get('/', checkAuth, (req, res) => {
             th, td { padding: 12px; text-align: left; border-bottom: 1px solid #1e293b; font-size: 14px; vertical-align: top; }
             th { background: #1f2937; color: #94a3b8; }
             .btn-delete { color: #f43f5e; text-decoration: none; font-weight: bold; }
-            .btn-approve { color: #10b981; text-decoration: none; font-weight: bold; }
             .group-tag { font-size: 11px; color: #38bdf8; background: #0c4a6e; padding: 2px 6px; border-radius: 4px; display: inline-block; margin-top: 4px; }
             .key-badge { font-size: 11px; color: #fbbf24; background: #78350f; padding: 2px 6px; border-radius: 4px; display: inline-block; margin-top: 4px; }
             .time-tag { font-size: 11px; color: #a78bfa; background: #4c1d95; padding: 2px 6px; border-radius: 4px; display: inline-block; margin-top: 4px; }
@@ -525,7 +436,6 @@ app.get('/', checkAuth, (req, res) => {
             .btn-add-row { background: #10b981; margin-bottom: 10px; padding: 6px; font-size: 13px; width: auto; display: inline-block; }
             .btn-add-row:hover { background: #059669; }
             .btn-remove-row { background: #f43f5e !important; color: white !important; width: 38px !important; height: 38px !important; display: flex !important; align-items: center !important; justify-content: center !important; border-radius: 6px !important; cursor: pointer !important; font-weight: bold !important; border: none !important; padding: 0 !important; font-size: 20px !important; line-height: 1 !important; flex-shrink: 0; }
-            .btn-remove-row:hover { background: #e11d48 !important; }
         </style>
     </head>
     <body>
@@ -541,14 +451,19 @@ app.get('/', checkAuth, (req, res) => {
                 </div>
             </div>
             <div class="grid">
-                ${adminActiveSessionsHtml}
+                <div id="sessions-container" class="card" style="grid-column: span 2; display:none;">
+                    <div class="card-header">
+                        <h3>👥 Active Connected Users</h3>
+                    </div>
+                    <div id="sessions-box" style="display:grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap:12px; margin-top:10px; max-height:200px; overflow-y:auto;"></div>
+                </div>
                 <div class="card">
                     <div class="card-header">
                         <h3>🔑 System License Keys</h3>
                         <input type="text" class="search-input" placeholder="Search keys..." oninput="searchKeys(this)">
                     </div>
-                    <div class="key-container" id="keys-box">${keyTags || '<span style="color:#64748b;font-size:13px;">No keys generated</span>'}</div>
-                    <form action="/add-key" method="POST" class="inline-form" style="display: flex; flex-direction: column; gap: 8px; align-items: stretch;">
+                    <div class="key-container" id="keys-box"></div>
+                    <form action="/add-key" method="POST" style="display: flex; flex-direction: column; gap: 8px; align-items: stretch;">
                         <input type="text" name="key" placeholder="Key string" required style="margin-bottom:0;">
                         <button type="submit">Create Key</button>
                     </form>
@@ -560,7 +475,7 @@ app.get('/', checkAuth, (req, res) => {
                     </div>
                     <table>
                         <thead><tr><th>Request Metadata</th><th>Action</th></tr></thead>
-                        <tbody id="pending-table">${pendingRows || '<tr><td colspan="2" style="color:#64748b; text-align:center;">No pending requests incoming</td></tr>'}</tbody>
+                        <tbody id="pending-table"></tbody>
                     </table>
                 </div>
                 <div class="card" style="grid-column: span 2;">
@@ -579,13 +494,12 @@ app.get('/', checkAuth, (req, res) => {
                                 <input type="text" name="input" placeholder="Name or numerical ID" style="margin-bottom:0;" required>
                             </div>
                         </div>
-                        
                         <div style="border-top: 1px solid #1e293b; padding-top: 10px;">
                             <label style="font-size:14px;color:#e2e8f0;display:block;margin-bottom:8px;">Keys & Expirations Mapping</label>
                             <button type="button" class="btn-add-row" onclick="addKeyRow()">➕ Add Key & Date</button>
                             <div id="dynamic-keys-container">
                                 <div class="dynamic-key-row">
-                                    <select name="assignedKeys" style="margin-bottom:0; flex: 1; height: 38px;">
+                                    <select name="assignedKeys" id="grant-key-select" style="margin-bottom:0; flex: 1; height: 38px;">
                                         <option value="">None</option>
                                         ${keyOptions}
                                     </select>
@@ -594,7 +508,6 @@ app.get('/', checkAuth, (req, res) => {
                                 </div>
                             </div>
                         </div>
-
                         <button type="submit" style="margin-top:10px;">Authorize Entity</button>
                     </form>
                 </div>
@@ -605,7 +518,7 @@ app.get('/', checkAuth, (req, res) => {
                     </div>
                     <table>
                         <thead><tr><th>Identity</th><th>Action</th></tr></thead>
-                        <tbody id="creators-table">${createRows(data.whitelist.creators, 'creators') || '<tr><td colspan="2" style="color:#64748b;">Empty list</td></tr>'}</tbody>
+                        <tbody id="creators-table"></tbody>
                     </table>
                 </div>
                 <div class="card">
@@ -615,12 +528,25 @@ app.get('/', checkAuth, (req, res) => {
                     </div>
                     <table>
                         <thead><tr><th>Place Records</th><th>Action</th></tr></thead>
-                        <tbody id="places-table">${createRows(data.whitelist.places, 'places') || '<tr><td colspan="2" style="color:#64748b;">Empty list</td></tr>'}</tbody>
+                        <tbody id="places-table"></tbody>
                     </table>
                 </div>
             </div>
         </div>
         <script>
+            let currentKeysMarkup = '';
+
+            async function checkSessionStatus() {
+                try {
+                    const res = await fetch('/api/session-status');
+                    const status = await res.json();
+                    if (!status.active) {
+                        window.location.href = '/login';
+                    }
+                } catch(e) {}
+            }
+            setInterval(checkSessionStatus, 3000);
+
             function updateTimers() {
                 const now = Date.now();
                 document.querySelectorAll('.target-timer').forEach(el => {
@@ -642,6 +568,115 @@ app.get('/', checkAuth, (req, res) => {
             }
             setInterval(updateTimers, 1000);
 
+            function buildRows(arr, type) {
+                if(!arr || arr.length === 0) return '<tr><td colspan="2" style="color:#64748b;">Empty list</td></tr>';
+                return arr.map(item => {
+                    let timeLeft = '';
+                    let keysListHtml = '';
+                    let searchData = \`\${item.name || ''} \${item.id}\`.toLowerCase();
+                    if (item.assignedKey) searchData += \` \${item.assignedKey}\`;
+                    if (item.expiresAt) {
+                        const diff = item.expiresAt - Date.now();
+                        if (diff > 0) {
+                            const hours = Math.floor(diff / 3600000);
+                            const minutes = Math.floor((diff % 3600000) / 60000);
+                            const seconds = Math.floor((diff % 60000) / 1000);
+                            timeLeft = \`<br><span class="time-tag target-timer" data-expire="\${item.expiresAt}">⏱️ Expires in: \${hours}h \${minutes}m \${seconds}s (IL Time)</span>\`;
+                        }
+                    }
+                    if (item.keys && Array.isArray(item.keys) && item.keys.length > 0) {
+                        keysListHtml = '<div style="margin-top:5px; display:flex; flex-direction:column; gap:3px;">';
+                        item.keys.forEach(k => {
+                            searchData += \` \${k.key}\`;
+                            let kTime = '';
+                            if (k.expiresAt) {
+                                const diff = k.expiresAt - Date.now();
+                                if (diff > 0) {
+                                    const hours = Math.floor(diff / 3600000);
+                                    const minutes = Math.floor((diff % 3600000) / 60000);
+                                    const seconds = Math.floor((diff % 60000) / 1000);
+                                    kTime = \` <span class="target-timer" data-expire="\${k.expiresAt}">(⏱️ \${hours}h \${minutes}m \${seconds}s)</span>\`;
+                                }
+                            }
+                            keysListHtml += \`<span class="key-badge" style="width:fit-content;">🔑 Key: \${k.key}\${kTime}</span>\`;
+                        });
+                        keysListHtml += '</div>';
+                    }
+                    return \`
+                        <tr data-search="\${searchData}">
+                            <td>
+                                <strong>\${item.name || 'Unknown'}</strong> (\${item.id})
+                                \${item.assignedKey ? \`<br><span class="key-badge">🔑 Key: \${item.assignedKey}</span>\` : ''}
+                                \${keysListHtml}
+                                \${item.groups ? \`<br><span class="group-tag">Groups: \${item.groups.join(', ')}</span>\` : ''}
+                                \${timeLeft}
+                            </td>
+                            <td><a href="/delete/\${type}/\${item.id}" class="btn-delete">Remove</a></td>
+                        </tr>
+                    \`;
+                }).join('');
+            }
+
+            async function fetchDashboardData() {
+                try {
+                    const res = await fetch('/api/dashboard-data');
+                    if(res.status === 401) {
+                        window.location.href = '/login';
+                        return;
+                    }
+                    const data = await res.json();
+                    
+                    if (data.userEmail === 'almogshemesh11@gmail.com') {
+                        const container = document.getElementById('sessions-container');
+                        container.style.display = 'block';
+                        const box = document.getElementById('sessions-box');
+                        box.innerHTML = data.activeSessions.map(s => \`
+                            <div style="display:flex; justify-content:space-between; align-items:center; background:#1f2937; padding:10px; border-radius:6px; border:1px solid #374151;">
+                                <span style="font-size:13px; color:#e2e8f0; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; max-width:180px;">\${s.email} \${s.sid === data.currentSessionId ? '(You)' : ''}</span>
+                                \${s.sid !== data.currentSessionId ? \`<a href="/disconnect-session/\${s.sid}" style="color:#f43f5e; text-decoration:none; font-weight:bold; font-size:12px;">Disconnect</a>\` : '<span style="color:#64748b; font-size:12px;">Active</span>'}
+                            </div>
+                        \`).join('') || '<span style="color:#64748b; font-size:13px;">No active sessions recorded</span>';
+                    }
+
+                    const keysBox = document.getElementById('keys-box');
+                    keysBox.innerHTML = data.keys.map(k => \`
+                        <span class="key-tag-manage" data-search="\${k.key.toLowerCase()}">\${k.key} <a href="/delete-key/\${k.key}" style="color:#f43f5e;margin-left:5px;text-decoration:none;">×</a></span>
+                    \`).join('') || '<span style="color:#64748b;font-size:13px;">No keys generated</span>';
+
+                    currentKeysMarkup = data.keys.map(k => \`<option value="\${k.key}">\${k.key}</option>\`).join('');
+
+                    const pendingTable = document.getElementById('pending-table');
+                    pendingTable.innerHTML = data.pendingPlaces.map(item => \`
+                        <tr data-search="\${item.name.toLowerCase()} \${item.id} \${item.creatorName.toLowerCase()} \${item.creatorId} \${item.key.toLowerCase()}">
+                            <td>
+                                🎮 Game: <strong>\${item.name}</strong> (\${item.id})<br>
+                                👤 Owner: <strong>\${item.creatorName}</strong> (\${item.creatorId})<br>
+                                <span class="key-badge">🔑 Used Key: \${item.key}</span>
+                            </td>
+                            <td>
+                                <div style="display:flex; flex-direction:column; gap:8px;">
+                                    <form action="/approve/\${item.id}" method="POST" style="display:flex; gap:5px; align-items:center; margin-bottom:0;">
+                                        <input type="datetime-local" name="expiresAt" style="padding:4px; margin-bottom:0; width:160px; font-size:12px; height:28px;">
+                                        <button type="submit" style="background:none; border:none; padding:0; width:auto; font-size:14px; cursor:pointer; color:#10b981; font-weight:bold;">Approve</button>
+                                    </form>
+                                    <form action="/reject/\${item.id}" method="POST" style="margin-bottom:0;">
+                                        <button type="submit" style="background:none; border:none; padding:0; width:auto; font-size:14px; cursor:pointer; text-align:left; color:#f43f5e; font-weight:bold;">Decline</button>
+                                    </form>
+                                </div>
+                            </td>
+                        </tr>
+                    \`).join('') || '<tr><td colspan="2" style="color:#64748b; text-align:center;">No pending requests incoming</td></tr>';
+
+                    document.getElementById('creators-table').innerHTML = buildRows(data.whitelist.creators, 'creators');
+                    document.getElementById('places-table').innerHTML = buildRows(data.whitelist.places, 'places');
+                    
+                    updateTimers();
+                } catch(e) {}
+            }
+
+            setInterval(fetchDashboardData, 3000);
+            window.addEventListener('DOMContentLoaded', fetchDashboardData);
+
             function addKeyRow() {
                 const container = document.getElementById('dynamic-keys-container');
                 const div = document.createElement('div');
@@ -649,7 +684,7 @@ app.get('/', checkAuth, (req, res) => {
                 div.innerHTML = \`
                     <select name="assignedKeys" style="margin-bottom:0; flex: 1; height: 38px;">
                         <option value="">None</option>
-                        ${keyOptions.replace(/"/g, '\\"')}
+                        \${currentKeysMarkup}
                     </select>
                     <input type="datetime-local" name="expiresAtKeys" style="margin-bottom:0; flex: 1; height: 38px;">
                     <button type="button" class="btn-remove-row" onclick="removeKeyRow(this)">×</button>
@@ -736,14 +771,24 @@ app.get('/obfuscate', checkAuth, (req, res) => {
                     <select name="licenseKey" required>
                         ${keyOptions || '<option value="">No keys available - create one first</option>'}
                     </select>
-                    
                     <label>Paste your Lua Source Code</label>
                     <textarea name="sourceCode" placeholder="Paste your script here" required></textarea>
-                    
                     <button type="submit">Inject Whitelist Verification</button>
                 </form>
             </div>
         </div>
+        <script>
+            async function checkSessionStatus() {
+                try {
+                    const res = await fetch('/api/session-status');
+                    const status = await res.json();
+                    if (!status.active) {
+                        window.location.href = '/login';
+                    }
+                } catch(e) {}
+            }
+            setInterval(checkSessionStatus, 3000);
+        </script>
     </body>
     </html>
     `);
@@ -836,6 +881,17 @@ ${sourceCode}`;
             </div>
         </div>
         <script>
+            async function checkSessionStatus() {
+                try {
+                    const res = await fetch('/api/session-status');
+                    const status = await res.json();
+                    if (!status.active) {
+                        window.location.href = '/login';
+                    }
+                } catch(e) {}
+            }
+            setInterval(checkSessionStatus, 3000);
+
             function copyToClipboard() {
                 const copyText = document.getElementById("output-code");
                 copyText.select();
