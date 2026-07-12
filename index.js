@@ -351,29 +351,26 @@ app.get('/disconnect-session/:sid', checkAuth, async (req, res) => {
     const targetSid = req.params.sid;
     const data = db.getData();
     const targetSession = (data.activeSessions || []).find(s => s.sid === targetSid);
+    
     if (!targetSession) return res.sendStatus(404);
     
     if (targetSession.email === 'almogshemesh11@gmail.com') {
-        return res.status(403).send('Forbidden: Cannot disconnect active admin account');
+        return res.status(403).send('Forbidden: Cannot disconnect admin');
     }
-    
     if (req.session.userEmail !== 'almogshemesh11@gmail.com') return res.status(403).send('Forbidden');
     
-    const targetEmail = targetSession.email;
     data.activeSessions = (data.activeSessions || []).filter(s => s.sid !== targetSid);
     db.save();
-    
     delete sessionFocusMap[targetSid];
-    await sendDisconnectLogToDiscord(req.session.userEmail, targetEmail);
     
-    if (targetSid === req.sessionID) {
-        req.session.destroy(() => {
+    await sendDisconnectLogToDiscord(req.session.userEmail, targetSession.email);
+    
+    if (req.sessionStore.destroy) {
+        req.sessionStore.destroy(targetSid, (err) => {
             res.sendStatus(200);
         });
     } else {
-        req.sessionStore.destroy(targetSid, () => {
-            res.sendStatus(200);
-        });
+        res.sendStatus(200);
     }
 });
 
