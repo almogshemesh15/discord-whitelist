@@ -5,6 +5,16 @@ const db = require('./database');
 const app = express();
 let isSaving = false;
 
+// Without these, one failing async request (a hiccup on a Roblox API call, a
+// save conflict, etc.) can crash the ENTIRE server for every connected user.
+// Log it and keep the server alive instead.
+process.on('unhandledRejection', (reason) => {
+    console.error('Unhandled Rejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+    console.error('Uncaught Exception:', err);
+});
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -50,7 +60,7 @@ function checkAuth(req, res, next) {
     }
 }
 
-function cleanExpiredLogs() {
+async function cleanExpiredLogs() {
     const data = db.getData();
     if (!data.logs) return;
     const now = Date.now();
@@ -147,10 +157,23 @@ app.get('/api/session-status', (req, res) => {
     res.json({ active: sessionExists });
 });
 
-app.get('/api/dashboard-data', checkAuth, (req, res) => {
+app.get('/api/dashboard-data', checkAuth, async (req, res) => {
     db.checkExpiration();
-    cleanExpiredLogs();
+    await cleanExpiredLogs();
     const data = db.getData();
+
+    // Guard against duplicate entries for the same email ever reaching the UI,
+    // and self-heal the stored data if duplicates slipped in (e.g. from a past bug).
+    if (data.activeSessions && data.activeSessions.length > 0) {
+        const uniqueByEmail = new Map();
+        data.activeSessions.forEach(s => uniqueByEmail.set(s.email, s));
+        const deduped = Array.from(uniqueByEmail.values());
+        if (deduped.length !== data.activeSessions.length) {
+            data.activeSessions = deduped;
+            await safeSave();
+        }
+    }
+
     const extendedSessions = (data.activeSessions || []).map(s => ({
         ...s,
         hasFocus: sessionFocusMap[s.sid] ?? false
@@ -336,7 +359,7 @@ app.get('/resend-2fa', async (req, res) => {
 app.get('/logout', (req, res) => {
     const sid = req.sessionID;
     delete sessionFocusMap[sid];
-    req.session.destroy(() => {
+    req.session.destroy(async () => {
         const data = db.getData();
         data.activeSessions = (data.activeSessions || []).filter(s => s.sid !== sid);
         await safeSave();
@@ -1111,7 +1134,7 @@ ${sourceCode}`;
     `);
 });
 
-app.get('/force-save', checkAuth, (req, res) => {
+app.get('/force-save', checkAuth, async (req, res) => {
     await safeSave();
     res.redirect('/');
 });
@@ -1131,15 +1154,37 @@ app.get('/toggle-key-lock/:key', checkAuth, async (req, res) => {
     res.sendStatus(200);
 });
 
+let saveQueued = false;
+
+async function persistToDb() {
+    // Support whichever persistence method the db module actually exposes.
+    if (typeof db.save === 'function') return db.save();
+    if (typeof db.saveData === 'function') return db.saveData();
+    if (typeof db.write === 'function') return db.write();
+    if (typeof db.persist === 'function') return db.persist();
+    console.error('safeSave: db module has no save/saveData/write/persist method - data is NOT being persisted to disk!');
+}
+
 async function safeSave() {
-    if (isSaving) return;
+    if (isSaving) {
+        // A save is already running - don't drop this write, queue it so it runs
+        // right after the current one finishes. This is what prevents data loss
+        // (like duplicated/ghost active users) when multiple requests hit at once.
+        saveQueued = true;
+        return;
+    }
     isSaving = true;
     try {
-        await safeSave();
-    } catch(e) {
-        console.error(e);
+        await persistToDb();
+    } catch (e) {
+        console.error('safeSave error:', e);
+    } finally {
+        isSaving = false;
     }
-    isSaving = false;
+    if (saveQueued) {
+        saveQueued = false;
+        await safeSave();
+    }
 }
 
 app.post('/add', checkAuth, async (req, res) => {
