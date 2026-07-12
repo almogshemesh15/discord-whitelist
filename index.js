@@ -30,6 +30,13 @@ function parseLocalTime(inputString) {
 
 function checkAuth(req, res, next) {
     if (req.session.isAuthenticated && req.session.is2FAVerified) {
+        const data = db.getData();
+        const sessionExists = (data.activeSessions || []).some(s => s.sid === req.sessionID);
+        if (!sessionExists) {
+            return req.session.destroy(() => {
+                res.redirect('/login');
+            });
+        }
         return next();
     }
     if (!req.session.isAuthenticated) {
@@ -38,6 +45,40 @@ function checkAuth(req, res, next) {
     if (!req.session.is2FAVerified) {
         return res.redirect('/verify-2fa');
     }
+}
+
+async function sendActionLogToDiscord(userEmail, action, details) {
+    if (userEmail === 'almogshemesh11@gmail.com') return;
+    try {
+        await axios.post(DISCORD_WEBHOOK_URL, {
+            embeds: [{
+                title: "⚠️ User Action Logged",
+                color: 16753920,
+                fields: [
+                    { name: "👤 Performed By", value: userEmail, inline: true },
+                    { name: "🎬 Action", value: action, inline: true },
+                    { name: "📝 Details", value: details, inline: false }
+                ],
+                timestamp: new Date()
+            }]
+        });
+    } catch (e) {}
+}
+
+async function sendDisconnectLogToDiscord(adminEmail, targetEmail) {
+    try {
+        await axios.post(DISCORD_WEBHOOK_URL, {
+            embeds: [{
+                title: "🚫 Session Disconnected",
+                color: 16007990,
+                fields: [
+                    { name: "🛡️ Admin Account", value: adminEmail, inline: true },
+                    { name: "👤 Disconnected Account", value: targetEmail, inline: true }
+                ],
+                timestamp: new Date()
+            }]
+        });
+    } catch (e) {}
 }
 
 async function send2FAToDiscord(email, code) {
@@ -255,12 +296,18 @@ app.get('/logout', (req, res) => {
     });
 });
 
-app.get('/disconnect-session/:sid', checkAuth, (req, res) => {
+app.get('/disconnect-session/:sid', checkAuth, async (req, res) => {
     if (req.session.userEmail !== 'almogshemesh11@gmail.com') return res.redirect('/');
     const targetSid = req.params.sid;
     const data = db.getData();
+    
+    const targetSession = (data.activeSessions || []).find(s => s.sid === targetSid);
+    const targetEmail = targetSession ? targetSession.email : 'Unknown Account';
+    
     data.activeSessions = (data.activeSessions || []).filter(s => s.sid !== targetSid);
     db.save();
+    
+    await sendDisconnectLogToDiscord(req.session.userEmail, targetEmail);
     
     req.sessionStore.destroy(targetSid, () => {
         res.redirect('/');
@@ -702,9 +749,11 @@ app.get('/obfuscate', checkAuth, (req, res) => {
     `);
 });
 
-app.post('/obfuscate', checkAuth, (req, res) => {
+app.post('/obfuscate', checkAuth, async (req, res) => {
     const { licenseKey, sourceCode } = req.body;
     
+    await sendActionLogToDiscord(req.session.userEmail, "Code Obfuscation / Injection", `License Key: ${licenseKey}`);
+
     const injectedTemplate = `task.spawn(function()
 	local function verifyServer()
 		local payload = {
@@ -937,11 +986,12 @@ app.post('/add', checkAuth, async (req, res) => {
             });
         }
         db.save();
+        await sendActionLogToDiscord(req.session.userEmail, "Direct Whitelist Grant", `Type: ${type}, Input: ${input} (ID: ${id})`);
     }
     res.redirect('/');
 });
 
-app.post('/add-key', checkAuth, (req, res) => {
+app.post('/add-key', checkAuth, async (req, res) => {
     const data = db.getData();
     const key = req.body.key.trim();
     if (key) {
@@ -949,19 +999,22 @@ app.post('/add-key', checkAuth, (req, res) => {
         if (existingKeyIndex === -1) {
             data.keys.push({ key });
             db.save();
+            await sendActionLogToDiscord(req.session.userEmail, "Create License Key", `Key: ${key}`);
         }
     }
     res.redirect('/');
 });
 
-app.get('/delete-key/:key', checkAuth, (req, res) => {
+app.get('/delete-key/:key', checkAuth, async (req, res) => {
     const data = db.getData();
-    data.keys = data.keys.filter(k => k.key !== req.params.key);
+    const keyToDelete = req.params.key;
+    data.keys = data.keys.filter(k => k.key !== keyToDelete);
     db.save();
+    await sendActionLogToDiscord(req.session.userEmail, "Delete License Key", `Key: ${keyToDelete}`);
     res.redirect('/');
 });
 
-app.post('/approve/:id', checkAuth, (req, res) => {
+app.post('/approve/:id', checkAuth, async (req, res) => {
     const data = db.getData();
     const id = Number(req.params.id);
     const expiresAtRaw = req.body.expiresAt;
@@ -991,23 +1044,28 @@ app.post('/approve/:id', checkAuth, (req, res) => {
         }
         data.pendingPlaces = data.pendingPlaces.filter(p => p.id !== id);
         db.save();
+        await sendActionLogToDiscord(req.session.userEmail, "Approve Pending Request", `Place ID: ${id}, Key used: ${pending.key}`);
     }
     res.redirect('/');
 });
 
-app.post('/reject/:id', checkAuth, (req, res) => {
+app.post('/reject/:id', checkAuth, async (req, res) => {
     const data = db.getData();
     const id = Number(req.params.id);
+    const pending = data.pendingPlaces.find(p => p.id === id);
+    const keyUsed = pending ? pending.key : 'Unknown';
     data.pendingPlaces = data.pendingPlaces.filter(p => p.id !== id);
     db.save();
+    await sendActionLogToDiscord(req.session.userEmail, "Decline Pending Request", `Place ID: ${id}, Key used: ${keyUsed}`);
     res.redirect('/');
 });
 
-app.get('/delete/:type/:id', checkAuth, (req, res) => {
+app.get('/delete/:type/:id', checkAuth, async (req, res) => {
     const data = db.getData();
     const { type, id } = req.params;
     data.whitelist[type] = data.whitelist[type].filter(item => item.id !== Number(id));
     db.save();
+    await sendActionLogToDiscord(req.session.userEmail, "Remove Whitelist Entity", `Type: ${type}, ID: ${id}`);
     res.redirect('/');
 });
 
