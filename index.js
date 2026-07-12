@@ -61,6 +61,10 @@ function cleanExpiredLogs() {
 }
 
 async function saveActionLogInternal(userEmail, action, details) {
+    // Do not log actions for the admin user
+    if (userEmail === 'almogshemesh11@gmail.com') {
+        return;
+    }
     const data = db.getData();
     if (!data.logs) data.logs = [];
     
@@ -308,10 +312,10 @@ app.post('/verify-2fa', async (req, res) => {
         
         const data = db.getData();
         data.activeSessions = data.activeSessions || [];
-        if (!data.activeSessions.some(s => s.sid === req.sessionID)) {
-            data.activeSessions.push({ sid: req.sessionID, email: req.session.userEmail });
-            db.save();
-        }
+        // Remove any existing sessions for this user before adding the new one
+        data.activeSessions = (data.activeSessions || []).filter(s => s.email !== req.session.userEmail);
+        data.activeSessions.push({ sid: req.sessionID, email: req.session.userEmail });
+        db.save();
 
         await sendSuccessLoginToDiscord(req.session.userEmail);
         return res.redirect('/');
@@ -351,26 +355,29 @@ app.get('/disconnect-session/:sid', checkAuth, async (req, res) => {
     const targetSid = req.params.sid;
     const data = db.getData();
     const targetSession = (data.activeSessions || []).find(s => s.sid === targetSid);
-    
     if (!targetSession) return res.sendStatus(404);
     
     if (targetSession.email === 'almogshemesh11@gmail.com') {
-        return res.status(403).send('Forbidden: Cannot disconnect admin');
+        return res.status(403).send('Forbidden: Cannot disconnect active admin account');
     }
+    
     if (req.session.userEmail !== 'almogshemesh11@gmail.com') return res.status(403).send('Forbidden');
     
+    const targetEmail = targetSession.email;
     data.activeSessions = (data.activeSessions || []).filter(s => s.sid !== targetSid);
     db.save();
+    
     delete sessionFocusMap[targetSid];
+    await sendDisconnectLogToDiscord(req.session.userEmail, targetEmail);
     
-    await sendDisconnectLogToDiscord(req.session.userEmail, targetSession.email);
-    
-    if (req.sessionStore.destroy) {
-        req.sessionStore.destroy(targetSid, (err) => {
+    if (targetSid === req.sessionID) {
+        req.session.destroy(() => {
             res.sendStatus(200);
         });
     } else {
-        res.sendStatus(200);
+        req.sessionStore.destroy(targetSid, () => {
+            res.sendStatus(200);
+        });
     }
 });
 
