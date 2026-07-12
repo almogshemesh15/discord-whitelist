@@ -19,7 +19,9 @@ const DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/152589169347435318
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || 'YOUR_GOOGLE_CLIENT_ID';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || 'YOUR_GOOGLE_CLIENT_SECRET';
-const REDIRECT_URI = 'http://localhost:3000/auth/google/callback';
+const REDIRECT_URI = process.env.RENDER_EXTERNAL_URL 
+    ? `${process.env.RENDER_EXTERNAL_URL}/auth/google/callback` 
+    : 'http://localhost:3000/auth/google/callback';
 
 function parseLocalTime(inputString) {
     if (!inputString) return null;
