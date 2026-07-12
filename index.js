@@ -1,30 +1,13 @@
 const express = require('express');
 const axios = require('axios');
 const session = require('express-session');
-const { createClient } = require('redis');
-const RedisStore = require('connect-redis').default;
 const db = require('./database');
 const app = express();
-
-const redisClient = createClient({
-    url: process.env.REDIS_URL,
-    socket: {
-        tls: true, // זה פותר את בעיית ה-Socket Closed
-        rejectUnauthorized: false
-    }
-});
-
-redisClient.on('error', (err) => console.log('Redis Client Error', err));
-
-redisClient.connect().catch((err) => {
-    console.error("Failed to connect to Redis:", err);
-});
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 app.use(session({
-    store: new RedisStore({ client: redisClient }),
     secret: 'secure_whitelist_hub_secret_key',
     resave: false,
     saveUninitialized: false,
@@ -325,7 +308,7 @@ app.post('/verify-2fa', async (req, res) => {
         
         const data = db.getData();
         data.activeSessions = data.activeSessions || [];
-        if (data && data.activeSessions && data.activeSessions.some(s => s.sid === req.sessionID)) {
+        if (!data.activeSessions.some(s => s.sid === req.sessionID)) {
             data.activeSessions.push({ sid: req.sessionID, email: req.session.userEmail });
             db.save();
         }
