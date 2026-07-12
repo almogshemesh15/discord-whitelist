@@ -1,13 +1,21 @@
 const express = require('express');
 const axios = require('axios');
 const session = require('express-session');
+const { createClient } = require('redis');
+const RedisStore = require('connect-redis').default;
 const db = require('./database');
 const app = express();
+
+const redisClient = createClient({
+    url: process.env.REDIS_URL
+});
+redisClient.connect().catch(console.error);
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 app.use(session({
+    store: new RedisStore({ client: redisClient }),
     secret: 'secure_whitelist_hub_secret_key',
     resave: false,
     saveUninitialized: false,
