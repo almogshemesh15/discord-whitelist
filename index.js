@@ -994,8 +994,6 @@ app.get('/obfuscate', checkAuth, (req, res) => {
     `);
 });
 
-const axios = require('axios');
-
 app.post('/obfuscate', checkAuth, async (req, res) => {
     const { licenseKey, sourceCode } = req.body;
     
