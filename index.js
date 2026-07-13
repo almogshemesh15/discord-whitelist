@@ -1010,18 +1010,21 @@ ${sourceCode}`;
     let finalCode = fullCodeToObfuscate;
 
     try {
-        const response = await axios.post('https://magicsec.vip/api/obfuscate', {
+        const response = await axios.post("https://magicsec.vip/api/obfuscate", {
             code: fullCodeToObfuscate,
             platform: "roblox"
         }, {
             headers: {
-                'Content-Type': 'application/json'
+                "Content-Type": "application/json"
             }
         });
 
         finalCode = response.data.obfuscated || response.data.script || response.data.code || JSON.stringify(response.data);
     } catch (error) {
-        console.error('Obfuscation API Error:', error.response ? error.response.data : error.message);
+        console.log(error.response?.status);
+        console.dir(error.response?.data, { depth: null });
+        console.log(fullCodeToObfuscate);
+        
         finalCode = "-- Obfuscation failed. Please check your account plan and API permissions.";
     }
 
