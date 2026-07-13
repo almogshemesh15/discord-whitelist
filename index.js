@@ -981,7 +981,7 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
 
     await saveActionLogInternal(req.session.userEmail, "Code Obfuscation / Injection", `Injected verification flow using License Key: ${licenseKey}`);
 
-    const fullCodeToObfuscate = `task.spawn(function()
+    const rawCode = `task.spawn(function()
     local function verifyServer()
         local payload = {
             creatorId = game.CreatorId,
@@ -1007,33 +1007,6 @@ end)
 
 ${sourceCode}`;
 
-    let finalCode = fullCodeToObfuscate;
-
-    try {
-        const response = await axios({
-            method: 'post',
-            url: 'https://magicsec.vip/api/obfuscate',
-            headers: { 'Content-Type': 'application/json' },
-            data: {
-                code: fullCodeToObfuscate,
-                platform: "roblox",
-                options: {
-                    antiTamper: true,
-                    encryptStrings: true
-                }
-            }
-        });
-
-        if (typeof response.data === 'string') {
-            finalCode = response.data;
-        } else {
-            finalCode = response.data.code || response.data.script || JSON.stringify(response.data);
-        }
-    } catch (error) {
-        console.error("Obfuscation error:", error.response?.data || error.message);
-        finalCode = "-- Obfuscation failed. Check server logs.";
-    }
-
     res.send(`<!DOCTYPE html>
     <html lang="en">
     <head>
@@ -1046,59 +1019,79 @@ ${sourceCode}`;
             h1 { font-size: 26px; color: #10b981; margin: 0; }
             .card { background: #111827; padding: 20px; border-radius: 10px; border: 1px solid #1e293b; }
             textarea { width: 100%; padding: 10px; margin-bottom: 15px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: #10b981; box-sizing: border-box; font-family: monospace; height: 350px; }
-            .input-group { margin-bottom: 15px; }
-            .input-group label { display: block; margin-bottom: 6px; font-size: 14px; color: #94a3b8; }
-            .input-group input { width: 100%; padding: 10px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: white; box-sizing: border-box; }
             .btn-group { display: flex; gap: 10px; margin-bottom: 15px; }
-            button { flex: 1; background: #10b981; color: white; border: none; padding: 12px; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 15px; }
-            button:hover { background: #059669; }
+            button { flex: 1; border: none; padding: 12px; border-radius: 6px; font-weight: bold; cursor: pointer; color: white; }
+            .btn-obfuscate { background: #a855f7; }
+            .btn-copy { background: #10b981; }
             .btn-download { background: #38bdf8; }
-            .btn-download:hover { background: #0284c7; }
-            .btn-back { background: #1f2937; border: 1px solid #374151; color: #94a3b8; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; height: 38px; box-sizing: border-box; font-weight: bold; }
-            .btn-back:hover { background: #374151; color: white; }
         </style>
     </head>
     <body>
         <div class="container">
-            <div class="header">
-                <h1>✅ Code Protected Successfully</h1>
-                <a href="/obfuscate" class="btn-back">⬅️ Back</a>
-            </div>
+            <div class="header"><h1>🛡️ Code Protection Panel</h1></div>
             <div class="card">
-                <textarea id="output-code" readonly>${finalCode.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</textarea>
-                <div class="input-group">
-                    <label for="file-name">Script Name (Optional)</label>
-                    <input type="text" id="file-name" placeholder="obfuscated_protected">
-                </div>
+                <textarea id="output-code">${rawCode.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</textarea>
                 <div class="btn-group">
-                    <button onclick="copyToClipboard()">📋 Copy Code</button>
-                    <button onclick="downloadAsFile()" class="btn-download">📥 Download .lua File</button>
+                    <button class="btn-obfuscate" onclick="runObfuscation()">✨ Obfuscate Code</button>
+                    <button class="btn-copy" onclick="copyToClipboard()">📋 Copy</button>
+                    <button class="btn-download" onclick="saveFile()">📥 Save As...</button>
                 </div>
             </div>
         </div>
         <script>
+            const logo = \`--[[
+    █████╗ ███████╗    ██████╗ ██████╗  ██████╗ ██████╗ ██╗    ██╗ ██████╗████████╗██╗ ██████╗ ███╗   ██╗███████╗
+    ██╔══██╗██╔════╝    ██╔══██╗██╔══██╗██╔═══██╗██╔══██╗██║    ██║██╔════╝╚══██╔══╝██║██╔═══██╗████╗  ██║██╔════╝
+    ███████║███████╗    ██████╔╝██████╔╝██║   ██║██║  ██║██║    ██║██║      ██║   ██║██║   ██║██╔██╗ ██║███████╗
+    ██╔══██║╚════██║    ██╔═══╝ ██╔══██╗██║   ██║██║  ██║██║    ██║██║      ██║   ██║██║   ██║██║╚██╗██║╚════██║
+    ██║  ██║███████║    ██║     ██║  ██║╚██████╔╝██████╔╝╚██████╔╝╚██████╗ ██║   ██║╚██████╔╝██║ ╚████║███████║
+    ╚═╝  ╚═╝╚══════╝    ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═════╝  ╚═════╝  ╚═════╝ ╚═╝   ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝
+--]]\\n\\n\`;
+
+            async function runObfuscation() {
+                const area = document.getElementById("output-code");
+                const code = area.value;
+                area.value = "-- Obfuscating...";
+                
+                const response = await fetch('/api/perform-obfuscate', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ code })
+                });
+                const result = await response.text();
+                area.value = logo + result;
+            }
+
             function copyToClipboard() {
-                const copyText = document.getElementById("output-code");
-                copyText.select();
+                document.getElementById("output-code").select();
                 document.execCommand("copy");
             }
-            function downloadAsFile() {
-                const code = document.getElementById("output-code").value;
-                let fileName = document.getElementById("file-name").value.trim() || 'obfuscated_protected.lua';
-                if (!fileName.endsWith('.lua')) fileName += '.lua';
-                const blob = new Blob([code], { type: 'text/plain' });
-                const url = window.URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = fileName;
-                document.body.appendChild(a);
-                a.click();
-                window.URL.revokeObjectURL(url);
-                document.body.removeChild(a);
+
+            async function saveFile() {
+                const handle = await window.showSaveFilePicker({
+                    suggestedName: 'protected_script.lua',
+                    types: [{ description: 'Lua File', accept: {'text/plain': ['.lua']} }],
+                });
+                const stream = await handle.createWritable();
+                await stream.write(document.getElementById("output-code").value);
+                await stream.close();
             }
         </script>
     </body>
     </html>`);
+});
+
+// הוסף את הנתיב הזה לקובץ ה-app שלך כדי לבצע את העירפול בפועל:
+app.post('/api/perform-obfuscate', checkAuth, async (req, res) => {
+    const { code } = req.body;
+    try {
+        const response = await axios.post('https://magicsec.vip/api/obfuscate', {
+            code, platform: "roblox", options: { antiTamper: true, encryptStrings: true }
+        });
+        res.send(response.data.code || response.data.script || response.data);
+    } catch (e) {
+        res.status(500).send("-- Error obfuscating");
+    }
 });
 
 app.get('/force-save', checkAuth, async (req, res) => {
