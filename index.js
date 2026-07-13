@@ -989,8 +989,16 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
     await saveActionLogInternal(req.session.userEmail, "Code Obfuscation / Injection", `Injected verification flow using License Key: ${licenseKey}`);
 
     let destroyLogic = "";
+    let loopLogic = "";
+
     if (type === "module") {
         destroyLogic = "script:Destroy()";
+        loopLogic = `    while true do
+        if not verifyServer() then
+            return
+        end
+        task.wait(5)
+    end`;
     } else {
         let parents = "";
         const depth = parseInt(parentLevel) || 2;
@@ -998,6 +1006,15 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
             parents += ".Parent";
         }
         destroyLogic = `script${parents}:Destroy()`;
+        loopLogic = `    while true do
+        if not verifyServer() then
+            script.Enabled = false
+            return
+        else
+            script.Enabled = true
+        end
+        task.wait(5)
+    end`;
     }
 
     const rawCode = `task.spawn(function()
@@ -1018,15 +1035,7 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
         local data = game:GetService("HttpService"):JSONDecode(response)
         return data and data.allowed
     end
-    while true do
-        if not verifyServer() then
-            script.Enabled = false
-            return
-        else
-            script.Enabled = true
-        end
-        task.wait(5)
-    end
+${loopLogic}
 end)
 
 ${sourceCode}`;
