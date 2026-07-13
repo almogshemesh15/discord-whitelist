@@ -5,9 +5,6 @@ const db = require('./database');
 const app = express();
 let isSaving = false;
 
-// Without these, one failing async request (a hiccup on a Roblox API call, a
-// save conflict, etc.) can crash the ENTIRE server for every connected user.
-// Log it and keep the server alive instead.
 process.on('unhandledRejection', (reason) => {
     console.error('Unhandled Rejection:', reason);
 });
@@ -35,6 +32,24 @@ const REDIRECT_URI = process.env.RENDER_EXTERNAL_URL
     : 'http://localhost:3000/auth/google/callback';
 
 let sessionFocusMap = {};
+
+async function obfuscateScript(script) {
+    try {
+        const response = await axios.post('https://luaobfuscator.com/api/obfuscator/newscript',
+            { script: script },
+            {
+                headers: {
+                    'apikey': process.env.LUA_API_KEY,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+        return response.data;
+    } catch (error) {
+        console.error('Obfuscation failed:', error.message);
+        return null;
+    }
+}
 
 function parseLocalTime(inputString) {
     if (!inputString) return null;
@@ -979,48 +994,67 @@ app.get('/obfuscate', checkAuth, (req, res) => {
     `);
 });
 
+const axios = require('axios');
+
 app.post('/obfuscate', checkAuth, async (req, res) => {
     const { licenseKey, sourceCode } = req.body;
     
     await saveActionLogInternal(req.session.userEmail, "Code Obfuscation / Injection", `Injected verification flow using License Key: ${licenseKey}`);
 
+    let finalCode = sourceCode;
+
+    try {
+        const response = await axios.post('https://luaobfuscator.com/api/obfuscator/newscript',
+            { script: sourceCode },
+            {
+                headers: {
+                    'apikey': process.env.LUA_API_KEY,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+        finalCode = response.data;
+    } catch (error) {
+        console.error('Obfuscation API Error:', error.message);
+    }
+
     const injectedTemplate = `task.spawn(function()
-	local function verifyServer()
-		local payload = {
-			creatorId = game.CreatorId,
-			placeId = game.PlaceId,
-			licenseKey = "${licenseKey}"
-		}
+    local function verifyServer()
+        local payload = {
+            creatorId = game.CreatorId,
+            placeId = game.PlaceId,
+            licenseKey = "${licenseKey}"
+        }
 
-		local success, response = pcall(function()
-			return game:GetService("HttpService"):PostAsync(
-				"https://discord-whitelist-ow56.onrender.com/api/verify",
-				game:GetService("HttpService"):JSONEncode(payload),
-				Enum.HttpContentType.ApplicationJson
-			)
-		end)
+        local success, response = pcall(function()
+            return game:GetService("HttpService"):PostAsync(
+                "https://discord-whitelist-ow56.onrender.com/api/verify",
+                game:GetService("HttpService"):JSONEncode(payload),
+                Enum.HttpContentType.ApplicationJson
+            )
+        end)
 
-		if not success then
-			script.Parent.Parent:Destroy()
-			return false
-		end
+        if not success then
+            script.Parent.Parent:Destroy()
+            return false
+        end
 
-		local data = game:GetService("HttpService"):JSONDecode(response)
-		return data and data.allowed
-	end
+        local data = game:GetService("HttpService"):JSONDecode(response)
+        return data and data.allowed
+    end
 
-	while true do
-		if not verifyServer() then
-			script.Enabled = false
-			return
-		else
-			script.Enabled = true
-		end
-		task.wait(5)
-	end
+    while true do
+        if not verifyServer() then
+            script.Enabled = false
+            return
+        else
+            script.Enabled = true
+        end
+        task.wait(5)
+    end
 end)
 
-${sourceCode}`;
+${finalCode}`;
 
     res.send(`
     <!DOCTYPE html>
@@ -1066,17 +1100,6 @@ ${sourceCode}`;
             </div>
         </div>
         <script>
-            async function checkSessionStatus() {
-                try {
-                    await fetch('/api/session-status', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ hasFocus: document.hasFocus() })
-                    });
-                } catch(e) {}
-            }
-            setInterval(checkSessionStatus, 3000);
-
             function copyToClipboard() {
                 const copyText = document.getElementById("output-code");
                 copyText.select();
@@ -1086,41 +1109,12 @@ ${sourceCode}`;
 
             async function downloadAsFile() {
                 const code = document.getElementById("output-code").value;
-                let fileName = document.getElementById("file-name").value.trim();
-                if (!fileName) {
-                    fileName = 'obfuscated_protected';
-                }
-                if (!fileName.endsWith('.lua')) {
-                    fileName += '.lua';
-                }
+                let fileName = document.getElementById("file-name").value.trim() || 'obfuscated_protected.lua';
+                if (!fileName.endsWith('.lua')) fileName += '.lua';
 
-                if ('showSaveFilePicker' in window) {
-                    try {
-                        const handle = await window.showSaveFilePicker({
-                            suggestedName: fileName,
-                            types: [{
-                                description: 'Lua Script',
-                                accept: {'text/plain': ['.lua']},
-                            }],
-                        });
-                        const writable = await handle.createWritable();
-                        await writable.write(code);
-                        await writable.close();
-                    } catch (err) {
-                        if (err.name !== 'AbortError') {
-                            fallbackDownload(code, fileName);
-                        }
-                    }
-                } else {
-                    fallbackDownload(code, fileName);
-                }
-            }
-
-            function fallbackDownload(code, fileName) {
                 const blob = new Blob([code], { type: 'text/plain' });
                 const url = window.URL.createObjectURL(blob);
                 const a = document.createElement('a');
-                a.style.display = 'none';
                 a.href = url;
                 a.download = fileName;
                 document.body.appendChild(a);
