@@ -1366,7 +1366,13 @@ app.post('/approve/:id', checkAuth, async (req, res) => {
     const id = Number(req.params.id);
     const expiresAtRaw = req.body.expiresAt;
     const pending = data.pendingPlaces.find(p => p.id === id);
+    
     if (pending) {
+        const registeredKey = data.keys.find(x => x.key === pending.key);
+        if (req.session.userEmail !== 'almogshemesh11@gmail.com' && registeredKey && registeredKey.isLocked) {
+            return res.sendStatus(403);
+        }
+
         const expiresTime = expiresAtRaw ? parseLocalTime(expiresAtRaw) : null;
         const existingIndex = data.whitelist.places.findIndex(p => p.id === id);
         
@@ -1382,11 +1388,11 @@ app.post('/approve/:id', checkAuth, async (req, res) => {
                 expiresAt: expiresTime || currentItem.expiresAt
             };
         } else {
-            data.whitelist.places.push({ 
-                id, 
-                name: pending.name || 'Approved Place', 
+            data.whitelist.places.push({
+                id,
+                name: pending.name || 'Approved Place',
                 keys: [{ key: pending.key, expiresAt: expiresTime }],
-                expiresAt: expiresTime 
+                expiresAt: expiresTime
             });
         }
         data.pendingPlaces = data.pendingPlaces.filter(p => p.id !== id);
