@@ -1010,11 +1010,9 @@ ${sourceCode}`;
     let finalCode = fullCodeToObfuscate;
 
     try {
-        // ב-Obfuscate.club השליחה נעשית ישירות ל-POST עם ה-API Key בהדר
-        const response = await axios.post('https://api.obfuscate.club/obfuscate',
+        const response = await axios.post('https://api.obfuscate.club/v1/obfuscate',
             {
                 script: fullCodeToObfuscate,
-                // שם האופציות עשוי להשתנות, בדרך כלל זה עובד עם ברירת מחדל
                 options: { controlFlow: true, renameVariables: true }
             },
             {
@@ -1025,9 +1023,7 @@ ${sourceCode}`;
             }
         );
 
-        // Obfuscate.club לרוב מחזיר את הקוד ישירות בשדה 'obfuscated' או כטקסט
-        finalCode = response.data.obfuscated || response.data.script || response.data;
-        
+        finalCode = response.data.obfuscated || response.data.script || JSON.stringify(response.data);
     } catch (error) {
         console.error('Obfuscation API Error:', error.response ? error.response.data : error.message);
         finalCode = "-- Obfuscation failed. Please check your API Key and limits.";
