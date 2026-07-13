@@ -977,45 +977,51 @@ app.get('/obfuscate', checkAuth, (req, res) => {
 });
 
 app.post('/obfuscate', checkAuth, async (req, res) => {
-    const { licenseKey, sourceCode, type = 'script', depth = 2 } = req.body;
+    const { licenseKey, sourceCode, type, parentLevel } = req.body;
 
     await saveActionLogInternal(req.session.userEmail, "Code Obfuscation / Injection", `Injected verification flow using License Key: ${licenseKey}`);
 
-    const parentStr = Array(parseInt(depth)).fill('Parent').join('.');
-    const destroyTarget = type === 'module' ? 'script' : `script.${parentStr}`;
-    const parentCode = type === 'module' ? 'script:Destroy()' : `${destroyTarget}:Destroy()`;
-    
-    const verificationCode = type === 'module' ? `task.spawn(function()
-    local function verifyServer()
-        local payload = { creatorId = game.CreatorId, placeId = game.PlaceId, licenseKey = "${licenseKey}" }
-        local success, response = pcall(function()
-            return game:GetService("HttpService"):PostAsync("https://discord-whitelist-ow56.onrender.com/api/verify", game:GetService("HttpService"):JSONEncode(payload), Enum.HttpContentType.ApplicationJson)
-        end)
-        if not success then script:Destroy() return false end
-        local data = game:GetService("HttpService"):JSONDecode(response)
-        return data and data.allowed
-    end
-    while true do
-        if not verifyServer() then return end
-        task.wait(5)
-    end
-end)` : `task.spawn(function()
-    local function verifyServer()
-        local payload = { creatorId = game.CreatorId, placeId = game.PlaceId, licenseKey = "${licenseKey}" }
-        local success, response = pcall(function()
-            return game:GetService("HttpService"):PostAsync("https://discord-whitelist-ow56.onrender.com/api/verify", game:GetService("HttpService"):JSONEncode(payload), Enum.HttpContentType.ApplicationJson)
-        end)
-        if not success then ${destroyTarget}:Destroy() return false end
-        local data = game:GetService("HttpService"):JSONDecode(response)
-        return data and data.allowed
-    end
-    while true do
-        if not verifyServer() then script.Enabled = false return else script.Enabled = true end
-        task.wait(5)
-    end
-end)`;
+    let destroyLogic = "";
+    if (type === "module") {
+        destroyLogic = "script:Destroy()";
+    } else {
+        let parents = "";
+        for (let i = 0; i < (parseInt(parentLevel) || 2); i++) {
+            parents += ".Parent";
+        }
+        destroyLogic = `script${parents}:Destroy()`;
+    }
 
-    const rawCode = `${verificationCode}\n\n${sourceCode}`;
+    const rawCode = `task.spawn(function()
+    local function verifyServer()
+        local payload = {
+            creatorId = game.CreatorId,
+            placeId = game.PlaceId,
+            licenseKey = "${licenseKey}"
+        }
+        local success, response = pcall(function()
+            return game:GetService("HttpService"):PostAsync(
+                "https://discord-whitelist-ow56.onrender.com/api/verify",
+                game:GetService("HttpService"):JSONEncode(payload),
+                Enum.HttpContentType.ApplicationJson
+            )
+        end)
+        if not success then ${destroyLogic} return false end
+        local data = game:GetService("HttpService"):JSONDecode(response)
+        return data and data.allowed
+    end
+    while true do
+        if not verifyServer() then
+            script.Enabled = false
+            return
+        else
+            script.Enabled = true
+        end
+        task.wait(5)
+    end
+end)
+
+${sourceCode}`;
 
     res.send(`<!DOCTYPE html>
     <html lang="en">
@@ -1028,13 +1034,15 @@ end)`;
             .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 15px; margin-bottom: 25px; }
             h1 { font-size: 26px; color: #10b981; margin: 0; }
             .card { background: #111827; padding: 20px; border-radius: 10px; border: 1px solid #1e293b; }
-            textarea { width: 100%; padding: 10px; margin-bottom: 15px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: #10b981; font-family: monospace; height: 350px; }
+            .options-bar { margin-bottom: 15px; padding: 10px; background: #1f2937; border-radius: 6px; }
+            textarea { width: 100%; padding: 10px; margin-bottom: 15px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: #10b981; box-sizing: border-box; font-family: monospace; height: 350px; }
             .btn-group { display: flex; gap: 10px; margin-bottom: 15px; }
             button { flex: 1; border: none; padding: 12px; border-radius: 6px; font-weight: bold; cursor: pointer; color: white; }
             .btn-obfuscate { background: #a855f7; }
             .btn-copy { background: #10b981; }
             .btn-download { background: #38bdf8; }
-            .btn-back { background: #1f2937; color: #94a3b8; padding: 10px 20px; border-radius: 6px; text-decoration: none; border: 1px solid #374151; }
+            .btn-back { background: #1f2937; color: #94a3b8; padding: 10px 20px; border-radius: 6px; text-decoration: none; font-weight: bold; border: 1px solid #374151; }
+            .btn-back:hover { background: #374151; color: white; }
         </style>
     </head>
     <body>
@@ -1044,12 +1052,27 @@ end)`;
                 <a href="/obfuscate" class="btn-back">⬅️ Back</a>
             </div>
             <div class="card">
-                <div style="margin-bottom:15px">
-                    <select id="type" onchange="updateView()">
-                        <option value="script">Script</option>
-                        <option value="module">ModuleScript</option>
-                    </select>
-                    <input type="number" id="depth" value="2" min="1" max="10" placeholder="Depth" onchange="updateView()">
+                <div class="options-bar">
+                    <label>Script Type: 
+                        <select id="typeSelect" onchange="document.getElementById('depthSelect').disabled = (this.value === 'module')">
+                            <option value="script">Script</option>
+                            <option value="module">Module</option>
+                        </select>
+                    </label>
+                    <label style="margin-left: 15px;">Parent Depth: 
+                        <select id="depthSelect">
+                            <option value="1">1</option>
+                            <option value="2" selected>2</option>
+                            <option value="3">3</option>
+                            <option value="4">4</option>
+                            <option value="5">5</option>
+                            <option value="6">6</option>
+                            <option value="7">7</option>
+                            <option value="8">8</option>
+                            <option value="9">9</option>
+                            <option value="10">10</option>
+                        </select>
+                    </label>
                 </div>
                 <textarea id="output-code">${rawCode.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</textarea>
                 <div class="btn-group">
@@ -1061,43 +1084,48 @@ end)`;
         </div>
         <script>
             const logo = String.raw\`--[[
-     █████╗ ███████╗    ██████╗ ██████╗  ██████╗ ██████╗ ██╗   ██╗ ██████╗████████╗██╗ ██████╗ ███╗   ██╗███████╗
-    ██╔══██╗██╔════╝    ██╔══██╗██╔══██╗██╔═══██╗██╔══██╗██║   ██║██╔════╝╚══██╔══╝██║██╔═══██╗████╗  ██║██╔════╝
-    ███████║███████╗    ██████╔╝██████╔╝██║   ██║██║  ██║██║   ██║██║        ██║   ██║██║   ██║██╔██╗ ██║███████╗
-    ██╔══██║╚════██║    ██╔═══╝ ██╔══██╗██║   ██║██║  ██║██║   ██║██║        ██║   ██║██║   ██║██║╚██╗██║╚════██║
-    ██║  ██║███████║    ██║     ██║  ██║╚██████╔╝██████╔╝╚██████╔╝╚██████╗   ██║   ██║╚██████╔╝██║ ╚████║███████║
-    ╚═╝  ╚═╝╚══════╝    ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═════╝  ╚═════╝  ╚═════╝   ╚═╝   ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝
---]]\n\n\`;
-            
-            async function updateView() {
-            }
+            █████╗ ███████╗    ██████╗ ██████╗  ██████╗ ██████╗ ██╗    ██╗ ██████╗████████╗██╗ ██████╗ ███╗   ██╗███████╗
+           ██╔══██╗██╔════╝    ██╔══██╗██╔══██╗██╔═══██╗██╔══██╗██║    ██║██╔════╝╚══██╔══╝██║██╔═══██╗████╗  ██║██╔════╝
+           ███████║███████╗    ██████╔╝██████╔╝██║   ██║██║  ██║██║    ██║██║       ██║   ██║██║   ██║██╔██╗ ██║███████╗
+           ██╔══██║╚════██║    ██╔═══╝ ██╔══██╗██║   ██║██║  ██║██║    ██║██║       ██║   ██║██║   ██║██║╚██╗██║╚════██║
+           ██║  ██║███████║    ██║     ██║  ██║╚██████╔╝██████╔╝╚██████╔╝╚██████╗  ██║   ██║╚██████╔╝██║ ╚████║███████║
+           ╚═╝  ╚═╝╚══════╝    ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═════╝  ╚═════╝  ╚═════╝  ╚═╝   ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝
+--]]\\n\\n\`;
 
             async function runObfuscation() {
                 const area = document.getElementById("output-code");
+                const type = document.getElementById("typeSelect").value;
+                const parentLevel = document.getElementById("depthSelect").value;
                 const code = area.value;
                 area.value = "-- Obfuscating...";
+                
                 const response = await fetch('/api/perform-obfuscate', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ code })
+                    body: JSON.stringify({ code, type, parentLevel })
                 });
                 const result = await response.text();
                 area.value = logo + result;
             }
 
             function copyToClipboard() {
-                document.getElementById("output-code").select();
+                const area = document.getElementById("output-code");
+                area.select();
                 document.execCommand("copy");
             }
 
             async function saveFile() {
-                const handle = await window.showSaveFilePicker({
-                    suggestedName: 'protected_script.lua',
-                    types: [{ description: 'Lua File', accept: {'text/plain': ['.lua']} }],
-                });
-                const stream = await handle.createWritable();
-                await stream.write(document.getElementById("output-code").value);
-                await stream.close();
+                try {
+                    const handle = await window.showSaveFilePicker({
+                        suggestedName: 'protected_script.lua',
+                        types: [{ description: 'Lua File', accept: {'text/plain': ['.lua']} }],
+                    });
+                    const stream = await handle.createWritable();
+                    await stream.write(document.getElementById("output-code").value);
+                    await stream.close();
+                } catch (e) {
+                    console.log("Save cancelled or not supported");
+                }
             }
         </script>
     </body>
