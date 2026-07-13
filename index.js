@@ -1010,15 +1010,12 @@ ${sourceCode}`;
     let finalCode = fullCodeToObfuscate;
 
     try {
-        const response = await axios({
-            method: 'post',
-            url: 'https://magicsec.vip/api/obfuscate',
+        const response = await axios.post('https://magicsec.vip/api/obfuscate', {
+            code: fullCodeToObfuscate,
+            platform: "roblox"
+        }, {
             headers: {
                 'Content-Type': 'application/json'
-            },
-            data: {
-                language: "lua",
-                code: fullCodeToObfuscate
             }
         });
 
