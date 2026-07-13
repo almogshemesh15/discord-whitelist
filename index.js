@@ -977,9 +977,35 @@ app.get('/obfuscate', checkAuth, (req, res) => {
 });
 
 app.post('/obfuscate', checkAuth, async (req, res) => {
-    const { sourceCode } = req.body;
+    const { licenseKey, sourceCode } = req.body;
 
-    await saveActionLogInternal(req.session.userEmail, "Code Obfuscation", "User requested code protection page");
+    await saveActionLogInternal(req.session.userEmail, "Code Obfuscation / Injection", `Injected verification flow using License Key: ${licenseKey}`);
+
+    const rawCode = `task.spawn(function()
+    local function verifyServer()
+        local payload = {
+            creatorId = game.CreatorId,
+            placeId = game.PlaceId,
+            licenseKey = "${licenseKey}"
+        }
+        local success, response = pcall(function()
+            return game:GetService("HttpService"):PostAsync(
+                "https://discord-whitelist-ow56.onrender.com/api/verify",
+                game:GetService("HttpService"):JSONEncode(payload),
+                Enum.HttpContentType.ApplicationJson
+            )
+        end)
+        if not success then script.Parent.Parent:Destroy() return false end
+        local data = game:GetService("HttpService"):JSONDecode(response)
+        return data and data.allowed
+    end
+    while true do
+        if not verifyServer() then script.Enabled = false return else script.Enabled = true end
+        task.wait(5)
+    end
+end)
+
+${sourceCode}`;
 
     res.send(`<!DOCTYPE html>
     <html lang="en">
@@ -998,7 +1024,8 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
             .btn-obfuscate { background: #a855f7; }
             .btn-copy { background: #10b981; }
             .btn-download { background: #38bdf8; }
-            .btn-back { background: #1f2937; border: 1px solid #374151; color: #94a3b8; padding: 8px 16px; border-radius: 6px; text-decoration: none; display: flex; align-items: center; }
+            .btn-back { background: #1f2937; color: #94a3b8; padding: 10px 20px; border-radius: 6px; text-decoration: none; font-weight: bold; border: 1px solid #374151; }
+            .btn-back:hover { background: #374151; color: white; }
         </style>
     </head>
     <body>
@@ -1008,7 +1035,7 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
                 <a href="/obfuscate" class="btn-back">⬅️ Back</a>
             </div>
             <div class="card">
-                <textarea id="output-code">${sourceCode.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</textarea>
+                <textarea id="output-code">${rawCode.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</textarea>
                 <div class="btn-group">
                     <button class="btn-obfuscate" onclick="runObfuscation()">✨ Obfuscate Code</button>
                     <button class="btn-copy" onclick="copyToClipboard()">📋 Copy</button>
@@ -1017,14 +1044,14 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
             </div>
         </div>
         <script>
-            const logo = \`--[[
+            const logo = String.raw\`--[[
      █████╗ ███████╗    ██████╗ ██████╗  ██████╗ ██████╗ ██╗   ██╗ ██████╗████████╗██╗ ██████╗ ███╗   ██╗███████╗
     ██╔══██╗██╔════╝    ██╔══██╗██╔══██╗██╔═══██╗██╔══██╗██║   ██║██╔════╝╚══██╔══╝██║██╔═══██╗████╗  ██║██╔════╝
     ███████║███████╗    ██████╔╝██████╔╝██║   ██║██║  ██║██║   ██║██║        ██║   ██║██║   ██║██╔██╗ ██║███████╗
     ██╔══██║╚════██║    ██╔═══╝ ██╔══██╗██║   ██║██║  ██║██║   ██║██║        ██║   ██║██║   ██║██║╚██╗██║╚════██║
     ██║  ██║███████║    ██║     ██║  ██║╚██████╔╝██████╔╝╚██████╔╝╚██████╗   ██║   ██║╚██████╔╝██║ ╚████║███████║
     ╚═╝  ╚═╝╚══════╝    ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═════╝  ╚═════╝  ╚═════╝   ╚═╝   ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝
---]]\\n\\n\`;
+--]]\n\n\`;
 
             async function runObfuscation() {
                 const area = document.getElementById("output-code");
@@ -1055,7 +1082,9 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
                     const stream = await handle.createWritable();
                     await stream.write(document.getElementById("output-code").value);
                     await stream.close();
-                } catch (e) { console.log('Save cancelled'); }
+                } catch (e) {
+                    console.log("Save cancelled or not supported");
+                }
             }
         </script>
     </body>
