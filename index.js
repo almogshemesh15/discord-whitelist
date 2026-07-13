@@ -977,25 +977,35 @@ app.get('/obfuscate', checkAuth, (req, res) => {
 });
 
 app.post('/obfuscate', checkAuth, async (req, res) => {
-    const { licenseKey, sourceCode } = req.body;
+    const { licenseKey, sourceCode, type = 'script', depth = 2 } = req.body;
 
     await saveActionLogInternal(req.session.userEmail, "Code Obfuscation / Injection", `Injected verification flow using License Key: ${licenseKey}`);
 
-    const rawCode = `task.spawn(function()
+    const parentStr = Array(parseInt(depth)).fill('Parent').join('.');
+    const destroyTarget = type === 'module' ? 'script' : `script.${parentStr}`;
+    const parentCode = type === 'module' ? 'script:Destroy()' : `${destroyTarget}:Destroy()`;
+    
+    const verificationCode = type === 'module' ? `task.spawn(function()
     local function verifyServer()
-        local payload = {
-            creatorId = game.CreatorId,
-            placeId = game.PlaceId,
-            licenseKey = "${licenseKey}"
-        }
+        local payload = { creatorId = game.CreatorId, placeId = game.PlaceId, licenseKey = "${licenseKey}" }
         local success, response = pcall(function()
-            return game:GetService("HttpService"):PostAsync(
-                "https://discord-whitelist-ow56.onrender.com/api/verify",
-                game:GetService("HttpService"):JSONEncode(payload),
-                Enum.HttpContentType.ApplicationJson
-            )
+            return game:GetService("HttpService"):PostAsync("https://discord-whitelist-ow56.onrender.com/api/verify", game:GetService("HttpService"):JSONEncode(payload), Enum.HttpContentType.ApplicationJson)
         end)
-        if not success then script.Parent.Parent:Destroy() return false end
+        if not success then script:Destroy() return false end
+        local data = game:GetService("HttpService"):JSONDecode(response)
+        return data and data.allowed
+    end
+    while true do
+        if not verifyServer() then return end
+        task.wait(5)
+    end
+end)` : `task.spawn(function()
+    local function verifyServer()
+        local payload = { creatorId = game.CreatorId, placeId = game.PlaceId, licenseKey = "${licenseKey}" }
+        local success, response = pcall(function()
+            return game:GetService("HttpService"):PostAsync("https://discord-whitelist-ow56.onrender.com/api/verify", game:GetService("HttpService"):JSONEncode(payload), Enum.HttpContentType.ApplicationJson)
+        end)
+        if not success then ${destroyTarget}:Destroy() return false end
         local data = game:GetService("HttpService"):JSONDecode(response)
         return data and data.allowed
     end
@@ -1003,9 +1013,9 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
         if not verifyServer() then script.Enabled = false return else script.Enabled = true end
         task.wait(5)
     end
-end)
+end)`;
 
-${sourceCode}`;
+    const rawCode = `${verificationCode}\n\n${sourceCode}`;
 
     res.send(`<!DOCTYPE html>
     <html lang="en">
@@ -1018,14 +1028,13 @@ ${sourceCode}`;
             .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 15px; margin-bottom: 25px; }
             h1 { font-size: 26px; color: #10b981; margin: 0; }
             .card { background: #111827; padding: 20px; border-radius: 10px; border: 1px solid #1e293b; }
-            textarea { width: 100%; padding: 10px; margin-bottom: 15px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: #10b981; box-sizing: border-box; font-family: monospace; height: 350px; }
+            textarea { width: 100%; padding: 10px; margin-bottom: 15px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: #10b981; font-family: monospace; height: 350px; }
             .btn-group { display: flex; gap: 10px; margin-bottom: 15px; }
             button { flex: 1; border: none; padding: 12px; border-radius: 6px; font-weight: bold; cursor: pointer; color: white; }
             .btn-obfuscate { background: #a855f7; }
             .btn-copy { background: #10b981; }
             .btn-download { background: #38bdf8; }
-            .btn-back { background: #1f2937; color: #94a3b8; padding: 10px 20px; border-radius: 6px; text-decoration: none; font-weight: bold; border: 1px solid #374151; }
-            .btn-back:hover { background: #374151; color: white; }
+            .btn-back { background: #1f2937; color: #94a3b8; padding: 10px 20px; border-radius: 6px; text-decoration: none; border: 1px solid #374151; }
         </style>
     </head>
     <body>
@@ -1035,6 +1044,13 @@ ${sourceCode}`;
                 <a href="/obfuscate" class="btn-back">⬅️ Back</a>
             </div>
             <div class="card">
+                <div style="margin-bottom:15px">
+                    <select id="type" onchange="updateView()">
+                        <option value="script">Script</option>
+                        <option value="module">ModuleScript</option>
+                    </select>
+                    <input type="number" id="depth" value="2" min="1" max="10" placeholder="Depth" onchange="updateView()">
+                </div>
                 <textarea id="output-code">${rawCode.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</textarea>
                 <div class="btn-group">
                     <button class="btn-obfuscate" onclick="runObfuscation()">✨ Obfuscate Code</button>
@@ -1052,12 +1068,14 @@ ${sourceCode}`;
     ██║  ██║███████║    ██║     ██║  ██║╚██████╔╝██████╔╝╚██████╔╝╚██████╗   ██║   ██║╚██████╔╝██║ ╚████║███████║
     ╚═╝  ╚═╝╚══════╝    ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═════╝  ╚═════╝  ╚═════╝   ╚═╝   ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝
 --]]\n\n\`;
+            
+            async function updateView() {
+            }
 
             async function runObfuscation() {
                 const area = document.getElementById("output-code");
                 const code = area.value;
                 area.value = "-- Obfuscating...";
-                
                 const response = await fetch('/api/perform-obfuscate', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
@@ -1068,23 +1086,18 @@ ${sourceCode}`;
             }
 
             function copyToClipboard() {
-                const area = document.getElementById("output-code");
-                area.select();
+                document.getElementById("output-code").select();
                 document.execCommand("copy");
             }
 
             async function saveFile() {
-                try {
-                    const handle = await window.showSaveFilePicker({
-                        suggestedName: 'protected_script.lua',
-                        types: [{ description: 'Lua File', accept: {'text/plain': ['.lua']} }],
-                    });
-                    const stream = await handle.createWritable();
-                    await stream.write(document.getElementById("output-code").value);
-                    await stream.close();
-                } catch (e) {
-                    console.log("Save cancelled or not supported");
-                }
+                const handle = await window.showSaveFilePicker({
+                    suggestedName: 'protected_script.lua',
+                    types: [{ description: 'Lua File', accept: {'text/plain': ['.lua']} }],
+                });
+                const stream = await handle.createWritable();
+                await stream.write(document.getElementById("output-code").value);
+                await stream.close();
             }
         </script>
     </body>
