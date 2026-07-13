@@ -981,7 +981,6 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
     
     await saveActionLogInternal(req.session.userEmail, "Code Obfuscation / Injection", `Injected verification flow using License Key: ${licenseKey}`);
 
-    // בנית התבנית המלאה
     const fullCodeToObfuscate = `task.spawn(function()
     local function verifyServer()
         local payload = {
@@ -1008,31 +1007,29 @@ end)
 
 ${sourceCode}`;
 
-    let finalCode = fullCodeToObfuscate; // ברירת מחדל למקרה של תקלה
+    let finalCode = fullCodeToObfuscate;
 
     try {
+        // שלב 1: שליחת הקוד וקבלת sessionId
         const response = await axios.post('https://luaobfuscator.com/api/obfuscator/newscript',
-            {
-                script: fullCodeToObfuscate,
-                // אופציונלי: מוודא שה-API מקבל את הקוד כטקסט
-                options: { debugEnabled: false }
-            },
-            {
-                headers: {
-                    'apikey': process.env.LUA_API_KEY,
-                    'Content-Type': 'application/json'
-                }
-            }
+            { script: fullCodeToObfuscate, options: { debugEnabled: false } },
+            { headers: { 'apikey': process.env.LUA_API_KEY, 'Content-Type': 'application/json' } }
         );
 
-        console.log('API Response structure:', typeof response.data, response.data);
+        const sessionId = response.data.sessionId;
+        
+        if (sessionId) {
+            // שלב 2: המתנה קצרה לעיבוד השרת
+            await new Promise(resolve => setTimeout(resolve, 3000));
 
-        // חילוץ חכם של הקוד
-        if (typeof response.data === 'string') {
-            finalCode = response.data;
+            // שלב 3: משיכת הקוד המעורפל בעזרת ה-sessionId
+            const resultResponse = await axios.get(`https://luaobfuscator.com/api/obfuscator/getscript?id=${sessionId}`,
+                { headers: { 'apikey': process.env.LUA_API_KEY } }
+            );
+            
+            finalCode = resultResponse.data.code || resultResponse.data.script || JSON.stringify(resultResponse.data);
         } else {
-            // בודק את כל המפתחות האפשריים שה-API עשוי להחזיר
-            finalCode = response.data.code || response.data.script || response.data.result || JSON.stringify(response.data);
+            finalCode = response.data.code || response.data.script || JSON.stringify(response.data);
         }
     } catch (error) {
         console.error('Obfuscation API Error:', error.response ? error.response.data : error.message);
