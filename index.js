@@ -1010,29 +1010,27 @@ ${sourceCode}`;
     let finalCode = fullCodeToObfuscate;
 
     try {
-        // שלב 1: שליחת הקוד וקבלת sessionId
-        const response = await axios.post('https://luaobfuscator.com/api/obfuscator/newscript',
-            { script: fullCodeToObfuscate, options: { debugEnabled: false } },
-            { headers: { 'apikey': process.env.LUA_API_KEY, 'Content-Type': 'application/json' } }
+        // ב-Obfuscate.club השליחה נעשית ישירות ל-POST עם ה-API Key בהדר
+        const response = await axios.post('https://api.obfuscate.club/obfuscate',
+            {
+                script: fullCodeToObfuscate,
+                // שם האופציות עשוי להשתנות, בדרך כלל זה עובד עם ברירת מחדל
+                options: { controlFlow: true, renameVariables: true }
+            },
+            {
+                headers: {
+                    'Authorization': `Bearer ${process.env.LUA_API_KEY}`,
+                    'Content-Type': 'application/json'
+                }
+            }
         );
 
-        const sessionId = response.data.sessionId;
+        // Obfuscate.club לרוב מחזיר את הקוד ישירות בשדה 'obfuscated' או כטקסט
+        finalCode = response.data.obfuscated || response.data.script || response.data;
         
-        if (sessionId) {
-            // שלב 2: המתנה קצרה לעיבוד השרת
-            await new Promise(resolve => setTimeout(resolve, 3000));
-
-            // שלב 3: משיכת הקוד המעורפל בעזרת ה-sessionId
-            const resultResponse = await axios.get(`https://luaobfuscator.com/api/obfuscator/getscript?id=${sessionId}`,
-                { headers: { 'apikey': process.env.LUA_API_KEY } }
-            );
-            
-            finalCode = resultResponse.data.code || resultResponse.data.script || JSON.stringify(resultResponse.data);
-        } else {
-            finalCode = response.data.code || response.data.script || JSON.stringify(response.data);
-        }
     } catch (error) {
         console.error('Obfuscation API Error:', error.response ? error.response.data : error.message);
+        finalCode = "-- Obfuscation failed. Please check your API Key and limits.";
     }
 
     res.send(`<!DOCTYPE html>
