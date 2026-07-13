@@ -33,28 +33,6 @@ const REDIRECT_URI = process.env.RENDER_EXTERNAL_URL
 
 let sessionFocusMap = {};
 
-async function obfuscateScript(script) {
-    try {
-        const response = await axios.post('https://luaobfuscator.com/api/obfuscator/newscript',
-            { script: script },
-            {
-                headers: {
-                    'apikey': process.env.LUA_API_KEY,
-                    'Content-Type': 'application/json'
-                }
-            }
-        );
-
-        console.log('API Response:', response.data);
-
-        return typeof response.data === 'string' ? response.data : (response.data.code || response.data.script || JSON.stringify(response.data));
-        
-    } catch (error) {
-        console.error('Obfuscation failed:', error.response ? error.response.data : error.message);
-        return null;
-    }
-}
-
 function parseLocalTime(inputString) {
     if (!inputString) return null;
     return new Date(inputString + ':00+03:00').getTime();
@@ -1003,37 +981,14 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
     
     await saveActionLogInternal(req.session.userEmail, "Code Obfuscation / Injection", `Injected verification flow using License Key: ${licenseKey}`);
 
-    let finalCode = sourceCode;
-
-    try {
-        const response = await axios.post('https://luaobfuscator.com/api/obfuscator/newscript',
-            { script: sourceCode },
-            {
-                headers: {
-                    'apikey': process.env.LUA_API_KEY,
-                    'Content-Type': 'application/json'
-                }
-            }
-        );
-        
-        if (typeof response.data === 'string') {
-            finalCode = response.data;
-        } else {
-            finalCode = response.data.code || response.data.script || JSON.stringify(response.data);
-        }
-        
-    } catch (error) {
-        console.error('Obfuscation API Error:', error.response ? error.response.data : error.message);
-    }
-
-    const injectedTemplate = `task.spawn(function()
+    // בנית התבנית המלאה
+    const fullCodeToObfuscate = `task.spawn(function()
     local function verifyServer()
         local payload = {
             creatorId = game.CreatorId,
             placeId = game.PlaceId,
             licenseKey = "${licenseKey}"
         }
-
         local success, response = pcall(function()
             return game:GetService("HttpService"):PostAsync(
                 "https://discord-whitelist-ow56.onrender.com/api/verify",
@@ -1041,28 +996,47 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
                 Enum.HttpContentType.ApplicationJson
             )
         end)
-
-        if not success then
-            script.Parent.Parent:Destroy()
-            return false
-        end
-
+        if not success then script.Parent.Parent:Destroy() return false end
         local data = game:GetService("HttpService"):JSONDecode(response)
         return data and data.allowed
     end
-
     while true do
-        if not verifyServer() then
-            script.Enabled = false
-            return
-        else
-            script.Enabled = true
-        end
+        if not verifyServer() then script.Enabled = false return else script.Enabled = true end
         task.wait(5)
     end
 end)
 
-${finalCode}`;
+${sourceCode}`;
+
+    let finalCode = fullCodeToObfuscate; // ברירת מחדל למקרה של תקלה
+
+    try {
+        const response = await axios.post('https://luaobfuscator.com/api/obfuscator/newscript',
+            {
+                script: fullCodeToObfuscate,
+                // אופציונלי: מוודא שה-API מקבל את הקוד כטקסט
+                options: { debugEnabled: false }
+            },
+            {
+                headers: {
+                    'apikey': process.env.LUA_API_KEY,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+
+        console.log('API Response structure:', typeof response.data, response.data);
+
+        // חילוץ חכם של הקוד
+        if (typeof response.data === 'string') {
+            finalCode = response.data;
+        } else {
+            // בודק את כל המפתחות האפשריים שה-API עשוי להחזיר
+            finalCode = response.data.code || response.data.script || response.data.result || JSON.stringify(response.data);
+        }
+    } catch (error) {
+        console.error('Obfuscation API Error:', error.response ? error.response.data : error.message);
+    }
 
     res.send(`<!DOCTYPE html>
     <html lang="en">
@@ -1095,7 +1069,7 @@ ${finalCode}`;
                 <a href="/obfuscate" class="btn-back">⬅️ Back</a>
             </div>
             <div class="card">
-                <textarea id="output-code" readonly>${injectedTemplate}</textarea>
+                <textarea id="output-code" readonly>${finalCode}</textarea>
                 <div class="input-group">
                     <label for="file-name">Script Name (Optional)</label>
                     <input type="text" id="file-name" placeholder="obfuscated_protected">
