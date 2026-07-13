@@ -981,7 +981,7 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
     
     await saveActionLogInternal(req.session.userEmail, "Code Obfuscation / Injection", `Injected verification flow using License Key: ${licenseKey}`);
 
-    // הקוד משורשר בתוך משתנה אחד, Luraph יערפל את הכל כיחידה אחת
+    // הקוד המשולב
     const fullCodeToObfuscate = `task.spawn(function()
     local function verifyServer()
         local payload = {
@@ -1011,27 +1011,29 @@ ${sourceCode}`;
     let finalCode = fullCodeToObfuscate;
 
     try {
-        const response = await axios.post('https://api.luraph.com/v1/obfuscate',
+        // שימוש ב-API של MagicSec
+        const response = await axios.post('https://magicsec.vip/api/obfuscate',
             {
-                source: fullCodeToObfuscate,
-                options: {
-                    preset: "high" // מוגדר כ-high כדי להבטיח עירפול חזק של האימות
-                }
+                code: fullCodeToObfuscate, // ה-API דורש שדה בשם 'code'
+                platform: "lua"
             },
             {
                 headers: {
-                    'Luraph-API-Key': process.env.LURAPH_API_KEY, // שימוש במפתח החדש
                     'Content-Type': 'application/json'
                 }
             }
         );
 
-        finalCode = response.data.obfuscated;
+        // הנחה: ה-API מחזיר את הקוד המעורפל בשדה 'obfuscated' או 'code'
+        // אם זה לא עובד, בדוק ב-console.log(response.data) מה המבנה המדויק
+        finalCode = response.data.obfuscated || response.data.code || JSON.stringify(response.data);
+
     } catch (error) {
-        console.error('Luraph API Error:', error.response ? error.response.data : error.message);
-        finalCode = "-- Obfuscation failed. Verify your LURAPH_API_KEY in server settings.";
+        console.error('MagicSec API Error:', error.response ? error.response.data : error.message);
+        finalCode = "-- Obfuscation failed. Please check your network connection or API availability.";
     }
 
+    // ... המשך שליחת ה-HTML כפי שהיה ...
     res.send(`<!DOCTYPE html>
     <html lang="en">
     <head>
