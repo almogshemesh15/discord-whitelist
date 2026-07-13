@@ -932,11 +932,13 @@ app.get('/obfuscate', checkAuth, (req, res) => {
             .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 15px; margin-bottom: 25px; }
             h1 { font-size: 26px; color: #a855f7; margin: 0; }
             .card { background: #111827; padding: 20px; border-radius: 10px; border: 1px solid #1e293b; }
-            select, textarea { width: 100%; padding: 10px; margin-bottom: 15px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: white; box-sizing: border-box; }
-            textarea { font-family: monospace; height: 250px; resize: vertical; }
+            .row { display: flex; gap: 15px; margin-bottom: 15px; }
+            .row > div { flex: 1; }
+            select, textarea { width: 100%; padding: 10px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: white; box-sizing: border-box; }
+            textarea { font-family: monospace; height: 250px; resize: vertical; margin-bottom: 15px; }
             button { width: 100%; background: #a855f7; color: white; border: none; padding: 12px; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 15px; }
             button:hover { background: #9333ea; }
-            .btn-back { background: #1f2937; border: 1px solid #374151; color: #94a3b8; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; height: 38px; box-sizing: border-box; font-weight: bold; }
+            .btn-back { background: #1f2937; border: 1px solid #374151; color: #94a3b8; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; height: 38px; font-weight: bold; }
             .btn-back:hover { background: #374151; color: white; }
             label { display: block; margin-bottom: 6px; font-size: 14px; color: #94a3b8; }
         </style>
@@ -950,27 +952,32 @@ app.get('/obfuscate', checkAuth, (req, res) => {
             <div class="card">
                 <form action="/obfuscate" method="POST">
                     <label>Select License Key</label>
-                    <select name="licenseKey" required>
-                        ${keyOptions || '<option value="">No keys available - create one first</option>'}
+                    <select name="licenseKey" style="margin-bottom: 15px;" required>
+                        ${keyOptions || '<option value="">No keys available</option>'}
                     </select>
+                    
+                    <div class="row">
+                        <div>
+                            <label>Script Type</label>
+                            <select name="type" id="type" onchange="document.getElementById('depth').disabled = (this.value === 'module')">
+                                <option value="script">Script</option>
+                                <option value="module">Module</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label>Parent Depth</label>
+                            <select name="parentLevel" id="depth">
+                                ${[...Array(10)].map((_, i) => `<option value="${i+1}" ${i+1 === 2 ? 'selected' : ''}>${i+1}</option>`).join('')}
+                            </select>
+                        </div>
+                    </div>
+
                     <label>Paste your Lua Source Code</label>
                     <textarea name="sourceCode" placeholder="Paste your script here" required></textarea>
                     <button type="submit">Inject Whitelist Verification</button>
                 </form>
             </div>
         </div>
-        <script>
-            async function checkSessionStatus() {
-                try {
-                    await fetch('/api/session-status', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ hasFocus: document.hasFocus() })
-                    });
-                } catch(e) {}
-            }
-            setInterval(checkSessionStatus, 3000);
-        </script>
     </body>
     </html>
     `);
@@ -986,7 +993,8 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
         destroyLogic = "script:Destroy()";
     } else {
         let parents = "";
-        for (let i = 0; i < (parseInt(parentLevel) || 2); i++) {
+        const depth = parseInt(parentLevel) || 2;
+        for (let i = 0; i < depth; i++) {
             parents += ".Parent";
         }
         destroyLogic = `script${parents}:Destroy()`;
@@ -1053,26 +1061,8 @@ ${sourceCode}`;
             </div>
             <div class="card">
                 <div class="options-bar">
-                    <label>Script Type: 
-                        <select id="typeSelect" onchange="document.getElementById('depthSelect').disabled = (this.value === 'module')">
-                            <option value="script">Script</option>
-                            <option value="module">Module</option>
-                        </select>
-                    </label>
-                    <label style="margin-left: 15px;">Parent Depth: 
-                        <select id="depthSelect">
-                            <option value="1">1</option>
-                            <option value="2" selected>2</option>
-                            <option value="3">3</option>
-                            <option value="4">4</option>
-                            <option value="5">5</option>
-                            <option value="6">6</option>
-                            <option value="7">7</option>
-                            <option value="8">8</option>
-                            <option value="9">9</option>
-                            <option value="10">10</option>
-                        </select>
-                    </label>
+                    <label>Selected Type: <b>${type}</b></label>
+                    <label style="margin-left: 20px;">Selected Depth: <b>${type === 'module' ? 'N/A' : parentLevel}</b></label>
                 </div>
                 <textarea id="output-code">${rawCode.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</textarea>
                 <div class="btn-group">
@@ -1094,15 +1084,13 @@ ${sourceCode}`;
 
             async function runObfuscation() {
                 const area = document.getElementById("output-code");
-                const type = document.getElementById("typeSelect").value;
-                const parentLevel = document.getElementById("depthSelect").value;
                 const code = area.value;
                 area.value = "-- Obfuscating...";
                 
                 const response = await fetch('/api/perform-obfuscate', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ code, type, parentLevel })
+                    body: JSON.stringify({ code })
                 });
                 const result = await response.text();
                 area.value = logo + result;
