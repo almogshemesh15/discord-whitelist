@@ -1013,7 +1013,8 @@ ${sourceCode}`;
         const response = await axios.post('https://api.obfuscate.club/v1/obfuscate',
             {
                 source: fullCodeToObfuscate,
-                options: { controlFlow: true, renameVariables: true }
+                // הוסרו אופציות שלא נתמכות בתוכנית שלך
+                options: { renameVariables: true }
             },
             {
                 headers: {
@@ -1026,7 +1027,7 @@ ${sourceCode}`;
         finalCode = response.data.obfuscated || response.data.script || response.data.code || JSON.stringify(response.data);
     } catch (error) {
         console.error('Obfuscation API Error:', error.response ? error.response.data : error.message);
-        finalCode = "-- Obfuscation failed. Check server logs for details.";
+        finalCode = "-- Obfuscation failed. Please check your account plan limits.";
     }
 
     res.send(`<!DOCTYPE html>
