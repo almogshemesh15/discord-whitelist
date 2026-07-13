@@ -981,7 +981,6 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
     
     await saveActionLogInternal(req.session.userEmail, "Code Obfuscation / Injection", `Injected verification flow using License Key: ${licenseKey}`);
 
-    // הקוד המשולב
     const fullCodeToObfuscate = `task.spawn(function()
     local function verifyServer()
         local payload = {
@@ -1011,29 +1010,17 @@ ${sourceCode}`;
     let finalCode = fullCodeToObfuscate;
 
     try {
-        // שימוש ב-API של MagicSec
-        const response = await axios.post('https://magicsec.vip/api/obfuscate',
-            {
-                code: fullCodeToObfuscate, // ה-API דורש שדה בשם 'code'
-                platform: "lua"
-            },
-            {
-                headers: {
-                    'Content-Type': 'application/json'
-                }
-            }
-        );
+        const response = await axios.post('https://magicsec.vip/api/obfuscate', {
+            language: "lua",
+            code: fullCodeToObfuscate
+        });
 
-        // הנחה: ה-API מחזיר את הקוד המעורפל בשדה 'obfuscated' או 'code'
-        // אם זה לא עובד, בדוק ב-console.log(response.data) מה המבנה המדויק
-        finalCode = response.data.obfuscated || response.data.code || JSON.stringify(response.data);
-
+        finalCode = response.data.obfuscated || response.data.script || response.data.code || JSON.stringify(response.data);
     } catch (error) {
-        console.error('MagicSec API Error:', error.response ? error.response.data : error.message);
-        finalCode = "-- Obfuscation failed. Please check your network connection or API availability.";
+        console.error('Obfuscation API Error:', error.response ? error.response.data : error.message);
+        finalCode = "-- Obfuscation failed. Please check your account plan and API permissions.";
     }
 
-    // ... המשך שליחת ה-HTML כפי שהיה ...
     res.send(`<!DOCTYPE html>
     <html lang="en">
     <head>
