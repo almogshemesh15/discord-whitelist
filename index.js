@@ -981,6 +981,7 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
     
     await saveActionLogInternal(req.session.userEmail, "Code Obfuscation / Injection", `Injected verification flow using License Key: ${licenseKey}`);
 
+    // הקוד משורשר בתוך משתנה אחד, Luraph יערפל את הכל כיחידה אחת
     const fullCodeToObfuscate = `task.spawn(function()
     local function verifyServer()
         local payload = {
@@ -1010,24 +1011,25 @@ ${sourceCode}`;
     let finalCode = fullCodeToObfuscate;
 
     try {
-        const response = await axios.post('https://api.obfuscate.club/v1/obfuscate',
+        const response = await axios.post('https://api.luraph.com/v1/obfuscate',
             {
                 source: fullCodeToObfuscate,
-                // אובייקט ריק כדי להשתמש בברירת המחדל של המנוי
-                options: {}
+                options: {
+                    preset: "high" // מוגדר כ-high כדי להבטיח עירפול חזק של האימות
+                }
             },
             {
                 headers: {
-                    'Authorization': `Bearer ${process.env.LUA_API_KEY}`,
+                    'Luraph-API-Key': process.env.LURAPH_API_KEY, // שימוש במפתח החדש
                     'Content-Type': 'application/json'
                 }
             }
         );
 
-        finalCode = response.data.obfuscated || response.data.script || response.data.code || JSON.stringify(response.data);
+        finalCode = response.data.obfuscated;
     } catch (error) {
-        console.error('Obfuscation API Error:', error.response ? error.response.data : error.message);
-        finalCode = "-- Obfuscation failed. Please check your account plan and API permissions.";
+        console.error('Luraph API Error:', error.response ? error.response.data : error.message);
+        finalCode = "-- Obfuscation failed. Verify your LURAPH_API_KEY in server settings.";
     }
 
     res.send(`<!DOCTYPE html>
