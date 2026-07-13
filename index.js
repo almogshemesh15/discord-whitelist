@@ -1013,20 +1013,25 @@ ${sourceCode}`;
         const response = await axios({
             method: 'post',
             url: 'https://magicsec.vip/api/obfuscate',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            data: JSON.stringify({
+            headers: { 'Content-Type': 'application/json' },
+            data: {
                 code: fullCodeToObfuscate,
-                platform: "roblox"
-            })
+                platform: "roblox",
+                options: {
+                    antiTamper: true,
+                    encryptStrings: true
+                }
+            }
         });
 
-        finalCode = response.data.obfuscated || response.data.script || response.data.code || JSON.stringify(response.data);
+        if (typeof response.data === 'string') {
+            finalCode = response.data;
+        } else {
+            finalCode = response.data.code || response.data.script || JSON.stringify(response.data);
+        }
     } catch (error) {
-        console.log("Status:", error.response?.status);
-        console.dir(error.response?.data, { depth: null });
-        finalCode = "-- Obfuscation failed. Please check your account plan and API permissions.";
+        console.error("Obfuscation error:", error.response?.data || error.message);
+        finalCode = "-- Obfuscation failed. Check server logs.";
     }
 
     res.send(`<!DOCTYPE html>
@@ -1060,7 +1065,7 @@ ${sourceCode}`;
                 <a href="/obfuscate" class="btn-back">⬅️ Back</a>
             </div>
             <div class="card">
-                <textarea id="output-code" readonly>${finalCode}</textarea>
+                <textarea id="output-code" readonly>${finalCode.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</textarea>
                 <div class="input-group">
                     <label for="file-name">Script Name (Optional)</label>
                     <input type="text" id="file-name" placeholder="obfuscated_protected">
@@ -1068,38 +1073,16 @@ ${sourceCode}`;
                 <div class="btn-group">
                     <button onclick="copyToClipboard()">📋 Copy Code</button>
                     <button onclick="downloadAsFile()" class="btn-download">📥 Download .lua File</button>
-                    <button onclick="magicSecObfuscate()" style="background: #a855f7;">✨ MagicSec Obfuscate</button>
                 </div>
             </div>
         </div>
         <script>
-            async function magicSecObfuscate() {
-                const codeArea = document.getElementById("output-code");
-                const originalText = codeArea.value;
-                codeArea.value = "-- Obfuscating... Please wait...";
-                try {
-                    const response = await fetch('https://magicsec.vip/api/obfuscate', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            code: originalText,
-                            platform: 'lua'
-                        })
-                    });
-                    const obfuscated = await response.text();
-                    codeArea.value = obfuscated;
-                } catch (err) {
-                    alert("Obfuscation failed: " + err.message);
-                    codeArea.value = originalText;
-                }
-            }
             function copyToClipboard() {
                 const copyText = document.getElementById("output-code");
                 copyText.select();
-                copyText.setSelectionRange(0, 99999);
-                navigator.clipboard.writeText(copyText.value);
+                document.execCommand("copy");
             }
-            async function downloadAsFile() {
+            function downloadAsFile() {
                 const code = document.getElementById("output-code").value;
                 let fileName = document.getElementById("file-name").value.trim() || 'obfuscated_protected.lua';
                 if (!fileName.endsWith('.lua')) fileName += '.lua';
