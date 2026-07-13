@@ -44,9 +44,13 @@ async function obfuscateScript(script) {
                 }
             }
         );
-        return response.data;
+
+        console.log('API Response:', response.data);
+
+        return typeof response.data === 'string' ? response.data : (response.data.code || response.data.script || JSON.stringify(response.data));
+        
     } catch (error) {
-        console.error('Obfuscation failed:', error.message);
+        console.error('Obfuscation failed:', error.response ? error.response.data : error.message);
         return null;
     }
 }
@@ -1011,9 +1015,15 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
                 }
             }
         );
-        finalCode = response.data;
+        
+        if (typeof response.data === 'string') {
+            finalCode = response.data;
+        } else {
+            finalCode = response.data.code || response.data.script || JSON.stringify(response.data);
+        }
+        
     } catch (error) {
-        console.error('Obfuscation API Error:', error.message);
+        console.error('Obfuscation API Error:', error.response ? error.response.data : error.message);
     }
 
     const injectedTemplate = `task.spawn(function()
@@ -1054,8 +1064,7 @@ end)
 
 ${finalCode}`;
 
-    res.send(`
-    <!DOCTYPE html>
+    res.send(`<!DOCTYPE html>
     <html lang="en">
     <head>
         <meta charset="UTF-8">
@@ -1104,12 +1113,10 @@ ${finalCode}`;
                 copyText.setSelectionRange(0, 99999);
                 navigator.clipboard.writeText(copyText.value);
             }
-
             async function downloadAsFile() {
                 const code = document.getElementById("output-code").value;
                 let fileName = document.getElementById("file-name").value.trim() || 'obfuscated_protected.lua';
                 if (!fileName.endsWith('.lua')) fileName += '.lua';
-
                 const blob = new Blob([code], { type: 'text/plain' });
                 const url = window.URL.createObjectURL(blob);
                 const a = document.createElement('a');
@@ -1122,8 +1129,7 @@ ${finalCode}`;
             }
         </script>
     </body>
-    </html>
-    `);
+    </html>`);
 });
 
 app.get('/force-save', checkAuth, async (req, res) => {
