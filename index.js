@@ -978,7 +978,7 @@ app.get('/obfuscate', checkAuth, (req, res) => {
 
 app.post('/obfuscate', checkAuth, async (req, res) => {
     const { licenseKey, sourceCode } = req.body;
-    
+
     await saveActionLogInternal(req.session.userEmail, "Code Obfuscation / Injection", `Injected verification flow using License Key: ${licenseKey}`);
 
     const fullCodeToObfuscate = `task.spawn(function()
@@ -1013,6 +1013,10 @@ ${sourceCode}`;
         const response = await axios.post('https://magicsec.vip/api/obfuscate', {
             language: "lua",
             code: fullCodeToObfuscate
+        }, {
+            headers: {
+                'Content-Type': 'application/json'
+            }
         });
 
         finalCode = response.data.obfuscated || response.data.script || response.data.code || JSON.stringify(response.data);
