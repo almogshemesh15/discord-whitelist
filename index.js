@@ -5,6 +5,9 @@ const db = require('./database');
 const app = express();
 let isSaving = false;
 
+// Without these, one failing async request (a hiccup on a Roblox API call, a
+// save conflict, etc.) can crash the ENTIRE server for every connected user.
+// Log it and keep the server alive instead.
 process.on('unhandledRejection', (reason) => {
     console.error('Unhandled Rejection:', reason);
 });
@@ -978,58 +981,73 @@ app.get('/obfuscate', checkAuth, (req, res) => {
 
 app.post('/obfuscate', checkAuth, async (req, res) => {
     const { licenseKey, sourceCode } = req.body;
-
+    
     await saveActionLogInternal(req.session.userEmail, "Code Obfuscation / Injection", `Injected verification flow using License Key: ${licenseKey}`);
 
-    const fullCodeToObfuscate = `task.spawn(function()
-    local function verifyServer()
-        local payload = {
-            creatorId = game.CreatorId,
-            placeId = game.PlaceId,
-            licenseKey = "${licenseKey}"
-        }
-        local success, response = pcall(function()
-            return game:GetService("HttpService"):PostAsync(
-                "https://discord-whitelist-ow56.onrender.com/api/verify",
-                game:GetService("HttpService"):JSONEncode(payload),
-                Enum.HttpContentType.ApplicationJson
-            )
-        end)
-        if not success then script.Parent.Parent:Destroy() return false end
-        local data = game:GetService("HttpService"):JSONDecode(response)
-        return data and data.allowed
-    end
-    while true do
-        if not verifyServer() then script.Enabled = false return else script.Enabled = true end
-        task.wait(5)
-    end
+    const injectedTemplate = `task.spawn(function()
+	local function verifyServer()
+		local payload = {
+			creatorId = game.CreatorId,
+			placeId = game.PlaceId,
+			licenseKey = "${licenseKey}"
+		}
+
+		local success, response = pcall(function()
+			return game:GetService("HttpService"):PostAsync(
+				"https://discord-whitelist-ow56.onrender.com/api/verify",
+				game:GetService("HttpService"):JSONEncode(payload),
+				Enum.HttpContentType.ApplicationJson
+			)
+		end)
+
+		if not success then
+			script.Parent.Parent:Destroy()
+			return false
+		end
+
+		local data = game:GetService("HttpService"):JSONDecode(response)
+		return data and data.allowed
+	end
+
+	while true do
+		if not verifyServer() then
+			script.Enabled = false
+			return
+		else
+			script.Enabled = true
+		end
+		task.wait(5)
+	end
 end)
 
 ${sourceCode}`;
 
-    let finalCode = fullCodeToObfuscate;
+    let finalCode = injectedTemplate;
 
     try {
-        const response = await axios({
-            method: 'post',
-            url: 'https://magicsec.vip/api/obfuscate',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            data: JSON.stringify({
-                code: fullCodeToObfuscate,
-                platform: "roblox"
-            })
+        const response = await axios.post('https://magicsec.vip/api/obfuscate', {
+            code: injectedTemplate,
+            language: 'roblox' // MagicSec's documented field is "language", not "platform" - that was the bug
+        }, {
+            headers: { 'Content-Type': 'application/json' },
+            timeout: 20000
         });
 
-        finalCode = response.data.obfuscated || response.data.script || response.data.code || JSON.stringify(response.data);
+        // MagicSec returns the obfuscated script as a raw text body, not JSON with
+        // an .obfuscated/.script/.code field. Treating it as an object and falling
+        // through to JSON.stringify() is what produced the mangled, escaped output.
+        if (typeof response.data === 'string' && response.data.trim().length > 0) {
+            finalCode = response.data;
+        } else if (response.data && typeof response.data === 'object') {
+            finalCode = response.data.obfuscated || response.data.script || response.data.code || JSON.stringify(response.data);
+        }
     } catch (error) {
-        console.log("Status:", error.response?.status);
-        console.dir(error.response?.data, { depth: null });
-        finalCode = "-- Obfuscation failed. Please check your account plan and API permissions.";
+        console.error('MagicSec obfuscation failed:', error.response?.status, error.response?.data || error.message);
+        finalCode = `-- Obfuscation failed, showing unobfuscated protected code instead.\n${injectedTemplate}`;
     }
 
-    res.send(`<!DOCTYPE html>
+    res.send(`
+    <!DOCTYPE html>
     <html lang="en">
     <head>
         <meta charset="UTF-8">
@@ -1072,19 +1090,61 @@ ${sourceCode}`;
             </div>
         </div>
         <script>
+            async function checkSessionStatus() {
+                try {
+                    await fetch('/api/session-status', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ hasFocus: document.hasFocus() })
+                    });
+                } catch(e) {}
+            }
+            setInterval(checkSessionStatus, 3000);
+
             function copyToClipboard() {
                 const copyText = document.getElementById("output-code");
                 copyText.select();
                 copyText.setSelectionRange(0, 99999);
                 navigator.clipboard.writeText(copyText.value);
             }
+
             async function downloadAsFile() {
                 const code = document.getElementById("output-code").value;
-                let fileName = document.getElementById("file-name").value.trim() || 'obfuscated_protected.lua';
-                if (!fileName.endsWith('.lua')) fileName += '.lua';
+                let fileName = document.getElementById("file-name").value.trim();
+                if (!fileName) {
+                    fileName = 'obfuscated_protected';
+                }
+                if (!fileName.endsWith('.lua')) {
+                    fileName += '.lua';
+                }
+
+                if ('showSaveFilePicker' in window) {
+                    try {
+                        const handle = await window.showSaveFilePicker({
+                            suggestedName: fileName,
+                            types: [{
+                                description: 'Lua Script',
+                                accept: {'text/plain': ['.lua']},
+                            }],
+                        });
+                        const writable = await handle.createWritable();
+                        await writable.write(code);
+                        await writable.close();
+                    } catch (err) {
+                        if (err.name !== 'AbortError') {
+                            fallbackDownload(code, fileName);
+                        }
+                    }
+                } else {
+                    fallbackDownload(code, fileName);
+                }
+            }
+
+            function fallbackDownload(code, fileName) {
                 const blob = new Blob([code], { type: 'text/plain' });
                 const url = window.URL.createObjectURL(blob);
                 const a = document.createElement('a');
+                a.style.display = 'none';
                 a.href = url;
                 a.download = fileName;
                 document.body.appendChild(a);
@@ -1094,7 +1154,8 @@ ${sourceCode}`;
             }
         </script>
     </body>
-    </html>`);
+    </html>
+    `);
 });
 
 app.get('/force-save', checkAuth, async (req, res) => {
