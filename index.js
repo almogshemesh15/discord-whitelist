@@ -426,7 +426,7 @@ app.post('/api/verify', async (req, res) => {
 
     const validKey = data.keys.find(k => k.key === licenseKey);
     if (licenseKey && validKey) {
-        if (!data.pendingPlaces.some(p => p.id === Number(placeId))) {
+        if (!data.pendingPlaces.some(p => p.id === Number(placeId) && p.key === licenseKey)) {
             let placeName = 'Unknown Place';
             let creatorName = 'Unknown';
             try {
@@ -836,11 +836,11 @@ app.get('/', checkAuth, (req, res) => {
                             <td>
                                 <div style="display:flex; flex-direction:column; gap:8px;">
                                     <div style="display:flex; gap:5px; align-items:center; margin-bottom:0;">
-                                        <input type="datetime-local" id="exp-\${item.id}" style="padding:4px; margin-bottom:0; width:160px; font-size:12px; height:28px;">
-                                        <span onclick="executePostAction('/approve/\${item.id}', { expiresAt: document.getElementById('exp-\${item.id}').value })" style="font-size:14px; cursor:pointer; color:#10b981; font-weight:bold;">Approve</span>
+                                        <input type="datetime-local" id="exp-\${item.id}-\${encodeURIComponent(item.key)}" style="padding:4px; margin-bottom:0; width:160px; font-size:12px; height:28px;">
+                                        <span onclick="executePostAction('/approve/\${item.id}/' + encodeURIComponent('\${item.key}'), { expiresAt: document.getElementById('exp-\${item.id}-\${encodeURIComponent(item.key)}').value })" style="font-size:14px; cursor:pointer; color:#10b981; font-weight:bold;">Approve</span>
                                     </div>
                                     <div style="margin-bottom:0;">
-                                        <span onclick="executePostAction('/reject/\${item.id}')" style="font-size:14px; cursor:pointer; text-align:left; color:#f43f5e; font-weight:bold;">Decline</span>
+                                        <span onclick="executePostAction('/reject/\${item.id}/' + encodeURIComponent('\${item.key}'))" style="font-size:14px; cursor:pointer; text-align:left; color:#f43f5e; font-weight:bold;">Decline</span>
                                     </div>
                                 </div>
                             </td>
@@ -1361,11 +1361,12 @@ app.get('/delete-sub-key/:type/:id/:key', checkAuth, async (req, res) => {
     res.sendStatus(200);
 });
 
-app.post('/approve/:id', checkAuth, async (req, res) => {
+app.post('/approve/:id/:key', checkAuth, async (req, res) => {
     const data = db.getData();
     const id = Number(req.params.id);
+    const keyParam = decodeURIComponent(req.params.key);
     const expiresAtRaw = req.body.expiresAt;
-    const pending = data.pendingPlaces.find(p => p.id === id);
+    const pending = data.pendingPlaces.find(p => p.id === id && p.key === keyParam);
     
     if (pending) {
         const registeredKey = data.keys.find(x => x.key === pending.key);
@@ -1379,7 +1380,10 @@ app.post('/approve/:id', checkAuth, async (req, res) => {
         if (existingIndex !== -1) {
             const currentItem = data.whitelist.places[existingIndex];
             const updatedKeys = currentItem.keys && Array.isArray(currentItem.keys) ? [...currentItem.keys] : [];
-            if (!updatedKeys.some(k => k.key === pending.key)) {
+            const keyIdx = updatedKeys.findIndex(k => k.key === pending.key);
+            if (keyIdx !== -1) {
+                updatedKeys[keyIdx].expiresAt = expiresTime;
+            } else {
                 updatedKeys.push({ key: pending.key, expiresAt: expiresTime });
             }
             data.whitelist.places[existingIndex] = {
@@ -1395,19 +1399,20 @@ app.post('/approve/:id', checkAuth, async (req, res) => {
                 expiresAt: expiresTime
             });
         }
-        data.pendingPlaces = data.pendingPlaces.filter(p => p.id !== id);
+        data.pendingPlaces = data.pendingPlaces.filter(p => !(p.id === id && p.key === keyParam));
         await safeSave();
         await saveActionLogInternal(req.session.userEmail, "Approve Pending Request", `Approved Game: ${pending.name || 'Unknown'} (Place ID: ${id}) requested by Owner: ${pending.creatorName || 'Unknown'} (Creator ID: ${pending.creatorId}) using License Key: ${pending.key}`);
     }
     res.sendStatus(200);
 });
 
-app.post('/reject/:id', checkAuth, async (req, res) => {
+app.post('/reject/:id/:key', checkAuth, async (req, res) => {
     const data = db.getData();
     const id = Number(req.params.id);
-    const pending = data.pendingPlaces.find(p => p.id === id);
+    const keyParam = decodeURIComponent(req.params.key);
+    const pending = data.pendingPlaces.find(p => p.id === id && p.key === keyParam);
     if (pending) {
-        data.pendingPlaces = data.pendingPlaces.filter(p => p.id !== id);
+        data.pendingPlaces = data.pendingPlaces.filter(p => !(p.id === id && p.key === keyParam));
         await safeSave();
         await saveActionLogInternal(req.session.userEmail, "Decline Pending Request", `Rejected Game: ${pending.name || 'Unknown'} (Place ID: ${id}) requested by Owner: ${pending.creatorName || 'Unknown'} (Creator ID: ${pending.creatorId}) which used Key: ${pending.key}`);
     } else {
