@@ -415,25 +415,26 @@ app.post('/api/verify', async (req, res) => {
     };
 
     const isPlaceAllowed = data.whitelist.places.some(p => p.id === Number(placeId) && checkAccess(p));
-    const isCreatorAllowed = data.whitelist.creators.some(c => c.id === Number(creatorId) && checkAccess(c));
-    if (isPlaceAllowed || isCreatorAllowed) return res.json({ allowed: true });
+    if (isPlaceAllowed) return res.json({ allowed: true });
 
-    try {
-        const groupInfoRes = await axios.get(`https://groups.roblox.com/v1/groups/${creatorId}`).catch(() => null);
-        if (groupInfoRes && groupInfoRes.data && groupInfoRes.data.owner) {
-            const ownerId = groupInfoRes.data.owner.id;
-            const isOwnerAllowed = data.whitelist.creators.some(c => c.id === Number(ownerId) && checkAccess(c));
-            if (isOwnerAllowed) return res.json({ allowed: true });
-        } else {
-            const groupsRes = await axios.get(`https://groups.roblox.com/v2/users/${creatorId}/groups/roles`).catch(() => null);
-            if (groupsRes && groupsRes.data && groupsRes.data.data) {
-                const ownedGroups = groupsRes.data.data.filter(g => g.role.rank === 255).map(g => g.group.id);
-                if (data.whitelist.creators.some(c => ownedGroups.includes(c.id) && checkAccess(c))) {
-                    return res.json({ allowed: true });
+    const isCreatorAllowed = data.whitelist.creators.some(c => {
+        if (c.id === Number(creatorId) && checkAccess(c)) return true;
+        
+        if (c.groups && Array.isArray(c.groups)) {
+            const hasGroupAccess = c.groups.some(gName => {
+                const match = gName.match(/\((\d+)\)/);
+                if (match) {
+                    const gId = Number(match[1]);
+                    return gId === Number(creatorId);
                 }
-            }
+                return false;
+            });
+            if (hasGroupAccess && checkAccess(c)) return true;
         }
-    } catch (e) {}
+        return false;
+    });
+
+    if (isCreatorAllowed) return res.json({ allowed: true });
 
     const validKey = data.keys.find(k => k.key === licenseKey);
     if (licenseKey && validKey) {
@@ -1251,7 +1252,7 @@ app.post('/add', checkAuth, async (req, res) => {
     if (type === 'creators' && id && name !== 'Roblox Group') {
         try {
             const groupsRes = await axios.get(`https://groups.roblox.com/v2/users/${id}/groups/roles`);
-            groups = groupsRes.data.data.filter(g => g.role.rank === 255).map(g => g.group.name);
+            groups = groupsRes.data.data.filter(g => g.role.rank === 255).map(g => `${g.group.name} (${g.group.id})`);
         } catch (e) {}
     }
 
