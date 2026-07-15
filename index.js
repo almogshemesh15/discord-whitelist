@@ -419,20 +419,18 @@ app.post('/api/verify', async (req, res) => {
     if (isPlaceAllowed || isCreatorAllowed) return res.json({ allowed: true });
 
     try {
-        const userCheckRes = await axios.get(`https://users.roblox.com/v1/users/${creatorId}`).catch(() => null);
-        
-        if (userCheckRes && userCheckRes.data) {
-            const groupsRes = await axios.get(`https://groups.roblox.com/v2/users/${creatorId}/groups/roles`);
-            const ownedGroups = groupsRes.data.data.filter(g => g.role.rank === 255).map(g => g.group.id);
-            if (data.whitelist.creators.some(c => ownedGroups.includes(c.id) && checkAccess(c))) {
-                return res.json({ allowed: true });
-            }
+        const groupInfoRes = await axios.get(`https://groups.roblox.com/v1/groups/${creatorId}`).catch(() => null);
+        if (groupInfoRes && groupInfoRes.data && groupInfoRes.data.owner) {
+            const ownerId = groupInfoRes.data.owner.id;
+            const isOwnerAllowed = data.whitelist.creators.some(c => c.id === Number(ownerId) && checkAccess(c));
+            if (isOwnerAllowed) return res.json({ allowed: true });
         } else {
-            const groupInfoRes = await axios.get(`https://groups.roblox.com/v1/groups/${creatorId}`).catch(() => null);
-            if (groupInfoRes && groupInfoRes.data && groupInfoRes.data.owner) {
-                const ownerId = groupInfoRes.data.owner.id;
-                const isOwnerAllowed = data.whitelist.creators.some(c => c.id === Number(ownerId) && checkAccess(c));
-                if (isOwnerAllowed) return res.json({ allowed: true });
+            const groupsRes = await axios.get(`https://groups.roblox.com/v2/users/${creatorId}/groups/roles`).catch(() => null);
+            if (groupsRes && groupsRes.data && groupsRes.data.data) {
+                const ownedGroups = groupsRes.data.data.filter(g => g.role.rank === 255).map(g => g.group.id);
+                if (data.whitelist.creators.some(c => ownedGroups.includes(c.id) && checkAccess(c))) {
+                    return res.json({ allowed: true });
+                }
             }
         }
     } catch (e) {}
