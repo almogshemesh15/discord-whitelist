@@ -43,6 +43,8 @@ function parseLocalTime(inputString) {
     return new Date(inputString + ':00+03:00').getTime();
 }
 
+const OWNER_EMAIL = 'almogshemesh11@gmail.com';
+
 function isBadMetaName(n) {
     return !n ||
         n === '[TITLE UNAVAILABLE]' ||
@@ -52,6 +54,68 @@ function isBadMetaName(n) {
         n === 'Unknown Place' ||
         n === 'Place' ||
         n === 'Approved Place';
+}
+
+function isAllAccessKey(keyObj, keyStr) {
+    if (keyObj && keyObj.isAllAccess) return true;
+    if (keyStr && String(keyStr).toUpperCase() === 'ALL') return true;
+    return false;
+}
+
+function entityHasAllAccess(item, data) {
+    if (!item) return false;
+    const now = Date.now();
+    const keys = data.keys || [];
+    if (item.keys && Array.isArray(item.keys)) {
+        return item.keys.some(k => {
+            if (k.expiresAt && k.expiresAt <= now) return false;
+            const reg = keys.find(x => x.key === k.key);
+            return isAllAccessKey(reg, k.key);
+        });
+    }
+    if (item.assignedKey) {
+        const reg = keys.find(x => x.key === item.assignedKey);
+        return isAllAccessKey(reg, item.assignedKey);
+    }
+    return false;
+}
+
+function ensureStats(data) {
+    if (!data.stats) {
+        data.stats = { total: 0, allowed: 0, denied: 0, byKey: {}, byPlace: {}, recent: [] };
+    }
+    if (!data.stats.byKey) data.stats.byKey = {};
+    if (!data.stats.byPlace) data.stats.byPlace = {};
+    if (!Array.isArray(data.stats.recent)) data.stats.recent = [];
+}
+
+function recordVerifyStat(data, { allowed, licenseKey, placeId }) {
+    ensureStats(data);
+    data.stats.total = (data.stats.total || 0) + 1;
+    if (allowed) data.stats.allowed = (data.stats.allowed || 0) + 1;
+    else data.stats.denied = (data.stats.denied || 0) + 1;
+
+    if (licenseKey) {
+        if (!data.stats.byKey[licenseKey]) data.stats.byKey[licenseKey] = { allowed: 0, denied: 0 };
+        data.stats.byKey[licenseKey][allowed ? 'allowed' : 'denied']++;
+    }
+    if (placeId != null) {
+        const pid = String(placeId);
+        if (!data.stats.byPlace[pid]) data.stats.byPlace[pid] = { allowed: 0, denied: 0 };
+        data.stats.byPlace[pid][allowed ? 'allowed' : 'denied']++;
+    }
+    data.stats.recent.push({ t: Date.now(), allowed: !!allowed });
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    data.stats.recent = data.stats.recent.filter(e => e.t > cutoff);
+}
+
+function formatIlDate(ts) {
+    if (!ts) return '';
+    try {
+        return new Date(ts).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' });
+    } catch (_) {
+        return new Date(ts).toLocaleString('he-IL');
+    }
 }
 
 /** Resolve place name + creator display (works for private games via develop API). */
@@ -329,14 +393,29 @@ app.get('/api/dashboard-data', checkAuth, async (req, res) => {
         ...s,
         hasFocus: sessionFocusMap[s.sid] ?? false
     }));
+    ensureStats(data);
+    const recent = data.stats.recent || [];
+    const last24hAllowed = recent.filter(e => e.allowed).length;
+    const last24hDenied = recent.filter(e => !e.allowed).length;
+
     res.json({
         activeSessions: extendedSessions,
         keys: data.keys || [],
         pendingPlaces: data.pendingPlaces || [],
         whitelist: data.whitelist || { creators: [], places: [] },
-        logs: req.session.userEmail === 'almogshemesh11@gmail.com' ? (data.logs || []) : [],
+        logs: req.session.userEmail === OWNER_EMAIL ? (data.logs || []) : [],
         currentSessionId: req.sessionID,
-        userEmail: req.session.userEmail
+        userEmail: req.session.userEmail,
+        maintenanceMode: !!data.maintenanceMode,
+        stats: {
+            total: data.stats.total || 0,
+            allowed: data.stats.allowed || 0,
+            denied: data.stats.denied || 0,
+            last24hAllowed,
+            last24hDenied,
+            byKey: data.stats.byKey || {},
+            byPlace: data.stats.byPlace || {}
+        }
     });
 });
 
@@ -571,24 +650,56 @@ app.post('/api/verify', async (req, res) => {
     db.checkExpiration();
     const data = db.getData();
     const { creatorId, placeId, licenseKey } = req.body;
-    if (!creatorId || !placeId) return res.status(400).json({ allowed: false });
+    if (!creatorId || !placeId) return res.status(400).json({ allowed: false, reason: 'missing_ids' });
+
+    // Maintenance mode blocks all game access
+    if (data.maintenanceMode) {
+        recordVerifyStat(data, { allowed: false, licenseKey, placeId });
+        safeSave().catch(() => {});
+        return res.json({ allowed: false, reason: 'maintenance' });
+    }
 
     if (licenseKey) {
         const keyExists = data.keys.some(k => k.key === licenseKey);
-        if (!keyExists) return res.json({ allowed: false });
+        if (!keyExists) {
+            recordVerifyStat(data, { allowed: false, licenseKey, placeId });
+            safeSave().catch(() => {});
+            return res.json({ allowed: false, reason: 'invalid_key' });
+        }
     }
 
+    const now = Date.now();
     const checkAccess = (item) => {
+        // ALL tag on entity → full access (any valid key or no key mapping needed)
+        if (entityHasAllAccess(item, data)) return true;
         if (!licenseKey) return true;
         if (item.assignedKey === licenseKey) return true;
         if (item.keys && Array.isArray(item.keys)) {
-            return item.keys.some(k => k.key === licenseKey);
+            return item.keys.some(k => {
+                if (k.key !== licenseKey) return false;
+                if (k.expiresAt && k.expiresAt <= now) return false;
+                return true;
+            });
         }
         return false;
     };
 
+    // License key itself is an ALL key → global access
+    if (licenseKey) {
+        const keyObj = data.keys.find(k => k.key === licenseKey);
+        if (isAllAccessKey(keyObj, licenseKey)) {
+            recordVerifyStat(data, { allowed: true, licenseKey, placeId });
+            safeSave().catch(() => {});
+            return res.json({ allowed: true, reason: 'all_key' });
+        }
+    }
+
     const isPlaceAllowed = data.whitelist.places.some(p => p.id === Number(placeId) && checkAccess(p));
-    if (isPlaceAllowed) return res.json({ allowed: true });
+    if (isPlaceAllowed) {
+        recordVerifyStat(data, { allowed: true, licenseKey, placeId });
+        safeSave().catch(() => {});
+        return res.json({ allowed: true });
+    }
 
     const isCreatorAllowed = data.whitelist.creators.some(c => {
         if (c.id === Number(creatorId) && checkAccess(c)) return true;
@@ -607,7 +718,11 @@ app.post('/api/verify', async (req, res) => {
         return false;
     });
 
-    if (isCreatorAllowed) return res.json({ allowed: true });
+    if (isCreatorAllowed) {
+        recordVerifyStat(data, { allowed: true, licenseKey, placeId });
+        safeSave().catch(() => {});
+        return res.json({ allowed: true });
+    }
 
     const validKey = data.keys.find(k => k.key === licenseKey);
     if (licenseKey && validKey) {
@@ -624,13 +739,21 @@ app.post('/api/verify', async (req, res) => {
         }
     }
 
+    recordVerifyStat(data, { allowed: false, licenseKey, placeId });
+    safeSave().catch(() => {});
     return res.json({ allowed: false });
 });
 
 app.get('/', checkAuth, (req, res) => {
     const data = db.getData();
-    const keyOptions = data.keys.map(k => `<option value="${k.key}">${k.key}</option>`).join('');
-    const showLogsSection = req.session.userEmail === 'almogshemesh11@gmail.com';
+    const isOwner = req.session.userEmail === OWNER_EMAIL;
+    const keyOptions = data.keys.map(k => {
+        const allTag = isAllAccessKey(k, k.key) ? ' 🌐 ALL' : '';
+        const lockTag = k.isLocked ? ' 🔒' : '';
+        return `<option value="${k.key}">${k.key}${allTag}${lockTag}</option>`;
+    }).join('');
+    const showLogsSection = isOwner;
+    const maintenanceOn = !!data.maintenanceMode;
 
     res.send(`
     <!DOCTYPE html>
@@ -643,8 +766,15 @@ app.get('/', checkAuth, (req, res) => {
             .container { max-width: 1200px; margin: 0 auto; }
             .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 15px; margin-bottom: 25px; flex-wrap: wrap; gap: 12px; }
             .header-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; }
-            .header-actions a { white-space: nowrap; flex-shrink: 0; }
+            .header-actions a, .header-actions button.hdr-btn { white-space: nowrap; flex-shrink: 0; }
             h1 { font-size: 22px; color: #38bdf8; margin: 0; white-space: nowrap; }
+            .maint-banner { background: #7f1d1d; border: 1px solid #ef4444; color: #fecaca; padding: 10px 16px; border-radius: 8px; margin-bottom: 16px; font-weight: bold; text-align: center; display: none; }
+            .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+            .stat-box { background: #1f2937; border: 1px solid #374151; border-radius: 8px; padding: 12px; text-align: center; }
+            .stat-box .num { font-size: 22px; font-weight: bold; color: #38bdf8; }
+            .stat-box .lbl { font-size: 11px; color: #94a3b8; margin-top: 4px; }
+            .btn-maint-on { background: #ef4444 !important; border-color: #dc2626 !important; color: white !important; }
+            .btn-maint-off { background: #374151 !important; border-color: #4b5563 !important; color: #e2e8f0 !important; }
             .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
             .card { background: #111827; padding: 20px; border-radius: 10px; border: 1px solid #1e293b; position: relative; }
             .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 10px; }
@@ -653,9 +783,10 @@ app.get('/', checkAuth, (req, res) => {
             input, select, textarea { width: 100%; padding: 10px; margin-bottom: 12px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: white; box-sizing: border-box; }
             button { width: 100%; background: #0284c7; color: white; border: none; padding: 10px; border-radius: 6px; font-weight: bold; cursor: pointer; }
             button:hover { background: #0369a1; }
-            .btn-refresh, .btn-save-db, .btn-load-db, .btn-obfuscate-page, .btn-logout {
+            .btn-refresh, .btn-save-db, .btn-load-db, .btn-obfuscate-page, .btn-logout, .hdr-btn {
                 padding: 6px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; text-decoration: none;
                 display: inline-flex; align-items: center; height: 34px; box-sizing: border-box; font-weight: bold; white-space: nowrap;
+                border: 1px solid transparent;
             }
             .btn-refresh { background: #1f2937; border: 1px solid #374151; color: #94a3b8; }
             .btn-refresh:hover { background: #374151; color: white; }
@@ -690,6 +821,7 @@ app.get('/', checkAuth, (req, res) => {
                 <h1>🛡️ Universal Whitelist Hub</h1>
                 <div class="header-actions">
                     <span style="font-size:12px;color:#94a3b8;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${req.session.userEmail}">${req.session.userEmail}</span>
+                    ${isOwner ? `<button type="button" id="maint-btn" class="hdr-btn ${maintenanceOn ? 'btn-maint-on' : 'btn-maint-off'}" onclick="toggleMaintenance()">${maintenanceOn ? '🛠️ Maintenance ON' : '🛠️ Maintenance'}</button>` : ''}
                     <a href="/obfuscate" class="btn-obfuscate-page">🔒 Obfuscate</a>
                     <a href="/force-save" class="btn-save-db">💾 Save</a>
                     <a href="/force-load" class="btn-load-db">📂 Load</a>
@@ -697,7 +829,19 @@ app.get('/', checkAuth, (req, res) => {
                     <a href="/logout" class="btn-logout">🚪 Logout</a>
                 </div>
             </div>
+            <div id="maint-banner" class="maint-banner" style="${maintenanceOn ? 'display:block;' : 'display:none;'}">⚠️ MAINTENANCE MODE — all game verifies are denied until Owner turns this off</div>
             <div class="grid">
+                <div class="card" style="grid-column: span 2;">
+                    <div class="card-header"><h3>📊 Usage Statistics</h3></div>
+                    <div class="stat-grid" id="stats-grid">
+                        <div class="stat-box"><div class="num" id="stat-total">—</div><div class="lbl">Total Checks</div></div>
+                        <div class="stat-box"><div class="num" id="stat-allowed" style="color:#10b981;">—</div><div class="lbl">Allowed</div></div>
+                        <div class="stat-box"><div class="num" id="stat-denied" style="color:#f43f5e;">—</div><div class="lbl">Denied</div></div>
+                        <div class="stat-box"><div class="num" id="stat-24a" style="color:#10b981;">—</div><div class="lbl">Allowed (24h)</div></div>
+                        <div class="stat-box"><div class="num" id="stat-24d" style="color:#f43f5e;">—</div><div class="lbl">Denied (24h)</div></div>
+                    </div>
+                    <div id="stats-by-key" style="margin-top:12px;font-size:12px;color:#94a3b8;max-height:120px;overflow-y:auto;"></div>
+                </div>
                 <div id="sessions-container" class="card" style="grid-column: span 2; display:none;">
                     <div class="card-header">
                         <h3>👥 Active Connected Users</h3>
@@ -734,7 +878,8 @@ app.get('/', checkAuth, (req, res) => {
                     </div>
                     <div class="key-container" id="keys-box"></div>
                     <form onsubmit="handleFormSubmit(event, '/add-key')" style="display: flex; flex-direction: column; gap: 8px; align-items: stretch;">
-                        <input type="text" name="key" placeholder="Key string" required style="margin-bottom:0;">
+                        <input type="text" name="key" placeholder="Key string (use ALL for full access)" required style="margin-bottom:0;">
+                        ${isOwner ? `<label style="font-size:12px;color:#fbbf24;display:flex;align-items:center;gap:6px;"><input type="checkbox" name="isAllAccess" value="1" style="width:auto;margin:0;"> 🌐 Mark as ALL access key (Owner only)</label>` : ''}
                         <button type="submit">Create Key</button>
                     </form>
                 </div>
@@ -861,6 +1006,17 @@ app.get('/', checkAuth, (req, res) => {
                 } catch(e) {}
             }
 
+            async function toggleMaintenance() {
+                try {
+                    const res = await fetch('/toggle-maintenance', { method: 'POST' });
+                    if (res.status === 403) {
+                        alert('Only the Owner can toggle maintenance mode.');
+                        return;
+                    }
+                    fetchDashboardData();
+                } catch(e) {}
+            }
+
             function updateTimers() {
                 const now = Date.now();
                 document.querySelectorAll('.target-timer').forEach(el => {
@@ -909,13 +1065,15 @@ app.get('/', checkAuth, (req, res) => {
                             const hours = Math.floor(diff / 3600000);
                             const minutes = Math.floor((diff % 3600000) / 60000);
                             const seconds = Math.floor((diff % 60000) / 1000);
-                            timeLeft = \`<br><span class="time-tag target-timer" data-expire="\${item.expiresAt}">⏱️ Expires in: \${hours}h \${minutes}m \${seconds}s (IL Time)</span>\`;
+                            const dateStr = new Date(item.expiresAt).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' });
+                            timeLeft = \`<br><span class="time-tag target-timer" data-expire="\${item.expiresAt}">⏱️ Expires in: \${hours}h \${minutes}m \${seconds}s</span> <span style="font-size:11px;color:#64748b;">📅 \${dateStr}</span>\`;
                         }
                     }
                     if (item.keys && Array.isArray(item.keys) && item.keys.length > 0) {
                         keysListHtml = '<div style="margin-top:5px; display:flex; flex-direction:column; gap:5px;">';
                         item.keys.forEach(k => {
                             searchData += \` \${k.key}\`;
+                            const isAll = (k.key || '').toUpperCase() === 'ALL';
                             let kTime = '';
                             if (k.expiresAt) {
                                 const diff = k.expiresAt - Date.now();
@@ -923,12 +1081,13 @@ app.get('/', checkAuth, (req, res) => {
                                     const hours = Math.floor(diff / 3600000);
                                     const minutes = Math.floor((diff % 3600000) / 60000);
                                     const seconds = Math.floor((diff % 60000) / 1000);
-                                    kTime = \` <span class="target-timer" data-expire="\${k.expiresAt}">(⏱️ \${hours}h \${minutes}m \${seconds}s)</span>\`;
+                                    const dateStr = new Date(k.expiresAt).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' });
+                                    kTime = \` <span class="target-timer" data-expire="\${k.expiresAt}">(⏱️ \${hours}h \${minutes}m \${seconds}s)</span> <span style="font-size:10px;color:#64748b;">📅 \${dateStr}</span>\`;
                                 }
                             }
                             keysListHtml += \`
-                                <span class="key-badge" style="width:fit-content;">
-                                    🔑 \${k.key}\${kTime}
+                                <span class="key-badge" style="width:fit-content;\${isAll ? 'background:#4c1d95;color:#e9d5ff;' : ''}">
+                                    🔑 \${k.key}\${isAll ? ' 🌐' : ''}\${kTime}
                                     <span class="btn-sub-delete" onclick="executeAction('/delete-sub-key/\${type}/\${item.id}/\${encodeURIComponent(k.key)}')" title="Remove this key local instance">×</span>
                                 </span>\`;
                         });
@@ -1000,23 +1159,55 @@ app.get('/', checkAuth, (req, res) => {
                         }
                     }
 
+                    // Stats panel
+                    if (data.stats) {
+                        const el = (id) => document.getElementById(id);
+                        if (el('stat-total')) el('stat-total').textContent = data.stats.total ?? 0;
+                        if (el('stat-allowed')) el('stat-allowed').textContent = data.stats.allowed ?? 0;
+                        if (el('stat-denied')) el('stat-denied').textContent = data.stats.denied ?? 0;
+                        if (el('stat-24a')) el('stat-24a').textContent = data.stats.last24hAllowed ?? 0;
+                        if (el('stat-24d')) el('stat-24d').textContent = data.stats.last24hDenied ?? 0;
+                        const byKeyBox = document.getElementById('stats-by-key');
+                        if (byKeyBox && data.stats.byKey) {
+                            const entries = Object.entries(data.stats.byKey).sort((a,b) => (b[1].allowed+b[1].denied) - (a[1].allowed+a[1].denied)).slice(0, 12);
+                            byKeyBox.innerHTML = entries.length
+                                ? '<div style="font-weight:bold;margin-bottom:6px;color:#e2e8f0;">Per key</div>' + entries.map(([key, s]) =>
+                                    \`<div style="display:flex;justify-content:space-between;gap:8px;padding:2px 0;border-bottom:1px solid #1e293b;"><span>🔑 \${key}</span><span><span style="color:#10b981;">✓\${s.allowed||0}</span> / <span style="color:#f43f5e;">✗\${s.denied||0}</span></span></div>\`
+                                  ).join('')
+                                : '<span style="color:#64748b;">No key usage yet</span>';
+                        }
+                    }
+
+                    // Maintenance banner + button state
+                    const banner = document.getElementById('maint-banner');
+                    if (banner) banner.style.display = data.maintenanceMode ? 'block' : 'none';
+                    const maintBtn = document.getElementById('maint-btn');
+                    if (maintBtn) {
+                        maintBtn.textContent = data.maintenanceMode ? '🛠️ Maintenance ON' : '🛠️ Maintenance';
+                        maintBtn.className = 'hdr-btn ' + (data.maintenanceMode ? 'btn-maint-on' : 'btn-maint-off');
+                    }
+
                     const keysBox = document.getElementById('keys-box');
                     keysBox.innerHTML = data.keys.map(k => {
                         const lockIcon = k.isLocked ? '🔒' : '🔓';
+                        const isAll = !!(k.isAllAccess || (k.key || '').toUpperCase() === 'ALL');
                         const lockButtonMarkup = isAlmog 
                             ? \`<span class="btn-lock-toggle" onclick="executeAction('/toggle-key-lock/\${encodeURIComponent(k.key)}')" title="Toggle key administrator configuration access lock">\${lockIcon}</span>\`
                             : (k.isLocked ? \`<span title="This key configuration access is locked by almogshemesh11@gmail.com">🔒</span>\` : '');
                         
                         return \`
-                            <span class="key-tag-manage" data-search="\${k.key.toLowerCase()}">
+                            <span class="key-tag-manage" data-search="\${k.key.toLowerCase()}" style="\${isAll ? 'border-color:#a855f7;background:#2e1065;' : ''}">
                                 \${lockButtonMarkup}
-                                <strong>\${k.key}</strong> 
+                                <strong>\${k.key}</strong>\${isAll ? ' <span title="ALL access">🌐</span>' : ''}
                                 <span onclick="executeAction('/delete-key/\${encodeURIComponent(k.key)}')" style="color:#f43f5e;margin-left:5px;text-decoration:none;cursor:pointer;font-weight:bold;">×</span>
                             </span>
                         \`;
                     }).join('') || '<span style="color:#64748b;font-size:13px;">No keys generated</span>';
 
-                    currentKeysMarkup = data.keys.map(k => \`<option value="\${k.key}">\${k.key} \${k.isLocked ? '(🔒 Locked)' : ''}</option>\`).join('');
+                    currentKeysMarkup = data.keys.map(k => {
+                        const isAll = !!(k.isAllAccess || (k.key || '').toUpperCase() === 'ALL');
+                        return \`<option value="\${k.key}">\${k.key}\${isAll ? ' 🌐 ALL' : ''}\${k.isLocked ? ' (🔒 Locked)' : ''}</option>\`;
+                    }).join('');
 
                     // Don't rebuild the pending table while a datetime-local picker is open/focused
                     // (otherwise the browser closes the picker every 3s when innerHTML is replaced)
@@ -1363,6 +1554,17 @@ app.get('/force-save', checkAuth, async (req, res) => {
     res.redirect('/');
 });
 
+app.post('/toggle-maintenance', checkAuth, async (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) {
+        return res.sendStatus(403);
+    }
+    const data = db.getData();
+    data.maintenanceMode = !data.maintenanceMode;
+    await safeSave();
+    await saveActionLogInternal(req.session.userEmail, 'Toggle Maintenance Mode', `Maintenance is now ${data.maintenanceMode ? 'ON' : 'OFF'}`);
+    res.json({ maintenanceMode: !!data.maintenanceMode });
+});
+
 app.get('/force-load', checkAuth, async (req, res) => {
     // Re-load data from Google Sheets (same place Save writes to)
     try {
@@ -1438,10 +1640,14 @@ app.post('/add', checkAuth, async (req, res) => {
         expiresAtKeys = expiresAtKeys ? [expiresAtKeys] : [];
     }
 
-    if (req.session.userEmail !== 'almogshemesh11@gmail.com') {
+    if (req.session.userEmail !== OWNER_EMAIL) {
         for (let k of assignedKeys) {
             const registeredKey = data.keys.find(x => x.key === k);
             if (registeredKey && registeredKey.isLocked) {
+                return res.sendStatus(403);
+            }
+            // Only Owner may assign ALL access keys
+            if (isAllAccessKey(registeredKey, k)) {
                 return res.sendStatus(403);
             }
         }
@@ -1561,13 +1767,23 @@ app.post('/add', checkAuth, async (req, res) => {
 
 app.post('/add-key', checkAuth, async (req, res) => {
     const data = db.getData();
-    const key = req.body.key.trim();
+    const key = (req.body.key || '').trim();
+    const wantAll = req.body.isAllAccess === '1' || req.body.isAllAccess === 'on' || req.body.isAllAccess === true;
     if (key) {
+        // Only Owner can create ALL access keys (name ALL or checkbox)
+        if ((wantAll || key.toUpperCase() === 'ALL') && req.session.userEmail !== OWNER_EMAIL) {
+            return res.sendStatus(403);
+        }
         const existingKeyIndex = data.keys.findIndex(k => k.key === key);
         if (existingKeyIndex === -1) {
-            data.keys.push({ key, isLocked: false });
+            const isAllAccess = wantAll || key.toUpperCase() === 'ALL';
+            data.keys.push({ key, isLocked: false, isAllAccess: !!isAllAccess });
             await safeSave();
-            await saveActionLogInternal(req.session.userEmail, "Create License Key", `Generated new license key: ${key}`);
+            await saveActionLogInternal(
+                req.session.userEmail,
+                'Create License Key',
+                `Generated new license key: ${key}${isAllAccess ? ' [ALL ACCESS]' : ''}`
+            );
         }
     }
     res.sendStatus(200);
@@ -1578,8 +1794,9 @@ app.get('/delete-key/:key', checkAuth, async (req, res) => {
     const keyToDelete = req.params.key;
     const registeredKey = data.keys.find(k => k.key === keyToDelete);
     
-    if (registeredKey && registeredKey.isLocked && req.session.userEmail !== 'almogshemesh11@gmail.com') {
-        return res.sendStatus(403);
+    if (req.session.userEmail !== OWNER_EMAIL) {
+        if (registeredKey && registeredKey.isLocked) return res.sendStatus(403);
+        if (isAllAccessKey(registeredKey, keyToDelete)) return res.sendStatus(403);
     }
 
     data.keys = data.keys.filter(k => k.key !== keyToDelete);
@@ -1619,8 +1836,9 @@ app.post('/approve/:id/:key', checkAuth, async (req, res) => {
     
     if (pending) {
         const registeredKey = data.keys.find(x => x.key === pending.key);
-        if (req.session.userEmail !== 'almogshemesh11@gmail.com' && registeredKey && registeredKey.isLocked) {
-            return res.sendStatus(403);
+        if (req.session.userEmail !== OWNER_EMAIL) {
+            if (registeredKey && registeredKey.isLocked) return res.sendStatus(403);
+            if (isAllAccessKey(registeredKey, pending.key)) return res.sendStatus(403);
         }
 
         const expiresTime = expiresAtRaw ? parseLocalTime(expiresAtRaw) : null;
