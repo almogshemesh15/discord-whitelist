@@ -461,6 +461,8 @@ app.post('/api/verify', async (req, res) => {
         if (!data.pendingPlaces.some(p => p.id === Number(placeId) && p.key === licenseKey)) {
             let placeName = 'Unknown Place';
             let creatorName = 'Unknown';
+            const isBadName = (n) => !n || n === '[TITLE UNAVAILABLE]' || n === '[UNKNOWN]' || n === 'Unknown' || n === 'Unknown Place';
+
             try {
                 // 1) Place → Universe
                 const uniRes = await axios.get(
@@ -470,60 +472,83 @@ app.post('/api/verify', async (req, res) => {
                 const universeId = uniRes.data && uniRes.data.universeId;
 
                 if (universeId) {
-                    // 2) Universe → game name + creator (User / Group)
-                    const gameRes = await axios.get(
-                        `https://games.roblox.com/v1/games?universeIds=${universeId}`,
-                        { timeout: 8000 }
-                    );
-                    const game = gameRes.data && gameRes.data.data && gameRes.data.data[0];
-                    if (game) {
-                        if (game.name) placeName = game.name;
-
-                        if (game.creator) {
-                            if (game.creator.type === 'Group') {
-                                // Group: show "OwnerName | GroupName"
-                                try {
-                                    const gRes = await axios.get(
-                                        `https://groups.roblox.com/v1/groups/${game.creator.id}`,
-                                        { timeout: 8000 }
-                                    );
-                                    const gName = (gRes.data && gRes.data.name) || game.creator.name;
-                                    const ownerName =
-                                        (gRes.data && gRes.data.owner && (gRes.data.owner.username || gRes.data.owner.name)) || null;
-                                    creatorName = ownerName ? `${ownerName} | ${gName}` : (gName || `Group ${game.creator.id}`);
-                                } catch (_) {
-                                    creatorName = game.creator.name || `Group ${game.creator.id}`;
+                    // 2) Prefer develop API — works for Private games (games.roblox.com returns TITLE UNAVAILABLE)
+                    try {
+                        const devRes = await axios.get(
+                            `https://develop.roblox.com/v1/universes/${universeId}`,
+                            { timeout: 8000 }
+                        );
+                        const u = devRes.data;
+                        if (u) {
+                            if (u.name && !isBadName(u.name)) placeName = u.name;
+                            if (u.creatorName && !isBadName(u.creatorName)) {
+                                if (u.creatorType === 'Group') {
+                                    try {
+                                        const gRes = await axios.get(
+                                            `https://groups.roblox.com/v1/groups/${u.creatorTargetId}`,
+                                            { timeout: 8000 }
+                                        );
+                                        const gName = (gRes.data && gRes.data.name) || u.creatorName;
+                                        const ownerName =
+                                            gRes.data && gRes.data.owner && (gRes.data.owner.username || gRes.data.owner.name);
+                                        creatorName = ownerName ? `${ownerName} | ${gName}` : gName;
+                                    } catch (_) {
+                                        creatorName = u.creatorName;
+                                    }
+                                } else {
+                                    creatorName = u.creatorName;
                                 }
-                            } else {
-                                creatorName = game.creator.name || `User ${game.creator.id}`;
                             }
                         }
+                    } catch (_) {}
+
+                    // 3) Fallback to public games API (public experiences only)
+                    if (isBadName(placeName) || isBadName(creatorName)) {
+                        try {
+                            const gameRes = await axios.get(
+                                `https://games.roblox.com/v1/games?universeIds=${universeId}`,
+                                { timeout: 8000 }
+                            );
+                            const game = gameRes.data && gameRes.data.data && gameRes.data.data[0];
+                            if (game) {
+                                if (game.name && !isBadName(game.name)) placeName = game.name;
+                                if (game.creator && isBadName(creatorName)) {
+                                    if (game.creator.type === 'Group') {
+                                        try {
+                                            const gRes = await axios.get(
+                                                `https://groups.roblox.com/v1/groups/${game.creator.id}`,
+                                                { timeout: 8000 }
+                                            );
+                                            const gName = (gRes.data && gRes.data.name) || game.creator.name;
+                                            const ownerName =
+                                                gRes.data && gRes.data.owner && (gRes.data.owner.username || gRes.data.owner.name);
+                                            creatorName = ownerName ? `${ownerName} | ${gName}` : (gName || game.creator.name);
+                                        } catch (_) {
+                                            if (game.creator.name && !isBadName(game.creator.name)) {
+                                                creatorName = game.creator.name;
+                                            }
+                                        }
+                                    } else if (game.creator.name && !isBadName(game.creator.name)) {
+                                        creatorName = game.creator.name;
+                                    }
+                                }
+                            }
+                        } catch (_) {}
                     }
                 }
-            } catch (_) {
-                // Fallback: multiget-place-details
-                try {
-                    const placeRes = await axios.get(
-                        `https://games.roblox.com/v1/games/multiget-place-details?placeIds=${placeId}`,
-                        { timeout: 8000 }
-                    );
-                    const p = Array.isArray(placeRes.data) ? placeRes.data[0] : null;
-                    if (p) {
-                        if (p.name) placeName = p.name;
-                        if (p.builder) creatorName = p.builder;
-                    }
-                } catch (__) {}
-            }
+            } catch (_) {}
 
-            // Final fallback using creatorId sent by the script (user OR group id)
-            if (creatorName === 'Unknown' && creatorId) {
+            // Final fallback: resolve creatorId from the script payload (user OR group)
+            if (isBadName(creatorName) && creatorId) {
                 try {
                     const userRes = await axios.get(
                         `https://users.roblox.com/v1/users/${creatorId}`,
                         { timeout: 5000 }
                     );
                     if (userRes.data && userRes.data.name) {
-                        creatorName = userRes.data.name;
+                        creatorName = userRes.data.displayName
+                            ? `${userRes.data.name} (${userRes.data.displayName})`
+                            : userRes.data.name;
                     }
                 } catch (_) {
                     try {
