@@ -275,13 +275,31 @@ app.get('/verify-2fa', (req, res) => {
         <div class="verify-card">
             <h1>🔐 Two-Factor Authentication</h1>
             <p>Enter the 6-digit verification code sent to Discord. Code expires in 30 seconds.</p>
-            <form action="/verify-2fa" method="POST">
-                <input type="text" name="code" maxlength="6" required placeholder="000000" autocomplete="off">
+            <form action="/verify-2fa" method="POST" id="verify-form">
+                <input type="text" name="code" id="code-input" maxlength="6" required placeholder="000000" autocomplete="off" inputmode="numeric" pattern="[0-9]*">
                 <button type="submit">Verify & Access</button>
             </form>
             <a href="/resend-2fa" id="resend-btn" class="btn-resend">Resend Verification Code</a>
         </div>
         <script>
+            const codeInput = document.getElementById('code-input');
+            const verifyForm = document.getElementById('verify-form');
+            let isSubmitting = false;
+            function tryAutoSubmit() {
+                if (isSubmitting) return;
+                const val = (codeInput.value || '').replace(/\\D/g, '');
+                if (val.length === 6) {
+                    codeInput.value = val;
+                    isSubmitting = true;
+                    verifyForm.submit();
+                }
+            }
+            codeInput.addEventListener('input', tryAutoSubmit);
+            codeInput.addEventListener('paste', function() {
+                setTimeout(tryAutoSubmit, 10);
+            });
+            codeInput.focus();
+
             const cooldownTime = ${cooldown};
             const resendBtn = document.getElementById('resend-btn');
             if (cooldownTime > 0) {
@@ -325,8 +343,9 @@ app.post('/verify-2fa', async (req, res) => {
         const data = db.getData();
         data.activeSessions = (data.activeSessions || []).filter(s => s.email !== req.session.userEmail);
         data.activeSessions.push({ sid: req.sessionID, email: req.session.userEmail });
-        await safeSave();
-        await sendSuccessLoginToDiscord(req.session.userEmail);
+        // Save + Discord in background so the redirect is instant (no long wait)
+        safeSave().catch(e => console.error('safeSave after 2FA:', e));
+        sendSuccessLoginToDiscord(req.session.userEmail).catch(() => {});
         return res.redirect('/');
     }
 
@@ -487,6 +506,8 @@ app.get('/', checkAuth, (req, res) => {
             .btn-refresh:hover { background: #374151; color: white; }
             .btn-save-db { background: #10b981; border: 1px solid #059669; color: white; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; height: 38px; box-sizing: border-box; font-weight: bold; }
             .btn-save-db:hover { background: #059669; }
+            .btn-load-db { background: #0ea5e9; border: 1px solid #0284c7; color: white; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; height: 38px; box-sizing: border-box; font-weight: bold; }
+            .btn-load-db:hover { background: #0284c7; }
             .btn-obfuscate-page { background: #a855f7; border: 1px solid #9333ea; color: white; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; height: 38px; box-sizing: border-box; font-weight: bold; }
             .btn-obfuscate-page:hover { background: #9333ea; }
             .btn-logout { background: #f43f5e; border: 1px solid #e11d48; color: white; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; height: 38px; box-sizing: border-box; font-weight: bold; }
@@ -516,6 +537,7 @@ app.get('/', checkAuth, (req, res) => {
                     <span style="font-size:14px;color:#94a3b8;margin-right:10px;">Logged in as: ${req.session.userEmail}</span>
                     <a href="/obfuscate" class="btn-obfuscate-page">🔒 Obfuscate Code</a>
                     <a href="/force-save" class="btn-save-db">💾 Save File</a>
+                    <a href="/force-load" class="btn-load-db">📂 Load Data</a>
                     <a href="/" class="btn-refresh">🔄 Global Refresh</a>
                     <a href="/logout" class="btn-logout">🚪 Log Out</a>
                 </div>
@@ -837,27 +859,33 @@ app.get('/', checkAuth, (req, res) => {
 
                     currentKeysMarkup = data.keys.map(k => \`<option value="\${k.key}">\${k.key} \${k.isLocked ? '(🔒 Locked)' : ''}</option>\`).join('');
 
+                    // Don't rebuild the pending table while a datetime-local picker is open/focused
+                    // (otherwise the browser closes the picker every 3s when innerHTML is replaced)
+                    const activeEl = document.activeElement;
+                    const isDatePickerFocused = activeEl && activeEl.type === 'datetime-local';
                     const pendingTable = document.getElementById('pending-table');
-                    pendingTable.innerHTML = data.pendingPlaces.map(item => \`
-                        <tr data-search="\${item.name.toLowerCase()} \${item.id} \${item.creatorName.toLowerCase()} \${item.creatorId} \${item.key.toLowerCase()}">
-                            <td>
-                                🎮 Game: <strong>\${item.name}</strong> (\${item.id})<br>
-                                👤 Owner: <strong>\${item.creatorName}</strong> (\${item.creatorId})<br>
-                                <span class="key-badge">🔑 Used Key: \${item.key}</span>
-                            </td>
-                            <td>
-                                <div style="display:flex; flex-direction:column; gap:8px;">
-                                    <div style="display:flex; gap:5px; align-items:center; margin-bottom:0;">
-                                        <input type="datetime-local" id="exp-\${item.id}-\${encodeURIComponent(item.key)}" style="padding:4px; margin-bottom:0; width:160px; font-size:12px; height:28px;">
-                                        <span onclick="executePostAction('/approve/\${item.id}/' + encodeURIComponent('\${item.key}'), { expiresAt: document.getElementById('exp-\${item.id}-\${encodeURIComponent(item.key)}').value })" style="font-size:14px; cursor:pointer; color:#10b981; font-weight:bold;">Approve</span>
+                    if (!isDatePickerFocused || !pendingTable.contains(activeEl)) {
+                        pendingTable.innerHTML = data.pendingPlaces.map(item => \`
+                            <tr data-search="\${item.name.toLowerCase()} \${item.id} \${item.creatorName.toLowerCase()} \${item.creatorId} \${item.key.toLowerCase()}">
+                                <td>
+                                    🎮 Game: <strong>\${item.name}</strong> (\${item.id})<br>
+                                    👤 Owner: <strong>\${item.creatorName}</strong> (\${item.creatorId})<br>
+                                    <span class="key-badge">🔑 Used Key: \${item.key}</span>
+                                </td>
+                                <td>
+                                    <div style="display:flex; flex-direction:column; gap:8px;">
+                                        <div style="display:flex; gap:5px; align-items:center; margin-bottom:0;">
+                                            <input type="datetime-local" id="exp-\${item.id}-\${encodeURIComponent(item.key)}" style="padding:4px; margin-bottom:0; width:160px; font-size:12px; height:28px;">
+                                            <span onclick="executePostAction('/approve/\${item.id}/' + encodeURIComponent('\${item.key}'), { expiresAt: document.getElementById('exp-\${item.id}-\${encodeURIComponent(item.key)}').value })" style="font-size:14px; cursor:pointer; color:#10b981; font-weight:bold;">Approve</span>
+                                        </div>
+                                        <div style="margin-bottom:0;">
+                                            <span onclick="executePostAction('/reject/\${item.id}/' + encodeURIComponent('\${item.key}'))" style="font-size:14px; cursor:pointer; text-align:left; color:#f43f5e; font-weight:bold;">Decline</span>
+                                        </div>
                                     </div>
-                                    <div style="margin-bottom:0;">
-                                        <span onclick="executePostAction('/reject/\${item.id}/' + encodeURIComponent('\${item.key}'))" style="font-size:14px; cursor:pointer; text-align:left; color:#f43f5e; font-weight:bold;">Decline</span>
-                                    </div>
-                                </div>
-                            </td>
-                        </tr>
-                    \`).join('') || '<tr><td colspan="2" style="color:#64748b; text-align:center;">No pending requests incoming</td></tr>';
+                                </td>
+                            </tr>
+                        \`).join('') || '<tr><td colspan="2" style="color:#64748b; text-align:center;">No pending requests incoming</td></tr>';
+                    }
 
                     document.getElementById('creators-table').innerHTML = buildRows(data.whitelist.creators, 'creators', data.userEmail);
                     document.getElementById('places-table').innerHTML = buildRows(data.whitelist.places, 'places', data.userEmail);
@@ -1173,6 +1201,27 @@ app.post('/api/perform-obfuscate', checkAuth, async (req, res) => {
 
 app.get('/force-save', checkAuth, async (req, res) => {
     await safeSave();
+    res.redirect('/');
+});
+
+app.get('/force-load', checkAuth, async (req, res) => {
+    // Re-load data from the persistence layer (same place Save File writes to)
+    try {
+        if (typeof db.load === 'function') {
+            await db.load();
+        } else if (typeof db.reload === 'function') {
+            await db.reload();
+        } else if (typeof db.read === 'function') {
+            await db.read();
+        } else if (typeof db.loadData === 'function') {
+            await db.loadData();
+        } else {
+            // Fallback: if the module exposes a path or raw re-init, try common patterns
+            console.warn('force-load: no load/reload/read/loadData method found on db module');
+        }
+    } catch (e) {
+        console.error('force-load error:', e);
+    }
     res.redirect('/');
 });
 
