@@ -1006,7 +1006,8 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
     if (type === "module") {
         destroyLogic = "script:Destroy()";
         loopLogic = `    while true do
-        if not verifyServer() then
+        local status = verifyServer()
+        if status == "DESTROY" then
             return
         end
         task.wait(5)
@@ -1019,10 +1020,13 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
         }
         destroyLogic = `script${parents}:Destroy()`;
         loopLogic = `    while true do
-        if not verifyServer() then
+        local status = verifyServer()
+        if status == "DESTROY" then
+            return
+        elseif status == "DENIED" then
             script.Enabled = false
             return
-        else
+        elseif status == "ALLOWED" then
             script.Enabled = true
         end
         task.wait(5)
@@ -1030,6 +1034,7 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
     }
 
     const rawCode = `task.spawn(function()
+    local isFirstCheck = true
     local function verifyServer()
         local payload = {
             creatorId = game.CreatorId,
@@ -1043,12 +1048,25 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
                 Enum.HttpContentType.ApplicationJson
             )
         end)
-        if not success then ${destroyLogic} return false end
-        local data = game:GetService("HttpService"):JSONDecode(response)
-        return data and data.allowed
+        if not success then
+            if isFirstCheck then
+                ${destroyLogic}
+                return "DESTROY"
+            end
+            return "SKIP"
+        end
+        isFirstCheck = false
+        local decodeSuccess, data = pcall(function()
+            return game:GetService("HttpService"):JSONDecode(response)
+        end)
+        if decodeSuccess and data and data.allowed then
+            return "ALLOWED"
+        else
+            return "DENIED"
+        end
     end
 ${loopLogic}
-end)
+end)`;
 
 ${sourceCode}`;
 
