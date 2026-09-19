@@ -63,18 +63,21 @@ function isAllAccessKey(keyObj, keyStr) {
 }
 
 function entityHasAllAccess(item, data) {
-    if (!item) return false;
+    if (!item || item.frozen) return false;
     const now = Date.now();
     const keys = data.keys || [];
     if (item.keys && Array.isArray(item.keys)) {
         return item.keys.some(k => {
+            if (k.frozen) return false;
             if (k.expiresAt && k.expiresAt <= now) return false;
             const reg = keys.find(x => x.key === k.key);
+            if (reg && reg.frozen) return false;
             return isAllAccessKey(reg, k.key);
         });
     }
     if (item.assignedKey) {
         const reg = keys.find(x => x.key === item.assignedKey);
+        if (reg && reg.frozen) return false;
         return isAllAccessKey(reg, item.assignedKey);
     }
     return false;
@@ -683,23 +686,33 @@ app.post('/api/verify', async (req, res) => {
     }
 
     if (licenseKey) {
-        const keyExists = data.keys.some(k => k.key === licenseKey);
-        if (!keyExists) {
+        const keyObj = data.keys.find(k => k.key === licenseKey);
+        if (!keyObj) {
             recordVerifyStat(data, { allowed: false, licenseKey, placeId });
             safeSave().catch(() => {});
             return res.json({ allowed: false, reason: 'invalid_key' });
+        }
+        // Globally frozen system key
+        if (keyObj.frozen) {
+            recordVerifyStat(data, { allowed: false, licenseKey, placeId });
+            safeSave().catch(() => {});
+            return res.json({ allowed: false, reason: 'key_frozen' });
         }
     }
 
     const now = Date.now();
     const checkAccess = (item) => {
-        // ALL tag on entity → full access (any valid key or no key mapping needed)
+        if (!item) return false;
+        // Entire entity frozen
+        if (item.frozen) return false;
+        // ALL tag on entity → full access (unless frozen)
         if (entityHasAllAccess(item, data)) return true;
         if (!licenseKey) return true;
         if (item.assignedKey === licenseKey) return true;
         if (item.keys && Array.isArray(item.keys)) {
             return item.keys.some(k => {
                 if (k.key !== licenseKey) return false;
+                if (k.frozen) return false;
                 if (k.expiresAt && k.expiresAt <= now) return false;
                 return true;
             });
@@ -707,10 +720,10 @@ app.post('/api/verify', async (req, res) => {
         return false;
     };
 
-    // License key itself is an ALL key → global access
+    // License key itself is an ALL key → global access (if not frozen)
     if (licenseKey) {
         const keyObj = data.keys.find(k => k.key === licenseKey);
-        if (isAllAccessKey(keyObj, licenseKey)) {
+        if (isAllAccessKey(keyObj, licenseKey) && !keyObj.frozen) {
             recordVerifyStat(data, { allowed: true, licenseKey, placeId });
             safeSave().catch(() => {});
             return res.json({ allowed: true, reason: 'all_key' });
@@ -825,6 +838,10 @@ app.get('/', checkAuth, (req, res) => {
             th, td { padding: 12px; text-align: left; border-bottom: 1px solid #1e293b; font-size: 14px; vertical-align: top; }
             th { background: #1f2937; color: #94a3b8; }
             .btn-delete { color: #f43f5e; text-decoration: none; font-weight: bold; cursor: pointer; }
+            .btn-freeze { color: #38bdf8; text-decoration: none; font-weight: bold; cursor: pointer; margin-right: 10px; }
+            .btn-freeze.on { color: #fbbf24; }
+            .frozen-row { opacity: 0.65; }
+            .frozen-badge { font-size: 11px; color: #fbbf24; background: #78350f; padding: 2px 6px; border-radius: 4px; margin-left: 6px; }
             .group-tag { font-size: 11px; color: #38bdf8; background: #0c4a6e; padding: 2px 6px; border-radius: 4px; display: inline-block; margin-top: 4px; }
             .key-badge { font-size: 11px; color: #fbbf24; background: #78350f; padding: 2px 6px; border-radius: 4px; display: inline-flex; align-items: center; gap: 5px; margin-top: 4px; }
             .time-tag { font-size: 11px; color: #a78bfa; background: #4c1d95; padding: 2px 6px; border-radius: 4px; display: inline-block; margin-top: 4px; }
@@ -911,6 +928,11 @@ app.get('/', checkAuth, (req, res) => {
                         <h3>📡 Pending Game Requests</h3>
                         <input type="text" class="search-input" placeholder="Search requests..." oninput="searchTable(this, 'pending-table')">
                     </div>
+                    <div style="display:flex; gap:8px; margin-bottom:10px; align-items:center; flex-wrap:wrap;">
+                        <input type="text" id="pending-user-lookup" placeholder="Roblox username..." style="margin-bottom:0; flex:1; min-width:140px; padding:8px; background:#1f2937; border:1px solid #374151; border-radius:6px; color:white;">
+                        <button type="button" onclick="lookupPendingByUsername()" style="width:auto; padding:8px 12px; background:#0284c7; border:none; border-radius:6px; color:white; font-weight:bold; cursor:pointer; white-space:nowrap;">🔍 Find by username</button>
+                    </div>
+                    <div id="pending-lookup-status" style="font-size:12px; color:#94a3b8; margin-bottom:8px;"></div>
                     <table>
                         <thead><tr><th>Request Metadata</th><th>Action</th></tr></thead>
                         <tbody id="pending-table"></tbody>
@@ -1040,6 +1062,62 @@ app.get('/', checkAuth, (req, res) => {
                 } catch(e) {}
             }
 
+            async function lookupPendingByUsername() {
+                const input = document.getElementById('pending-user-lookup');
+                const status = document.getElementById('pending-lookup-status');
+                const username = (input && input.value || '').trim();
+                if (!username) {
+                    if (status) status.textContent = 'Enter a Roblox username';
+                    return;
+                }
+                if (status) status.textContent = 'Looking up ' + username + '...';
+                try {
+                    const res = await fetch('/api/lookup-username?username=' + encodeURIComponent(username));
+                    const data = await res.json();
+                    if (!data.ok) {
+                        if (status) status.textContent = data.error || 'User not found';
+                        return;
+                    }
+                    if (status) {
+                        status.innerHTML = 'Found <strong style="color:#38bdf8;">' + data.name + '</strong> (ID: ' + data.id + ') — filtering pending...';
+                    }
+                    // Filter pending table by creatorId or username
+                    const table = document.getElementById('pending-table');
+                    if (!table) return;
+                    const rows = table.getElementsByTagName('tr');
+                    let shown = 0;
+                    for (let i = 0; i < rows.length; i++) {
+                        const searchAttr = (rows[i].getAttribute('data-search') || '');
+                        const match =
+                            searchAttr.includes(String(data.id)) ||
+                            searchAttr.includes((data.name || '').toLowerCase()) ||
+                            searchAttr.includes(username.toLowerCase());
+                        rows[i].style.display = match ? '' : 'none';
+                        if (match) shown++;
+                    }
+                    if (status) {
+                        status.innerHTML += shown
+                            ? ' <span style="color:#10b981;">(' + shown + ' match' + (shown > 1 ? 'es' : '') + ')</span>'
+                            : ' <span style="color:#f43f5e;">(no pending requests for this user)</span>';
+                    }
+                } catch (e) {
+                    if (status) status.textContent = 'Lookup failed';
+                }
+            }
+
+            // Enter key on username lookup
+            document.addEventListener('DOMContentLoaded', function() {
+                const input = document.getElementById('pending-user-lookup');
+                if (input) {
+                    input.addEventListener('keydown', function(e) {
+                        if (e.key === 'Enter') {
+                            e.preventDefault();
+                            lookupPendingByUsername();
+                        }
+                    });
+                }
+            });
+
             function updateTimers() {
                 const now = Date.now();
                 document.querySelectorAll('.target-timer').forEach(el => {
@@ -1100,6 +1178,7 @@ app.get('/', checkAuth, (req, res) => {
                         item.keys.forEach(k => {
                             searchData += \` \${k.key}\`;
                             const isAll = (k.key || '').toUpperCase() === 'ALL';
+                            const keyFrozen = !!k.frozen;
                             let kTime = '';
                             if (k.expiresAt) {
                                 const diff = k.expiresAt - Date.now();
@@ -1112,8 +1191,9 @@ app.get('/', checkAuth, (req, res) => {
                                 }
                             }
                             keysListHtml += \`
-                                <span class="key-badge" style="width:fit-content;\${isAll ? 'background:#4c1d95;color:#e9d5ff;' : ''}">
-                                    🔑 \${k.key}\${isAll ? ' 🌐' : ''}\${kTime}
+                                <span class="key-badge" style="width:fit-content;\${isAll ? 'background:#4c1d95;color:#e9d5ff;' : ''}\${keyFrozen ? 'opacity:0.55;text-decoration:line-through;' : ''}">
+                                    🔑 \${k.key}\${isAll ? ' 🌐' : ''}\${keyFrozen ? ' ❄️' : ''}\${kTime}
+                                    <span class="btn-freeze \${keyFrozen ? 'on' : ''}" onclick="executeAction('/toggle-sub-key-freeze/\${type}/\${item.id}/\${encodeURIComponent(k.key)}')" title="\${keyFrozen ? 'Unfreeze this key' : 'Freeze this key'}">\${keyFrozen ? '❄️' : '🧊'}</span>
                                     <span class="btn-sub-delete" onclick="executeAction('/delete-sub-key/\${type}/\${item.id}/\${encodeURIComponent(k.key)}')" title="Remove this key local instance">×</span>
                                 </span>\`;
                         });
@@ -1122,17 +1202,22 @@ app.get('/', checkAuth, (req, res) => {
                     const ownerLine = (type === 'places' && item.creatorName)
                         ? \`<br><span style="font-size:12px;color:#94a3b8;">👤 \${item.creatorName}\${item.creatorId ? ' (' + item.creatorId + ')' : ''}</span>\`
                         : '';
+                    const entityFrozen = !!item.frozen;
                     return \`
-                        <tr data-search="\${searchData}">
+                        <tr data-search="\${searchData}" class="\${entityFrozen ? 'frozen-row' : ''}">
                             <td>
                                 <strong>\${item.name || 'Unknown'}</strong> (\${item.id})
+                                \${entityFrozen ? '<span class="frozen-badge">❄️ FROZEN</span>' : ''}
                                 \${ownerLine}
                                 \${item.assignedKey ? \`<br><span class="key-badge">🔑 \${item.assignedKey}</span>\` : ''}
                                 \${keysListHtml}
                                 \${item.groups ? \`<br><span class="group-tag">Groups: \${item.groups.join(', ')}</span>\` : ''}
                                 \${timeLeft}
                             </td>
-                            <td><span onclick="executeAction('/delete/\${type}/\${item.id}')" class="btn-delete">Remove Entity</span></td>
+                            <td style="white-space:nowrap;">
+                                <span onclick="executeAction('/toggle-entity-freeze/\${type}/\${item.id}')" class="btn-freeze \${entityFrozen ? 'on' : ''}" title="\${entityFrozen ? 'Unfreeze entity' : 'Freeze entity'}">\${entityFrozen ? '❄️ Unfreeze' : '🧊 Freeze'}</span>
+                                <span onclick="executeAction('/delete/\${type}/\${item.id}')" class="btn-delete">Remove</span>
+                            </td>
                         </tr>
                     \`;
                 }).join('');
@@ -1232,14 +1317,16 @@ app.get('/', checkAuth, (req, res) => {
                     keysBox.innerHTML = data.keys.map(k => {
                         const lockIcon = k.isLocked ? '🔒' : '🔓';
                         const isAll = !!(k.isAllAccess || (k.key || '').toUpperCase() === 'ALL');
+                        const isFrozen = !!k.frozen;
                         const lockButtonMarkup = isAlmog 
                             ? \`<span class="btn-lock-toggle" onclick="executeAction('/toggle-key-lock/\${encodeURIComponent(k.key)}')" title="Toggle key administrator configuration access lock">\${lockIcon}</span>\`
                             : (k.isLocked ? \`<span title="This key configuration access is locked by almogshemesh11@gmail.com">🔒</span>\` : '');
                         
                         return \`
-                            <span class="key-tag-manage" data-search="\${k.key.toLowerCase()}" style="\${isAll ? 'border-color:#a855f7;background:#2e1065;' : ''}">
+                            <span class="key-tag-manage" data-search="\${k.key.toLowerCase()}" style="\${isAll ? 'border-color:#a855f7;background:#2e1065;' : ''}\${isFrozen ? 'opacity:0.55;' : ''}">
                                 \${lockButtonMarkup}
-                                <strong>\${k.key}</strong>\${isAll ? ' <span title="ALL access">🌐</span>' : ''}
+                                <span class="btn-freeze \${isFrozen ? 'on' : ''}" onclick="executeAction('/toggle-key-freeze/\${encodeURIComponent(k.key)}')" title="\${isFrozen ? 'Unfreeze key' : 'Freeze key globally'}">\${isFrozen ? '❄️' : '🧊'}</span>
+                                <strong>\${k.key}</strong>\${isAll ? ' <span title="ALL access">🌐</span>' : ''}\${isFrozen ? ' <span title="Frozen">❄️</span>' : ''}
                                 <span onclick="executeAction('/delete-key/\${encodeURIComponent(k.key)}')" style="color:#f43f5e;margin-left:5px;text-decoration:none;cursor:pointer;font-weight:bold;">×</span>
                             </span>
                         \`;
@@ -1604,6 +1691,79 @@ app.post('/toggle-maintenance', checkAuth, async (req, res) => {
     await safeSave();
     await saveActionLogInternal(req.session.userEmail, 'Toggle Maintenance Mode', `Maintenance is now ${data.maintenanceMode ? 'ON' : 'OFF'}`);
     res.json({ maintenanceMode: !!data.maintenanceMode });
+});
+
+app.get('/api/lookup-username', checkAuth, async (req, res) => {
+    const username = (req.query.username || '').trim();
+    if (!username) return res.json({ ok: false, error: 'Missing username' });
+    try {
+        const userRes = await axios.post(
+            'https://users.roblox.com/v1/usernames/users',
+            { usernames: [username], excludeBannedUsers: false },
+            { timeout: 8000 }
+        );
+        const row = userRes.data && userRes.data.data && userRes.data.data[0];
+        if (!row) return res.json({ ok: false, error: 'User not found' });
+        res.json({ ok: true, id: row.id, name: row.name || row.requestedUsername || username });
+    } catch (e) {
+        res.json({ ok: false, error: 'Roblox lookup failed' });
+    }
+});
+
+app.get('/toggle-entity-freeze/:type/:id', checkAuth, async (req, res) => {
+    const data = db.getData();
+    const { type, id } = req.params;
+    if (!data.whitelist[type]) return res.sendStatus(404);
+    const item = data.whitelist[type].find(x => x.id === Number(id));
+    if (!item) return res.sendStatus(404);
+    item.frozen = !item.frozen;
+    await safeSave();
+    await saveActionLogInternal(
+        req.session.userEmail,
+        item.frozen ? 'Freeze Entity' : 'Unfreeze Entity',
+        `${type} ${item.name || ''} (${id}) is now ${item.frozen ? 'FROZEN' : 'active'}`
+    );
+    res.sendStatus(200);
+});
+
+app.get('/toggle-sub-key-freeze/:type/:id/:key', checkAuth, async (req, res) => {
+    const data = db.getData();
+    const { type, id, key } = req.params;
+    const decodedKey = decodeURIComponent(key);
+    if (!data.whitelist[type]) return res.sendStatus(404);
+    const item = data.whitelist[type].find(x => x.id === Number(id));
+    if (!item || !item.keys) return res.sendStatus(404);
+    const k = item.keys.find(x => x.key === decodedKey);
+    if (!k) return res.sendStatus(404);
+    k.frozen = !k.frozen;
+    await safeSave();
+    await saveActionLogInternal(
+        req.session.userEmail,
+        k.frozen ? 'Freeze Entity Key' : 'Unfreeze Entity Key',
+        `Key [${decodedKey}] on ${type} (${id}) is now ${k.frozen ? 'FROZEN' : 'active'}`
+    );
+    res.sendStatus(200);
+});
+
+app.get('/toggle-key-freeze/:key', checkAuth, async (req, res) => {
+    const data = db.getData();
+    const keyTarget = decodeURIComponent(req.params.key);
+    const keyObj = data.keys.find(k => k.key === keyTarget);
+    if (!keyObj) return res.sendStatus(404);
+    // Only owner can freeze ALL keys / locked keys handling
+    if (req.session.userEmail !== OWNER_EMAIL) {
+        if (keyObj.isLocked || isAllAccessKey(keyObj, keyTarget)) {
+            return res.sendStatus(403);
+        }
+    }
+    keyObj.frozen = !keyObj.frozen;
+    await safeSave();
+    await saveActionLogInternal(
+        req.session.userEmail,
+        keyObj.frozen ? 'Freeze System Key' : 'Unfreeze System Key',
+        `System key [${keyTarget}] is now ${keyObj.frozen ? 'FROZEN' : 'active'}`
+    );
+    res.sendStatus(200);
 });
 
 app.get('/force-load', checkAuth, async (req, res) => {
