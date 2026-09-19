@@ -462,19 +462,92 @@ app.post('/api/verify', async (req, res) => {
             let placeName = 'Unknown Place';
             let creatorName = 'Unknown';
             try {
-                const placeRes = await axios.get(`https://games.roblox.com/v1/games/v2/places/${placeId}/details`);
-                if (placeRes.data && placeRes.data.name) {
-                    placeName = placeRes.data.name;
-                    const builderId = placeRes.data.builderId;
-                    if (builderId) {
-                        const userRes = await axios.get(`https://users.roblox.com/v1/users/${builderId}`);
-                        if (userRes.data && userRes.data.name) {
-                            creatorName = userRes.data.name;
+                // 1) Place → Universe
+                const uniRes = await axios.get(
+                    `https://apis.roblox.com/universes/v1/places/${placeId}/universe`,
+                    { timeout: 8000 }
+                );
+                const universeId = uniRes.data && uniRes.data.universeId;
+
+                if (universeId) {
+                    // 2) Universe → game name + creator (User / Group)
+                    const gameRes = await axios.get(
+                        `https://games.roblox.com/v1/games?universeIds=${universeId}`,
+                        { timeout: 8000 }
+                    );
+                    const game = gameRes.data && gameRes.data.data && gameRes.data.data[0];
+                    if (game) {
+                        if (game.name) placeName = game.name;
+
+                        if (game.creator) {
+                            if (game.creator.type === 'Group') {
+                                // Group: show "OwnerName | GroupName"
+                                try {
+                                    const gRes = await axios.get(
+                                        `https://groups.roblox.com/v1/groups/${game.creator.id}`,
+                                        { timeout: 8000 }
+                                    );
+                                    const gName = (gRes.data && gRes.data.name) || game.creator.name;
+                                    const ownerName =
+                                        (gRes.data && gRes.data.owner && (gRes.data.owner.username || gRes.data.owner.name)) || null;
+                                    creatorName = ownerName ? `${ownerName} | ${gName}` : (gName || `Group ${game.creator.id}`);
+                                } catch (_) {
+                                    creatorName = game.creator.name || `Group ${game.creator.id}`;
+                                }
+                            } else {
+                                creatorName = game.creator.name || `User ${game.creator.id}`;
+                            }
                         }
                     }
                 }
-            } catch (e) {}
-            data.pendingPlaces.push({ id: Number(placeId), creatorId: Number(creatorId), key: licenseKey, name: placeName, creatorName });
+            } catch (_) {
+                // Fallback: multiget-place-details
+                try {
+                    const placeRes = await axios.get(
+                        `https://games.roblox.com/v1/games/multiget-place-details?placeIds=${placeId}`,
+                        { timeout: 8000 }
+                    );
+                    const p = Array.isArray(placeRes.data) ? placeRes.data[0] : null;
+                    if (p) {
+                        if (p.name) placeName = p.name;
+                        if (p.builder) creatorName = p.builder;
+                    }
+                } catch (__) {}
+            }
+
+            // Final fallback using creatorId sent by the script (user OR group id)
+            if (creatorName === 'Unknown' && creatorId) {
+                try {
+                    const userRes = await axios.get(
+                        `https://users.roblox.com/v1/users/${creatorId}`,
+                        { timeout: 5000 }
+                    );
+                    if (userRes.data && userRes.data.name) {
+                        creatorName = userRes.data.name;
+                    }
+                } catch (_) {
+                    try {
+                        const gRes = await axios.get(
+                            `https://groups.roblox.com/v1/groups/${creatorId}`,
+                            { timeout: 5000 }
+                        );
+                        if (gRes.data) {
+                            const gName = gRes.data.name || `Group ${creatorId}`;
+                            const ownerName =
+                                gRes.data.owner && (gRes.data.owner.username || gRes.data.owner.name);
+                            creatorName = ownerName ? `${ownerName} | ${gName}` : gName;
+                        }
+                    } catch (__) {}
+                }
+            }
+
+            data.pendingPlaces.push({
+                id: Number(placeId),
+                creatorId: Number(creatorId),
+                key: licenseKey,
+                name: placeName,
+                creatorName
+            });
             await safeSave();
         }
     }
