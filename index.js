@@ -104,8 +104,14 @@ function recordVerifyStat(data, { allowed, licenseKey, placeId }) {
         if (!data.stats.byPlace[pid]) data.stats.byPlace[pid] = { allowed: 0, denied: 0 };
         data.stats.byPlace[pid][allowed ? 'allowed' : 'denied']++;
     }
-    data.stats.recent.push({ t: Date.now(), allowed: !!allowed });
-    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    data.stats.recent.push({
+        t: Date.now(),
+        allowed: !!allowed,
+        key: licenseKey || null,
+        placeId: placeId != null ? String(placeId) : null
+    });
+    // Keep 7 days of recent events (for weekly key ranking)
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
     data.stats.recent = data.stats.recent.filter(e => e.t > cutoff);
 }
 
@@ -395,8 +401,24 @@ app.get('/api/dashboard-data', checkAuth, async (req, res) => {
     }));
     ensureStats(data);
     const recent = data.stats.recent || [];
-    const last24hAllowed = recent.filter(e => e.allowed).length;
-    const last24hDenied = recent.filter(e => !e.allowed).length;
+    const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+    const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const last24 = recent.filter(e => e.t > dayAgo);
+    const last24hAllowed = last24.filter(e => e.allowed).length;
+    const last24hDenied = last24.filter(e => !e.allowed).length;
+
+    // Weekly key ranking (most used this week)
+    const weekKeyMap = {};
+    recent.filter(e => e.t > weekAgo && e.key).forEach(e => {
+        if (!weekKeyMap[e.key]) weekKeyMap[e.key] = { total: 0, allowed: 0, denied: 0 };
+        weekKeyMap[e.key].total++;
+        if (e.allowed) weekKeyMap[e.key].allowed++;
+        else weekKeyMap[e.key].denied++;
+    });
+    const topKeysWeek = Object.entries(weekKeyMap)
+        .map(([key, s]) => ({ key, ...s }))
+        .sort((a, b) => b.total - a.total)
+        .slice(0, 10);
 
     res.json({
         activeSessions: extendedSessions,
@@ -414,7 +436,8 @@ app.get('/api/dashboard-data', checkAuth, async (req, res) => {
             last24hAllowed,
             last24hDenied,
             byKey: data.stats.byKey || {},
-            byPlace: data.stats.byPlace || {}
+            byPlace: data.stats.byPlace || {},
+            topKeysWeek
         }
     });
 });
@@ -1059,7 +1082,10 @@ app.get('/', checkAuth, (req, res) => {
                     let keysListHtml = '';
                     let searchData = \`\${item.name || ''} \${item.id} \${item.creatorName || ''} \${item.creatorId || ''}\`.toLowerCase();
                     if (item.assignedKey) searchData += \` \${item.assignedKey}\`;
-                    if (item.expiresAt) {
+                    // Only show entity-level expiry if there are NO per-key expiry dates
+                    // (otherwise each key already has its own countdown — avoid a duplicate place timer)
+                    const hasKeyExpiries = item.keys && item.keys.some(k => k.expiresAt);
+                    if (item.expiresAt && !hasKeyExpiries) {
                         const diff = item.expiresAt - Date.now();
                         if (diff > 0) {
                             const hours = Math.floor(diff / 3600000);
@@ -1168,13 +1194,28 @@ app.get('/', checkAuth, (req, res) => {
                         if (el('stat-24a')) el('stat-24a').textContent = data.stats.last24hAllowed ?? 0;
                         if (el('stat-24d')) el('stat-24d').textContent = data.stats.last24hDenied ?? 0;
                         const byKeyBox = document.getElementById('stats-by-key');
-                        if (byKeyBox && data.stats.byKey) {
-                            const entries = Object.entries(data.stats.byKey).sort((a,b) => (b[1].allowed+b[1].denied) - (a[1].allowed+a[1].denied)).slice(0, 12);
-                            byKeyBox.innerHTML = entries.length
-                                ? '<div style="font-weight:bold;margin-bottom:6px;color:#e2e8f0;">Per key</div>' + entries.map(([key, s]) =>
-                                    \`<div style="display:flex;justify-content:space-between;gap:8px;padding:2px 0;border-bottom:1px solid #1e293b;"><span>🔑 \${key}</span><span><span style="color:#10b981;">✓\${s.allowed||0}</span> / <span style="color:#f43f5e;">✗\${s.denied||0}</span></span></div>\`
-                                  ).join('')
-                                : '<span style="color:#64748b;">No key usage yet</span>';
+                        if (byKeyBox) {
+                            let html = '';
+                            const week = data.stats.topKeysWeek || [];
+                            if (week.length) {
+                                html += '<div style="font-weight:bold;margin-bottom:6px;color:#e2e8f0;">🏆 Most used keys this week</div>';
+                                html += week.map((s, i) => {
+                                    const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : (i + 1) + '.';
+                                    return \`<div style="display:flex;justify-content:space-between;gap:8px;padding:3px 0;border-bottom:1px solid #1e293b;"><span>\${medal} 🔑 \${s.key}</span><span style="color:#38bdf8;font-weight:bold;">\${s.total} checks</span> <span><span style="color:#10b981;">✓\${s.allowed||0}</span> / <span style="color:#f43f5e;">✗\${s.denied||0}</span></span></div>\`;
+                                }).join('');
+                            } else {
+                                html += '<div style="color:#64748b;margin-bottom:8px;">No weekly key usage yet (data builds as verifies come in)</div>';
+                            }
+                            if (data.stats.byKey) {
+                                const entries = Object.entries(data.stats.byKey).sort((a,b) => (b[1].allowed+b[1].denied) - (a[1].allowed+a[1].denied)).slice(0, 12);
+                                if (entries.length) {
+                                    html += '<div style="font-weight:bold;margin:10px 0 6px;color:#e2e8f0;">All-time per key</div>';
+                                    html += entries.map(([key, s]) =>
+                                        \`<div style="display:flex;justify-content:space-between;gap:8px;padding:2px 0;border-bottom:1px solid #1e293b;"><span>🔑 \${key}</span><span><span style="color:#10b981;">✓\${s.allowed||0}</span> / <span style="color:#f43f5e;">✗\${s.denied||0}</span></span></div>\`
+                                    ).join('');
+                                }
+                            }
+                            byKeyBox.innerHTML = html || '<span style="color:#64748b;">No key usage yet</span>';
                         }
                     }
 
