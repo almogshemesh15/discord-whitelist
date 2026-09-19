@@ -43,6 +43,129 @@ function parseLocalTime(inputString) {
     return new Date(inputString + ':00+03:00').getTime();
 }
 
+function isBadMetaName(n) {
+    return !n ||
+        n === '[TITLE UNAVAILABLE]' ||
+        n === '[DESCRIPTION UNAVAILABLE]' ||
+        n === '[UNKNOWN]' ||
+        n === 'Unknown' ||
+        n === 'Unknown Place' ||
+        n === 'Place' ||
+        n === 'Approved Place';
+}
+
+/** Resolve place name + creator display (works for private games via develop API). */
+async function resolvePlaceMeta(placeId, creatorId) {
+    let placeName = 'Unknown Place';
+    let creatorName = 'Unknown';
+    let resolvedCreatorId = creatorId ? Number(creatorId) : null;
+
+    try {
+        const uniRes = await axios.get(
+            `https://apis.roblox.com/universes/v1/places/${placeId}/universe`,
+            { timeout: 8000 }
+        );
+        const universeId = uniRes.data && uniRes.data.universeId;
+
+        if (universeId) {
+            try {
+                const devRes = await axios.get(
+                    `https://develop.roblox.com/v1/universes/${universeId}`,
+                    { timeout: 8000 }
+                );
+                const u = devRes.data;
+                if (u) {
+                    if (u.name && !isBadMetaName(u.name)) placeName = u.name;
+                    if (u.creatorTargetId) resolvedCreatorId = Number(u.creatorTargetId);
+                    if (u.creatorName && !isBadMetaName(u.creatorName)) {
+                        if (u.creatorType === 'Group') {
+                            try {
+                                const gRes = await axios.get(
+                                    `https://groups.roblox.com/v1/groups/${u.creatorTargetId}`,
+                                    { timeout: 8000 }
+                                );
+                                const gName = (gRes.data && gRes.data.name) || u.creatorName;
+                                const ownerName =
+                                    gRes.data && gRes.data.owner && (gRes.data.owner.username || gRes.data.owner.name);
+                                creatorName = ownerName ? `${ownerName} | ${gName}` : gName;
+                            } catch (_) {
+                                creatorName = u.creatorName;
+                            }
+                        } else {
+                            creatorName = u.creatorName;
+                        }
+                    }
+                }
+            } catch (_) {}
+
+            if (isBadMetaName(placeName) || isBadMetaName(creatorName)) {
+                try {
+                    const gameRes = await axios.get(
+                        `https://games.roblox.com/v1/games?universeIds=${universeId}`,
+                        { timeout: 8000 }
+                    );
+                    const game = gameRes.data && gameRes.data.data && gameRes.data.data[0];
+                    if (game) {
+                        if (game.name && !isBadMetaName(game.name)) placeName = game.name;
+                        if (game.creator) {
+                            if (game.creator.id) resolvedCreatorId = Number(game.creator.id);
+                            if (isBadMetaName(creatorName)) {
+                                if (game.creator.type === 'Group') {
+                                    try {
+                                        const gRes = await axios.get(
+                                            `https://groups.roblox.com/v1/groups/${game.creator.id}`,
+                                            { timeout: 8000 }
+                                        );
+                                        const gName = (gRes.data && gRes.data.name) || game.creator.name;
+                                        const ownerName =
+                                            gRes.data && gRes.data.owner && (gRes.data.owner.username || gRes.data.owner.name);
+                                        creatorName = ownerName ? `${ownerName} | ${gName}` : (gName || game.creator.name);
+                                    } catch (_) {
+                                        if (game.creator.name && !isBadMetaName(game.creator.name)) {
+                                            creatorName = game.creator.name;
+                                        }
+                                    }
+                                } else if (game.creator.name && !isBadMetaName(game.creator.name)) {
+                                    creatorName = game.creator.name;
+                                }
+                            }
+                        }
+                    }
+                } catch (_) {}
+            }
+        }
+    } catch (_) {}
+
+    if (isBadMetaName(creatorName) && resolvedCreatorId) {
+        try {
+            const userRes = await axios.get(
+                `https://users.roblox.com/v1/users/${resolvedCreatorId}`,
+                { timeout: 5000 }
+            );
+            if (userRes.data && userRes.data.name) {
+                creatorName = userRes.data.displayName && userRes.data.displayName !== userRes.data.name
+                    ? `${userRes.data.name} (${userRes.data.displayName})`
+                    : userRes.data.name;
+            }
+        } catch (_) {
+            try {
+                const gRes = await axios.get(
+                    `https://groups.roblox.com/v1/groups/${resolvedCreatorId}`,
+                    { timeout: 5000 }
+                );
+                if (gRes.data) {
+                    const gName = gRes.data.name || `Group ${resolvedCreatorId}`;
+                    const ownerName =
+                        gRes.data.owner && (gRes.data.owner.username || gRes.data.owner.name);
+                    creatorName = ownerName ? `${ownerName} | ${gName}` : gName;
+                }
+            } catch (__) {}
+        }
+    }
+
+    return { placeName, creatorName, creatorId: resolvedCreatorId };
+}
+
 function checkAuth(req, res, next) {
     if (req.session.isAuthenticated && req.session.is2FAVerified) {
         return next();
@@ -170,6 +293,36 @@ app.get('/api/dashboard-data', checkAuth, async (req, res) => {
             data.activeSessions = deduped;
             await safeSave();
         }
+    }
+
+    // Refresh missing / bad names for pending + authorized places (a few per request)
+    let namesChanged = false;
+    try {
+        const pendingToFix = (data.pendingPlaces || []).filter(
+            p => isBadMetaName(p.name) || isBadMetaName(p.creatorName)
+        ).slice(0, 5);
+        for (const p of pendingToFix) {
+            const meta = await resolvePlaceMeta(p.id, p.creatorId);
+            if (!isBadMetaName(meta.placeName)) p.name = meta.placeName;
+            if (!isBadMetaName(meta.creatorName)) p.creatorName = meta.creatorName;
+            if (meta.creatorId) p.creatorId = meta.creatorId;
+            namesChanged = true;
+        }
+
+        const placesToFix = (data.whitelist.places || []).filter(
+            p => isBadMetaName(p.name) || !p.creatorName || isBadMetaName(p.creatorName)
+        ).slice(0, 5);
+        for (const p of placesToFix) {
+            const meta = await resolvePlaceMeta(p.id, p.creatorId);
+            if (!isBadMetaName(meta.placeName)) p.name = meta.placeName;
+            if (!isBadMetaName(meta.creatorName)) p.creatorName = meta.creatorName;
+            if (meta.creatorId) p.creatorId = meta.creatorId;
+            namesChanged = true;
+        }
+
+        if (namesChanged) await safeSave();
+    } catch (e) {
+        console.error('name refresh error:', e.message || e);
     }
 
     const extendedSessions = (data.activeSessions || []).map(s => ({
@@ -459,119 +612,13 @@ app.post('/api/verify', async (req, res) => {
     const validKey = data.keys.find(k => k.key === licenseKey);
     if (licenseKey && validKey) {
         if (!data.pendingPlaces.some(p => p.id === Number(placeId) && p.key === licenseKey)) {
-            let placeName = 'Unknown Place';
-            let creatorName = 'Unknown';
-            const isBadName = (n) => !n || n === '[TITLE UNAVAILABLE]' || n === '[UNKNOWN]' || n === 'Unknown' || n === 'Unknown Place';
-
-            try {
-                // 1) Place → Universe
-                const uniRes = await axios.get(
-                    `https://apis.roblox.com/universes/v1/places/${placeId}/universe`,
-                    { timeout: 8000 }
-                );
-                const universeId = uniRes.data && uniRes.data.universeId;
-
-                if (universeId) {
-                    // 2) Prefer develop API — works for Private games (games.roblox.com returns TITLE UNAVAILABLE)
-                    try {
-                        const devRes = await axios.get(
-                            `https://develop.roblox.com/v1/universes/${universeId}`,
-                            { timeout: 8000 }
-                        );
-                        const u = devRes.data;
-                        if (u) {
-                            if (u.name && !isBadName(u.name)) placeName = u.name;
-                            if (u.creatorName && !isBadName(u.creatorName)) {
-                                if (u.creatorType === 'Group') {
-                                    try {
-                                        const gRes = await axios.get(
-                                            `https://groups.roblox.com/v1/groups/${u.creatorTargetId}`,
-                                            { timeout: 8000 }
-                                        );
-                                        const gName = (gRes.data && gRes.data.name) || u.creatorName;
-                                        const ownerName =
-                                            gRes.data && gRes.data.owner && (gRes.data.owner.username || gRes.data.owner.name);
-                                        creatorName = ownerName ? `${ownerName} | ${gName}` : gName;
-                                    } catch (_) {
-                                        creatorName = u.creatorName;
-                                    }
-                                } else {
-                                    creatorName = u.creatorName;
-                                }
-                            }
-                        }
-                    } catch (_) {}
-
-                    // 3) Fallback to public games API (public experiences only)
-                    if (isBadName(placeName) || isBadName(creatorName)) {
-                        try {
-                            const gameRes = await axios.get(
-                                `https://games.roblox.com/v1/games?universeIds=${universeId}`,
-                                { timeout: 8000 }
-                            );
-                            const game = gameRes.data && gameRes.data.data && gameRes.data.data[0];
-                            if (game) {
-                                if (game.name && !isBadName(game.name)) placeName = game.name;
-                                if (game.creator && isBadName(creatorName)) {
-                                    if (game.creator.type === 'Group') {
-                                        try {
-                                            const gRes = await axios.get(
-                                                `https://groups.roblox.com/v1/groups/${game.creator.id}`,
-                                                { timeout: 8000 }
-                                            );
-                                            const gName = (gRes.data && gRes.data.name) || game.creator.name;
-                                            const ownerName =
-                                                gRes.data && gRes.data.owner && (gRes.data.owner.username || gRes.data.owner.name);
-                                            creatorName = ownerName ? `${ownerName} | ${gName}` : (gName || game.creator.name);
-                                        } catch (_) {
-                                            if (game.creator.name && !isBadName(game.creator.name)) {
-                                                creatorName = game.creator.name;
-                                            }
-                                        }
-                                    } else if (game.creator.name && !isBadName(game.creator.name)) {
-                                        creatorName = game.creator.name;
-                                    }
-                                }
-                            }
-                        } catch (_) {}
-                    }
-                }
-            } catch (_) {}
-
-            // Final fallback: resolve creatorId from the script payload (user OR group)
-            if (isBadName(creatorName) && creatorId) {
-                try {
-                    const userRes = await axios.get(
-                        `https://users.roblox.com/v1/users/${creatorId}`,
-                        { timeout: 5000 }
-                    );
-                    if (userRes.data && userRes.data.name) {
-                        creatorName = userRes.data.displayName
-                            ? `${userRes.data.name} (${userRes.data.displayName})`
-                            : userRes.data.name;
-                    }
-                } catch (_) {
-                    try {
-                        const gRes = await axios.get(
-                            `https://groups.roblox.com/v1/groups/${creatorId}`,
-                            { timeout: 5000 }
-                        );
-                        if (gRes.data) {
-                            const gName = gRes.data.name || `Group ${creatorId}`;
-                            const ownerName =
-                                gRes.data.owner && (gRes.data.owner.username || gRes.data.owner.name);
-                            creatorName = ownerName ? `${ownerName} | ${gName}` : gName;
-                        }
-                    } catch (__) {}
-                }
-            }
-
+            const meta = await resolvePlaceMeta(placeId, creatorId);
             data.pendingPlaces.push({
                 id: Number(placeId),
-                creatorId: Number(creatorId),
+                creatorId: meta.creatorId || Number(creatorId),
                 key: licenseKey,
-                name: placeName,
-                creatorName
+                name: meta.placeName,
+                creatorName: meta.creatorName
             });
             await safeSave();
         }
@@ -854,7 +901,7 @@ app.get('/', checkAuth, (req, res) => {
                 return arr.map(item => {
                     let timeLeft = '';
                     let keysListHtml = '';
-                    let searchData = \`\${item.name || ''} \${item.id}\`.toLowerCase();
+                    let searchData = \`\${item.name || ''} \${item.id} \${item.creatorName || ''} \${item.creatorId || ''}\`.toLowerCase();
                     if (item.assignedKey) searchData += \` \${item.assignedKey}\`;
                     if (item.expiresAt) {
                         const diff = item.expiresAt - Date.now();
@@ -887,10 +934,14 @@ app.get('/', checkAuth, (req, res) => {
                         });
                         keysListHtml += '</div>';
                     }
+                    const ownerLine = (type === 'places' && item.creatorName)
+                        ? \`<br><span style="font-size:12px;color:#94a3b8;">👤 \${item.creatorName}\${item.creatorId ? ' (' + item.creatorId + ')' : ''}</span>\`
+                        : '';
                     return \`
                         <tr data-search="\${searchData}">
                             <td>
                                 <strong>\${item.name || 'Unknown'}</strong> (\${item.id})
+                                \${ownerLine}
                                 \${item.assignedKey ? \`<br><span class="key-badge">🔑 \${item.assignedKey}</span>\` : ''}
                                 \${keysListHtml}
                                 \${item.groups ? \`<br><span class="group-tag">Groups: \${item.groups.join(', ')}</span>\` : ''}
@@ -1424,6 +1475,15 @@ app.post('/add', checkAuth, async (req, res) => {
         } catch (e) {}
     }
 
+    let placeCreatorName = null;
+    let placeCreatorId = null;
+    if (type === 'places' && id) {
+        const meta = await resolvePlaceMeta(id, null);
+        if (!isBadMetaName(meta.placeName)) name = meta.placeName;
+        if (!isBadMetaName(meta.creatorName)) placeCreatorName = meta.creatorName;
+        if (meta.creatorId) placeCreatorId = meta.creatorId;
+    }
+
     if (id) {
         const itemKeys = [];
         let overallExpiresAt = null;
@@ -1472,17 +1532,26 @@ app.post('/add', checkAuth, async (req, res) => {
                 name: name || currentItem.name,
                 groups: groups.length > 0 ? groups : currentItem.groups,
                 keys: updatedKeys,
-                expiresAt: overallExpiresAt || currentItem.expiresAt
+                expiresAt: overallExpiresAt || currentItem.expiresAt,
+                ...(type === 'places' ? {
+                    creatorName: placeCreatorName || currentItem.creatorName,
+                    creatorId: placeCreatorId || currentItem.creatorId
+                } : {})
             };
             await saveActionLogInternal(req.session.userEmail, "Updated Whitelist Entity", `Updated ${targetLabel}. Associated Keys: [ ${keysLogString} ]`);
         } else {
-            data.whitelist[type].push({ 
+            const newItem = { 
                 id, 
                 name: name || (type === 'places' ? 'Place' : 'Unknown'), 
                 groups: groups.length > 0 ? groups : null,
                 keys: itemKeys,
                 expiresAt: overallExpiresAt
-            });
+            };
+            if (type === 'places') {
+                newItem.creatorName = placeCreatorName;
+                newItem.creatorId = placeCreatorId;
+            }
+            data.whitelist[type].push(newItem);
             await saveActionLogInternal(req.session.userEmail, "Direct Whitelist Grant", `Authorized new ${targetLabel}. Mapped Keys: [ ${keysLogString} ]`);
         }
         await safeSave();
@@ -1555,6 +1624,18 @@ app.post('/approve/:id/:key', checkAuth, async (req, res) => {
         }
 
         const expiresTime = expiresAtRaw ? parseLocalTime(expiresAtRaw) : null;
+
+        // Ensure we have real names before storing in Authorized Places
+        let placeName = pending.name;
+        let creatorName = pending.creatorName;
+        let creatorIdVal = pending.creatorId;
+        if (isBadMetaName(placeName) || isBadMetaName(creatorName)) {
+            const meta = await resolvePlaceMeta(id, pending.creatorId);
+            if (!isBadMetaName(meta.placeName)) placeName = meta.placeName;
+            if (!isBadMetaName(meta.creatorName)) creatorName = meta.creatorName;
+            if (meta.creatorId) creatorIdVal = meta.creatorId;
+        }
+
         const existingIndex = data.whitelist.places.findIndex(p => p.id === id);
         
         if (existingIndex !== -1) {
@@ -1568,13 +1649,18 @@ app.post('/approve/:id/:key', checkAuth, async (req, res) => {
             }
             data.whitelist.places[existingIndex] = {
                 ...currentItem,
+                name: (!isBadMetaName(placeName) ? placeName : currentItem.name) || currentItem.name,
+                creatorName: creatorName || currentItem.creatorName,
+                creatorId: creatorIdVal || currentItem.creatorId,
                 keys: updatedKeys,
                 expiresAt: expiresTime || currentItem.expiresAt
             };
         } else {
             data.whitelist.places.push({
                 id,
-                name: pending.name || 'Approved Place',
+                name: placeName || 'Approved Place',
+                creatorName: creatorName || null,
+                creatorId: creatorIdVal || null,
                 keys: [{ key: pending.key, expiresAt: expiresTime }],
                 expiresAt: expiresTime
             });
