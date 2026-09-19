@@ -19,7 +19,12 @@ app.use(session({
     secret: 'secure_whitelist_hub_secret_key',
     resave: false,
     saveUninitialized: false,
-    cookie: { maxAge: 24 * 60 * 60 * 1000 }
+    rolling: true, // extends cookie on every request while active
+    cookie: {
+        maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days — stay logged in
+        sameSite: 'lax',
+        httpOnly: true
+    }
 }));
 
 const PORT = process.env.PORT || 3000;
@@ -491,9 +496,10 @@ app.get('/', checkAuth, (req, res) => {
         <style>
             body { font-family: system-ui, sans-serif; background: #0b0f19; color: #f1f5f9; margin: 0; padding: 30px; }
             .container { max-width: 1200px; margin: 0 auto; }
-            .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 15px; margin-bottom: 25px; }
-            .header-actions { display: flex; gap: 10px; align-items: center; }
-            h1 { font-size: 26px; color: #38bdf8; margin: 0; }
+            .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 15px; margin-bottom: 25px; flex-wrap: wrap; gap: 12px; }
+            .header-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; }
+            .header-actions a { white-space: nowrap; flex-shrink: 0; }
+            h1 { font-size: 22px; color: #38bdf8; margin: 0; white-space: nowrap; }
             .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
             .card { background: #111827; padding: 20px; border-radius: 10px; border: 1px solid #1e293b; position: relative; }
             .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 10px; }
@@ -502,15 +508,19 @@ app.get('/', checkAuth, (req, res) => {
             input, select, textarea { width: 100%; padding: 10px; margin-bottom: 12px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: white; box-sizing: border-box; }
             button { width: 100%; background: #0284c7; color: white; border: none; padding: 10px; border-radius: 6px; font-weight: bold; cursor: pointer; }
             button:hover { background: #0369a1; }
-            .btn-refresh { background: #1f2937; border: 1px solid #374151; color: #94a3b8; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; height: 38px; box-sizing: border-box; font-weight: bold; }
+            .btn-refresh, .btn-save-db, .btn-load-db, .btn-obfuscate-page, .btn-logout {
+                padding: 6px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; text-decoration: none;
+                display: inline-flex; align-items: center; height: 34px; box-sizing: border-box; font-weight: bold; white-space: nowrap;
+            }
+            .btn-refresh { background: #1f2937; border: 1px solid #374151; color: #94a3b8; }
             .btn-refresh:hover { background: #374151; color: white; }
-            .btn-save-db { background: #10b981; border: 1px solid #059669; color: white; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; height: 38px; box-sizing: border-box; font-weight: bold; }
+            .btn-save-db { background: #10b981; border: 1px solid #059669; color: white; }
             .btn-save-db:hover { background: #059669; }
-            .btn-load-db { background: #0ea5e9; border: 1px solid #0284c7; color: white; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; height: 38px; box-sizing: border-box; font-weight: bold; }
+            .btn-load-db { background: #0ea5e9; border: 1px solid #0284c7; color: white; }
             .btn-load-db:hover { background: #0284c7; }
-            .btn-obfuscate-page { background: #a855f7; border: 1px solid #9333ea; color: white; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; height: 38px; box-sizing: border-box; font-weight: bold; }
+            .btn-obfuscate-page { background: #a855f7; border: 1px solid #9333ea; color: white; }
             .btn-obfuscate-page:hover { background: #9333ea; }
-            .btn-logout { background: #f43f5e; border: 1px solid #e11d48; color: white; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; height: 38px; box-sizing: border-box; font-weight: bold; }
+            .btn-logout { background: #f43f5e; border: 1px solid #e11d48; color: white; }
             .btn-logout:hover { background: #e11d48; }
             table { width: 100%; border-collapse: collapse; margin-top: 5px; }
             th, td { padding: 12px; text-align: left; border-bottom: 1px solid #1e293b; font-size: 14px; vertical-align: top; }
@@ -534,12 +544,12 @@ app.get('/', checkAuth, (req, res) => {
             <div class="header">
                 <h1>🛡️ Universal Whitelist Hub</h1>
                 <div class="header-actions">
-                    <span style="font-size:14px;color:#94a3b8;margin-right:10px;">Logged in as: ${req.session.userEmail}</span>
-                    <a href="/obfuscate" class="btn-obfuscate-page">🔒 Obfuscate Code</a>
-                    <a href="/force-save" class="btn-save-db">💾 Save File</a>
-                    <a href="/force-load" class="btn-load-db">📂 Load Data</a>
-                    <a href="/" class="btn-refresh">🔄 Global Refresh</a>
-                    <a href="/logout" class="btn-logout">🚪 Log Out</a>
+                    <span style="font-size:12px;color:#94a3b8;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${req.session.userEmail}">${req.session.userEmail}</span>
+                    <a href="/obfuscate" class="btn-obfuscate-page">🔒 Obfuscate</a>
+                    <a href="/force-save" class="btn-save-db">💾 Save</a>
+                    <a href="/force-load" class="btn-load-db">📂 Load</a>
+                    <a href="/" class="btn-refresh">🔄 Refresh</a>
+                    <a href="/logout" class="btn-logout">🚪 Logout</a>
                 </div>
             </div>
             <div class="grid">
@@ -1205,19 +1215,12 @@ app.get('/force-save', checkAuth, async (req, res) => {
 });
 
 app.get('/force-load', checkAuth, async (req, res) => {
-    // Re-load data from the persistence layer (same place Save File writes to)
+    // Re-load data from Google Sheets (same place Save writes to)
     try {
-        if (typeof db.load === 'function') {
-            await db.load();
-        } else if (typeof db.reload === 'function') {
-            await db.reload();
-        } else if (typeof db.read === 'function') {
-            await db.read();
-        } else if (typeof db.loadData === 'function') {
+        if (typeof db.loadData === 'function') {
             await db.loadData();
         } else {
-            // Fallback: if the module exposes a path or raw re-init, try common patterns
-            console.warn('force-load: no load/reload/read/loadData method found on db module');
+            console.warn('force-load: db.loadData not available');
         }
     } catch (e) {
         console.error('force-load error:', e);
