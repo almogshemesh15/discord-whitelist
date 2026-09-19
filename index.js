@@ -1066,7 +1066,7 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
         end
     end
 ${loopLogic}
-end)`
+end)
     
 ${sourceCode}`;
 
