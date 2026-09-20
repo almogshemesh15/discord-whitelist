@@ -676,88 +676,88 @@ app.post('/api/verify', async (req, res) => {
     db.checkExpiration();
     const data = db.getData();
     const { creatorId, placeId, licenseKey } = req.body;
-    if (!creatorId || !placeId) return res.status(400).json({ allowed: false, reason: 'missing_ids' });
 
-    // Maintenance mode blocks all game access
-    if (data.maintenanceMode) {
+    const deny = (reason, message) => {
         recordVerifyStat(data, { allowed: false, licenseKey, placeId });
         safeSave().catch(() => {});
-        return res.json({ allowed: false, reason: 'maintenance' });
+        return res.json({ allowed: false, reason, message });
+    };
+    const allow = (reason) => {
+        recordVerifyStat(data, { allowed: true, licenseKey, placeId });
+        safeSave().catch(() => {});
+        return res.json({ allowed: true, reason: reason || 'allowed', message: 'Access granted' });
+    };
+
+    if (!creatorId || !placeId) {
+        return res.status(400).json({ allowed: false, reason: 'missing_ids', message: 'Missing creatorId or placeId' });
+    }
+
+    if (data.maintenanceMode) {
+        return deny('maintenance', 'Server under maintenance');
     }
 
     if (licenseKey) {
         const keyObj = data.keys.find(k => k.key === licenseKey);
         if (!keyObj) {
-            recordVerifyStat(data, { allowed: false, licenseKey, placeId });
-            safeSave().catch(() => {});
-            return res.json({ allowed: false, reason: 'invalid_key' });
+            return deny('invalid_key', 'Invalid license key');
         }
-        // Globally frozen system key
         if (keyObj.frozen) {
-            recordVerifyStat(data, { allowed: false, licenseKey, placeId });
-            safeSave().catch(() => {});
-            return res.json({ allowed: false, reason: 'key_frozen' });
+            return deny('key_frozen', 'License key is frozen');
         }
     }
 
     const now = Date.now();
-    const checkAccess = (item) => {
-        if (!item) return false;
-        // Entire entity frozen
-        if (item.frozen) return false;
-        // ALL tag on entity → full access (unless frozen)
-        if (entityHasAllAccess(item, data)) return true;
-        if (!licenseKey) return true;
-        if (item.assignedKey === licenseKey) return true;
+
+    // Detailed access check — returns { ok, reason, message }
+    const evalEntity = (item) => {
+        if (!item) return { ok: false };
+        if (item.frozen) return { ok: false, reason: 'entity_frozen', message: 'This place/creator is frozen' };
+        if (entityHasAllAccess(item, data)) return { ok: true, reason: 'all_access' };
+        if (!licenseKey) return { ok: true, reason: 'no_key_required' };
+        if (item.assignedKey === licenseKey) return { ok: true };
         if (item.keys && Array.isArray(item.keys)) {
-            return item.keys.some(k => {
-                if (k.key !== licenseKey) return false;
-                if (k.frozen) return false;
-                if (k.expiresAt && k.expiresAt <= now) return false;
-                return true;
-            });
+            const match = item.keys.find(k => k.key === licenseKey);
+            if (match) {
+                if (match.frozen) return { ok: false, reason: 'tag_frozen', message: 'This license tag is frozen' };
+                if (match.expiresAt && match.expiresAt <= now) {
+                    return { ok: false, reason: 'tag_expired', message: 'License tag has expired' };
+                }
+                return { ok: true };
+            }
         }
-        return false;
+        return { ok: false };
     };
 
-    // License key itself is an ALL key → global access (if not frozen)
     if (licenseKey) {
         const keyObj = data.keys.find(k => k.key === licenseKey);
         if (isAllAccessKey(keyObj, licenseKey) && !keyObj.frozen) {
-            recordVerifyStat(data, { allowed: true, licenseKey, placeId });
-            safeSave().catch(() => {});
-            return res.json({ allowed: true, reason: 'all_key' });
+            return allow('all_key');
         }
     }
 
-    const isPlaceAllowed = data.whitelist.places.some(p => p.id === Number(placeId) && checkAccess(p));
-    if (isPlaceAllowed) {
-        recordVerifyStat(data, { allowed: true, licenseKey, placeId });
-        safeSave().catch(() => {});
-        return res.json({ allowed: true });
+    const placeItem = (data.whitelist.places || []).find(p => p.id === Number(placeId));
+    if (placeItem) {
+        const result = evalEntity(placeItem);
+        if (result.ok) return allow(result.reason);
+        if (result.reason === 'entity_frozen' || result.reason === 'tag_frozen' || result.reason === 'tag_expired') {
+            return deny(result.reason, result.message);
+        }
     }
 
-    const isCreatorAllowed = data.whitelist.creators.some(c => {
-        if (c.id === Number(creatorId) && checkAccess(c)) return true;
-        
-        if (c.groups && Array.isArray(c.groups)) {
-            const hasGroupAccess = c.groups.some(gName => {
-                const match = gName.match(/\((\d+)\)/);
-                if (match) {
-                    const gId = Number(match[1]);
-                    return gId === Number(creatorId);
-                }
-                return false;
+    for (const c of (data.whitelist.creators || [])) {
+        let matches = c.id === Number(creatorId);
+        if (!matches && c.groups && Array.isArray(c.groups)) {
+            matches = c.groups.some(gName => {
+                const m = gName.match(/\((\d+)\)/);
+                return m && Number(m[1]) === Number(creatorId);
             });
-            if (hasGroupAccess && checkAccess(c)) return true;
         }
-        return false;
-    });
-
-    if (isCreatorAllowed) {
-        recordVerifyStat(data, { allowed: true, licenseKey, placeId });
-        safeSave().catch(() => {});
-        return res.json({ allowed: true });
+        if (!matches) continue;
+        const result = evalEntity(c);
+        if (result.ok) return allow(result.reason);
+        if (result.reason === 'entity_frozen' || result.reason === 'tag_frozen' || result.reason === 'tag_expired') {
+            return deny(result.reason, result.message);
+        }
     }
 
     const validKey = data.keys.find(k => k.key === licenseKey);
@@ -773,11 +773,10 @@ app.post('/api/verify', async (req, res) => {
             });
             await safeSave();
         }
+        return deny('pending', 'Access pending approval');
     }
 
-    recordVerifyStat(data, { allowed: false, licenseKey, placeId });
-    safeSave().catch(() => {});
-    return res.json({ allowed: false });
+    return deny('not_whitelisted', 'Not authorized for this place');
 });
 
 app.get('/', checkAuth, (req, res) => {
@@ -1508,11 +1507,13 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
 
     let destroyLogic = "";
     let loopLogic = "";
+    let panelRoot = "script";
+    let panelErrorFn = ""; // only for Script type
 
     if (type === "module") {
         destroyLogic = "script:Destroy()";
         loopLogic = `    while true do
-        local status = verifyServer()
+        local status, errMsg = verifyServer()
         if status == "DESTROY" then
             return
         end
@@ -1524,12 +1525,72 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
         for (let i = 0; i < depth; i++) {
             parents += ".Parent";
         }
-        destroyLogic = `script${parents}:Destroy()`;
+        panelRoot = `script${parents}`;
+        destroyLogic = `${panelRoot}:Destroy()`;
+
+        // Show error text on all Parts named "Panel" under the same parent depth
+        panelErrorFn = `
+    local function showPanelError(msg)
+        local ok, root = pcall(function()
+            return ${panelRoot}
+        end)
+        if not ok or not root then return end
+        for _, Panel in pairs(root:GetDescendants()) do
+            if Panel:IsA("BasePart") and Panel.Name == "Panel" then
+                local surfaceGui = nil
+                for _, child in pairs(Panel:GetChildren()) do
+                    if child:IsA("SurfaceGui") then
+                        if child.Face == Enum.NormalId.Front or child.Face == Enum.NormalId.Top then
+                            surfaceGui = child
+                            break
+                        end
+                    end
+                end
+                if not surfaceGui then
+                    surfaceGui = Instance.new("SurfaceGui")
+                    surfaceGui.Face = Enum.NormalId.Front
+                    surfaceGui.Parent = Panel
+                end
+                -- clear previous error UI
+                for _, child in pairs(surfaceGui:GetChildren()) do
+                    if child:GetAttribute("WLErrorPanel") then
+                        child:Destroy()
+                    end
+                end
+                local Frame = Instance.new("Frame")
+                Frame:SetAttribute("WLErrorPanel", true)
+                Frame.AnchorPoint = Vector2.new(0.5, 0.5)
+                Frame.Position = UDim2.new(0.5, 0, 0.5, 0)
+                Frame.Size = UDim2.new(1, 0, 1, 0)
+                Frame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+                Frame.BackgroundTransparency = 0.2
+                Frame.Parent = surfaceGui
+                local UICorner = Instance.new("UICorner")
+                UICorner.Parent = Frame
+                local TextLabel = Instance.new("TextLabel")
+                TextLabel.BackgroundTransparency = 1
+                TextLabel.AnchorPoint = Vector2.new(0.5, 0.5)
+                TextLabel.Position = UDim2.new(0.5, 0, 0.5, 0)
+                TextLabel.Size = UDim2.new(0.8, 0, 0.8, 0)
+                TextLabel.Font = Enum.Font.SourceSansBold
+                TextLabel.Text = tostring(msg or "Access Denied")
+                TextLabel.TextColor3 = Color3.fromRGB(255, 80, 80)
+                TextLabel.TextScaled = true
+                TextLabel.Parent = Frame
+                local UIStroke = Instance.new("UIStroke")
+                UIStroke.Thickness = 3
+                UIStroke.Parent = TextLabel
+            end
+        end
+    end
+`;
+
         loopLogic = `    while true do
-        local status = verifyServer()
+        local status, errMsg = verifyServer()
         if status == "DESTROY" then
             return
         elseif status == "DENIED" then
+            showPanelError(errMsg or "Access Denied")
             script.Enabled = false
             return
         elseif status == "ALLOWED" then
@@ -1541,6 +1602,7 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
 
     const rawCode = `task.spawn(function()
     local isFirstCheck = true
+${panelErrorFn}
     local function verifyServer()
         local payload = {
             creatorId = game.CreatorId,
@@ -1557,18 +1619,26 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
         if not success then
             if isFirstCheck then
                 ${destroyLogic}
-                return "DESTROY"
+                return "DESTROY", "Connection failed"
             end
-            return "SKIP"
+            return "SKIP", nil
         end
         isFirstCheck = false
         local decodeSuccess, data = pcall(function()
             return game:GetService("HttpService"):JSONDecode(response)
         end)
         if decodeSuccess and data and data.allowed then
-            return "ALLOWED"
+            return "ALLOWED", nil
         else
-            return "DENIED"
+            local msg = "Access Denied"
+            if decodeSuccess and data then
+                if type(data.message) == "string" and data.message ~= "" then
+                    msg = data.message
+                elseif type(data.reason) == "string" and data.reason ~= "" then
+                    msg = data.reason
+                end
+            end
+            return "DENIED", msg
         end
     end
 ${loopLogic}
