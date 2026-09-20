@@ -145,7 +145,11 @@ const TRANSLATIONS = {
         scopeCreatorKey: 'Creator + Tag',
         tagLabel: 'Tag / Key',
         resolveBtn: 'Resolve username',
-        targetHint: 'Username or ID — will save as Name (id)'
+        targetHint: 'Username or ID — will save as Name (id)',
+        userLangTitle: 'User message language',
+        userLangHint: 'Choose English or Hebrew for a specific creator. Hebrew uses auto-translated default panel messages for that user.',
+        userLangSave: 'Save language',
+        noUserLang: 'No per-user languages set'
     },
     he: {
         title: 'מערכת רשימת מורשים',
@@ -246,7 +250,11 @@ const TRANSLATIONS = {
         scopeCreatorKey: 'יוצר + טאג',
         tagLabel: 'טאג / מפתח',
         resolveBtn: 'פתור שם משתמש',
-        targetHint: 'שם משתמש או ID — יישמר כ־Name (id)'
+        targetHint: 'שם משתמש או ID — יישמר כ־Name (id)',
+        userLangTitle: 'שפת הודעות למשתמש',
+        userLangHint: 'בחר אנגלית או עברית ליוצר ספציפי. בעברית יוצגו תרגומים אוטומטיים של הודעות ברירת המחדל למשתמש הזה.',
+        userLangSave: 'שמור שפה',
+        noUserLang: 'לא הוגדרו שפות לפי משתמש'
     }
 };
 
@@ -272,13 +280,53 @@ const DEFAULT_PANEL_MESSAGES = {
     missing_ids: 'Missing creatorId or placeId.'
 };
 
-function getPanelMessages(data) {
-    const stored = (data && data.panelMessages) || {};
-    const out = { ...DEFAULT_PANEL_MESSAGES };
-    for (const k of Object.keys(DEFAULT_PANEL_MESSAGES)) {
-        if (typeof stored[k] === 'string' && stored[k].trim()) out[k] = stored[k];
+const DEFAULT_PANEL_MESSAGES_HE = {
+    maintenance: 'המערכת בתחזוקה כרגע.\nהגישה נחסמה זמנית.\nנא לנסות שוב מאוחר יותר.',
+    invalid_key: 'מפתח הרישיון אינו תקין.\nהגישה נדחתה.',
+    key_frozen: 'מפתח הרישיון הוקפא.\nהשימוש במפתח זה נחסם עד להפשרה.',
+    entity_frozen: 'הגישה לישות זו הוקפאה.\nפנה למנהל המערכת.',
+    tag_frozen: 'רישיון המוצר הוקפא.\nהטאג נעול עד להפשרה.',
+    tag_expired: 'תוקף הרישיון פג.\nיש לחדש את הרישיון כדי להמשיך.',
+    pending: 'הבקשה ממתינה לאישור.\nהגישה טרם אושרה.',
+    not_whitelisted: 'אין הרשאה למקום זה.\nפנה למנהל לקבלת גישה.',
+    missing_ids: 'חסרים מזהים (creatorId / placeId).'
+};
+
+function getPanelMessages(data, lang) {
+    const useHe = lang === 'he';
+    const base = useHe ? DEFAULT_PANEL_MESSAGES_HE : DEFAULT_PANEL_MESSAGES;
+    const out = { ...base };
+    // Custom default overrides (stored in English) apply only for English users
+    if (!useHe) {
+        const stored = (data && data.panelMessages) || {};
+        for (const k of Object.keys(DEFAULT_PANEL_MESSAGES)) {
+            if (typeof stored[k] === 'string' && stored[k].trim()) out[k] = stored[k];
+        }
+    } else {
+        // Optional: if admin saved Hebrew overrides under panelMessagesHe
+        const storedHe = (data && data.panelMessagesHe) || {};
+        for (const k of Object.keys(DEFAULT_PANEL_MESSAGES_HE)) {
+            if (typeof storedHe[k] === 'string' && storedHe[k].trim()) out[k] = storedHe[k];
+        }
     }
     return out;
+}
+
+function getUserPanelLang(data, creatorId) {
+    if (creatorId == null) return 'en';
+    const map = (data && data.userPanelLang) || {};
+    const lang = map[String(creatorId)];
+    return lang === 'he' ? 'he' : 'en';
+}
+
+function entityHasFrozenAllTag(item, data) {
+    if (!item || !item.keys || !Array.isArray(item.keys)) return false;
+    const keys = data.keys || [];
+    return item.keys.some(k => {
+        if (!k.frozen) return false;
+        const reg = keys.find(x => x.key === k.key);
+        return isAllAccessKey(reg, k.key);
+    });
 }
 
 /** Extract numeric id from "Name (12345)" or plain "12345" */
@@ -309,10 +357,13 @@ function targetMatchesCreator(target, creatorId) {
  * Custom messages NEVER override maintenance.
  */
 function resolvePanelMessage(data, reason, { licenseKey, placeId, creatorId } = {}) {
-    const msgs = getPanelMessages(data);
+    const userLang = getUserPanelLang(data, creatorId);
+    const msgs = getPanelMessages(data, userLang);
+    const fallback = userLang === 'he' ? DEFAULT_PANEL_MESSAGES_HE : DEFAULT_PANEL_MESSAGES;
+
     // Maintenance always wins — no personal override
     if (reason === 'maintenance') {
-        return msgs.maintenance || DEFAULT_PANEL_MESSAGES.maintenance;
+        return msgs.maintenance || fallback.maintenance;
     }
 
     const customs = (data && data.customPanelMessages) || [];
@@ -327,7 +378,7 @@ function resolvePanelMessage(data, reason, { licenseKey, placeId, creatorId } = 
         if (hit && hit.message) return hit.message;
     }
 
-    // 2) place + tag (optional future-friendly)
+    // 2) place + tag
     if (placeId != null && licenseKey) {
         const hit = customs.find(c =>
             c.scope === 'place_key' &&
@@ -361,7 +412,7 @@ function resolvePanelMessage(data, reason, { licenseKey, placeId, creatorId } = 
         if (hit && hit.message) return hit.message;
     }
 
-    return msgs[reason] || DEFAULT_PANEL_MESSAGES[reason] || 'Access denied.';
+    return msgs[reason] || fallback[reason] || 'Access denied.';
 }
 
 function isBadMetaName(n) {
@@ -1046,6 +1097,10 @@ app.post('/api/verify', async (req, res) => {
     const evalEntity = (item) => {
         if (!item) return { ok: false };
         if (item.frozen) return { ok: false, reason: 'entity_frozen', message: msg('entity_frozen') };
+        // Frozen ALL tag on this entity → always tag_frozen (even if another key is used)
+        if (entityHasFrozenAllTag(item, data)) {
+            return { ok: false, reason: 'tag_frozen', message: msg('tag_frozen') };
+        }
         if (entityHasAllAccess(item, data)) return { ok: true, reason: 'all_access' };
         if (!licenseKey) return { ok: true, reason: 'no_key_required' };
         if (item.assignedKey === licenseKey) return { ok: true };
@@ -1062,15 +1117,9 @@ app.post('/api/verify', async (req, res) => {
         return { ok: false };
     };
 
-    if (licenseKey) {
-        const keyObj = data.keys.find(k => k.key === licenseKey);
-        if (isAllAccessKey(keyObj, licenseKey) && !keyObj.frozen) {
-            return allow('all_key');
-        }
-    }
-
     const hardDenyReasons = new Set(['entity_frozen', 'tag_frozen', 'tag_expired']);
 
+    // Check place / creator FIRST (so frozen All is not overridden by global ALL key)
     const placeItem = (data.whitelist.places || []).find(p => p.id === Number(placeId));
     if (placeItem) {
         const result = evalEntity(placeItem);
@@ -1096,12 +1145,36 @@ app.post('/api/verify', async (req, res) => {
         }
     }
 
-    // Never show "pending" when this key is frozen on the matching place/creator
+    // Global ALL key — only if this place/creator did not freeze All
+    if (licenseKey) {
+        const keyObj = data.keys.find(k => k.key === licenseKey);
+        if (isAllAccessKey(keyObj, licenseKey) && !keyObj.frozen) {
+            if (placeItem && entityHasFrozenAllTag(placeItem, data)) {
+                return deny('tag_frozen', msg('tag_frozen'));
+            }
+            for (const c of (data.whitelist.creators || [])) {
+                let matches = c.id === Number(creatorId);
+                if (!matches && c.groups) {
+                    matches = c.groups.some(gName => {
+                        const m = gName.match(/\((\d+)\)/);
+                        return m && Number(m[1]) === Number(creatorId);
+                    });
+                }
+                if (matches && entityHasFrozenAllTag(c, data)) {
+                    return deny('tag_frozen', msg('tag_frozen'));
+                }
+            }
+            return allow('all_key');
+        }
+    }
+
+    // Never show "pending" when this key (or All) is frozen on the matching place/creator
     if (licenseKey) {
         for (const p of (data.whitelist.places || [])) {
             if (p.id !== Number(placeId) || !p.keys) continue;
             const m = p.keys.find(k => k.key === licenseKey);
             if (m && m.frozen) return deny('tag_frozen', msg('tag_frozen'));
+            if (entityHasFrozenAllTag(p, data)) return deny('tag_frozen', msg('tag_frozen'));
         }
         for (const c of (data.whitelist.creators || [])) {
             let matches = c.id === Number(creatorId);
@@ -1114,6 +1187,7 @@ app.post('/api/verify', async (req, res) => {
             if (!matches || !c.keys) continue;
             const m = c.keys.find(k => k.key === licenseKey);
             if (m && m.frozen) return deny('tag_frozen', msg('tag_frozen'));
+            if (entityHasFrozenAllTag(c, data)) return deny('tag_frozen', msg('tag_frozen'));
         }
     }
 
@@ -1936,9 +2010,34 @@ th,td{padding:8px;border-bottom:1px solid #1e293b;text-align:left;}
       <tbody id="custom-body">${customRows}</tbody>
     </table>
   </div>
+
+  <div class="card">
+    <h3>${tr('userLangTitle')}</h3>
+    <p class="hint">${tr('userLangHint')}</p>
+    <div style="display:grid;grid-template-columns:2fr 1fr auto;gap:8px;align-items:end;">
+      <div>
+        <label style="font-size:12px;color:#94a3b8;">${tr('target')} (${tr('targetHint')})</label>
+        <input id="ul-target" placeholder="username or id">
+      </div>
+      <div>
+        <label style="font-size:12px;color:#94a3b8;">${tr('lang')}</label>
+        <select id="ul-lang">
+          <option value="en">${tr('langEn')}</option>
+          <option value="he">${tr('langHe')}</option>
+        </select>
+      </div>
+      <button type="button" class="btn-add" style="margin-top:0;" onclick="saveUserLang()">💾 ${tr('userLangSave')}</button>
+    </div>
+    <div id="ul-status" style="font-size:12px;color:#94a3b8;margin-top:6px;"></div>
+    <table style="margin-top:14px;">
+      <thead><tr><th>${tr('target')}</th><th>${tr('lang')}</th><th></th></tr></thead>
+      <tbody id="ul-body"></tbody>
+    </table>
+  </div>
 </div>
 <script>
 let customs = ${JSON.stringify(customs)};
+let userPanelLang = ${JSON.stringify(data.userPanelLang || {})};
 function onScopeChange() {
   const s = document.getElementById('c-scope').value;
   document.getElementById('tag-wrap').style.display = (s === 'creator_key') ? 'block' : 'none';
@@ -2073,6 +2172,62 @@ async function deleteCustom(i) {
   customs.splice(i, 1);
   await persistCustoms();
 }
+
+function renderUserLang() {
+  const body = document.getElementById('ul-body');
+  const entries = Object.entries(userPanelLang || {});
+  if (!entries.length) {
+    body.innerHTML = '<tr><td colspan="3" style="color:#64748b;text-align:center;">${tr('noUserLang')}</td></tr>';
+    return;
+  }
+  body.innerHTML = entries.map(([id, lang]) =>
+    '<tr><td><code>' + id + '</code></td><td>' + (lang === 'he' ? 'עברית' : 'English') +
+    '</td><td><button type="button" class="btn-del" onclick="deleteUserLang(\\'' + id + '\\')">×</button></td></tr>'
+  ).join('');
+}
+renderUserLang();
+
+async function saveUserLang() {
+  let target = (document.getElementById('ul-target').value || '').trim();
+  const lang = document.getElementById('ul-lang').value === 'he' ? 'he' : 'en';
+  const status = document.getElementById('ul-status');
+  if (!target) { alert('Target required'); return; }
+  // Resolve to numeric id
+  let id = null;
+  const m = target.match(/\\((\\d+)\\)\\s*$/);
+  if (m) id = m[1];
+  else if (/^\\d+$/.test(target)) id = target;
+  else {
+    status.textContent = 'Resolving...';
+    try {
+      const res = await fetch('/api/lookup-username?username=' + encodeURIComponent(target));
+      const data = await res.json();
+      if (!data.ok) { status.textContent = data.error || 'Not found'; return; }
+      id = String(data.id);
+      target = data.name + ' (' + data.id + ')';
+      document.getElementById('ul-target').value = target;
+    } catch (e) { status.textContent = 'Lookup failed'; return; }
+  }
+  userPanelLang[id] = lang;
+  await fetch('/messages/save-user-lang', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userPanelLang })
+  });
+  status.innerHTML = 'Saved for <strong style="color:#38bdf8;">' + id + '</strong> → ' + (lang === 'he' ? 'עברית' : 'English');
+  document.getElementById('ul-target').value = '';
+  renderUserLang();
+}
+
+async function deleteUserLang(id) {
+  delete userPanelLang[id];
+  await fetch('/messages/save-user-lang', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userPanelLang })
+  });
+  renderUserLang();
+}
 </script>
 </body>
 </html>`);
@@ -2114,6 +2269,20 @@ app.post('/messages/save-customs', checkAuth, async (req, res) => {
         .filter(c => c.scope !== 'creator_key' || c.tag);
     await safeSave();
     await saveActionLogInternal(req.session.userEmail, 'Update Custom Panel Messages', `${data.customPanelMessages.length} personal rules`);
+    res.json({ ok: true });
+});
+
+app.post('/messages/save-user-lang', checkAuth, async (req, res) => {
+    const data = db.getData();
+    const incoming = req.body.userPanelLang || {};
+    const cleaned = {};
+    for (const [id, lang] of Object.entries(incoming)) {
+        if (!/^\d+$/.test(String(id))) continue;
+        cleaned[String(id)] = lang === 'he' ? 'he' : 'en';
+    }
+    data.userPanelLang = cleaned;
+    await safeSave();
+    await saveActionLogInternal(req.session.userEmail, 'Update User Panel Languages', `${Object.keys(cleaned).length} users`);
     res.json({ ok: true });
 });
 
