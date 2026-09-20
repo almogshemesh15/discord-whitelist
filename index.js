@@ -45,6 +45,189 @@ function parseLocalTime(inputString) {
 
 const OWNER_EMAIL = 'almogshemesh11@gmail.com';
 
+const TRANSLATIONS = {
+    en: {
+        title: 'Universal Whitelist System',
+        hub: 'Universal Whitelist Hub',
+        maintenance: 'Maintenance',
+        maintenanceOn: 'Maintenance ON',
+        maintenanceBanner: 'MAINTENANCE MODE — all game verifies are denied until Owner turns this off',
+        messages: 'Messages',
+        obfuscate: 'Obfuscate',
+        save: 'Save',
+        load: 'Load',
+        refresh: 'Refresh',
+        logout: 'Logout',
+        stats: 'Usage Statistics',
+        totalChecks: 'Total Checks',
+        allowed: 'Allowed',
+        denied: 'Denied',
+        allowed24h: 'Allowed (24h)',
+        denied24h: 'Denied (24h)',
+        activeUsers: 'Active Connected Users',
+        logs: 'Internal Action Logs',
+        searchLogs: 'Search logs...',
+        user: 'User',
+        action: 'Action',
+        details: 'Details',
+        autoDelete: 'Auto Delete In',
+        systemKeys: 'System License Keys',
+        searchKeys: 'Search keys...',
+        keyPlaceholder: 'Key string (use ALL for full access)',
+        markAll: 'Mark as ALL access key (Owner only)',
+        createKey: 'Create Key',
+        pending: 'Pending Game Requests',
+        searchRequests: 'Search requests...',
+        findByUsername: 'Find by username',
+        robloxUsername: 'Roblox username...',
+        requestMeta: 'Request Metadata',
+        actionCol: 'Action',
+        grantAccess: 'Direct Whitelist Access Grant',
+        targetEntity: 'Target Entity',
+        creators: 'Creator (User/Group)',
+        places: 'Place ID',
+        inputId: 'Username / ID / Place ID',
+        assignKeys: 'Assign License Keys',
+        addRow: '+ Add Key Row',
+        grantBtn: 'Grant Access',
+        authCreators: 'Authorized Creators',
+        authPlaces: 'Authorized Places',
+        searchCreators: 'Search creators...',
+        searchPlaces: 'Search places...',
+        identity: 'Identity / Metadata',
+        freeze: 'Freeze',
+        unfreeze: 'Unfreeze',
+        remove: 'Remove',
+        frozen: 'FROZEN',
+        noKeys: 'No keys generated',
+        noPending: 'No pending requests incoming',
+        emptyList: 'Empty list',
+        expiresIn: 'Expires in',
+        mostUsedWeek: 'Most used keys this week',
+        allTimePerKey: 'All-time per key',
+        noWeekly: 'No weekly key usage yet (data builds as verifies come in)',
+        noKeyUsage: 'No key usage yet',
+        noSessions: 'No active sessions recorded',
+        noLogs: 'No logs available',
+        lang: 'Language',
+        langEn: 'English',
+        langHe: 'עברית',
+        panelMessagesTitle: 'Panel Error Messages',
+        defaultsTitle: 'Default messages by reason',
+        defaultsHint: 'These appear on Roblox panels when access is denied. Use new lines for multi-line text. Leave blank to keep the built-in default.',
+        saveDefaults: 'Save default messages',
+        saved: 'Saved!',
+        personalTitle: 'Personal messages',
+        personalHint: 'Override the message for a specific key, place ID, or creator ID. Personal rules win over defaults.',
+        scope: 'Scope',
+        target: 'Target',
+        message: 'Message',
+        addPersonal: 'Add personal message',
+        noPersonal: 'No personal messages yet',
+        dashboard: 'Dashboard',
+        onlyOwnerMaint: 'Only the Owner can toggle maintenance mode.',
+        approve: 'Approve',
+        reject: 'Reject',
+        you: '(You)',
+        disconnect: 'Disconnect'
+    },
+    he: {
+        title: 'מערכת רשימת מורשים',
+        hub: 'מרכז רשימת מורשים',
+        maintenance: 'תחזוקה',
+        maintenanceOn: 'תחזוקה פעילה',
+        maintenanceBanner: 'מצב תחזוקה — כל האימותים מהמשחקים נדחים עד שהבעלים מכבה',
+        messages: 'הודעות',
+        obfuscate: 'עירפול',
+        save: 'שמירה',
+        load: 'טעינה',
+        refresh: 'רענון',
+        logout: 'יציאה',
+        stats: 'סטטיסטיקות שימוש',
+        totalChecks: 'סה״כ בדיקות',
+        allowed: 'אושרו',
+        denied: 'נדחו',
+        allowed24h: 'אושרו (24ש׳)',
+        denied24h: 'נדחו (24ש׳)',
+        activeUsers: 'משתמשים מחוברים',
+        logs: 'יומן פעולות פנימי',
+        searchLogs: 'חיפוש ביומן...',
+        user: 'משתמש',
+        action: 'פעולה',
+        details: 'פרטים',
+        autoDelete: 'מחיקה אוטומטית בעוד',
+        systemKeys: 'מפתחות רישיון מערכת',
+        searchKeys: 'חיפוש מפתחות...',
+        keyPlaceholder: 'מחרוזת מפתח (ALL = גישה מלאה)',
+        markAll: 'סמן כמפתח ALL (Owner בלבד)',
+        createKey: 'יצירת מפתח',
+        pending: 'בקשות משחק ממתינות',
+        searchRequests: 'חיפוש בקשות...',
+        findByUsername: 'חיפוש לפי שם משתמש',
+        robloxUsername: 'שם משתמש ברובלוקס...',
+        requestMeta: 'פרטי בקשה',
+        actionCol: 'פעולה',
+        grantAccess: 'הענקת גישה ישירה',
+        targetEntity: 'ישות יעד',
+        creators: 'יוצר (משתמש/קבוצה)',
+        places: 'מזהה מפה',
+        inputId: 'שם משתמש / ID / Place ID',
+        assignKeys: 'שיוך מפתחות רישיון',
+        addRow: '+ הוסף שורת מפתח',
+        grantBtn: 'הענק גישה',
+        authCreators: 'יוצרים מורשים',
+        authPlaces: 'מפות מורשות',
+        searchCreators: 'חיפוש יוצרים...',
+        searchPlaces: 'חיפוש מפות...',
+        identity: 'זהות / מטא־דאטה',
+        freeze: 'הקפאה',
+        unfreeze: 'הפשרה',
+        remove: 'הסרה',
+        frozen: 'מוקפא',
+        noKeys: 'לא נוצרו מפתחות',
+        noPending: 'אין בקשות ממתינות',
+        emptyList: 'הרשימה ריקה',
+        expiresIn: 'פג תוקף בעוד',
+        mostUsedWeek: 'המפתחות הכי בשימוש השבוע',
+        allTimePerKey: 'סה״כ לפי מפתח',
+        noWeekly: 'אין עדיין שימוש שבועי (מתעדכן עם אימותים)',
+        noKeyUsage: 'אין עדיין שימוש במפתחות',
+        noSessions: 'אין סשנים פעילים',
+        noLogs: 'אין רשומות ביומן',
+        lang: 'שפה',
+        langEn: 'English',
+        langHe: 'עברית',
+        panelMessagesTitle: 'הודעות שגיאה בפאנלים',
+        defaultsTitle: 'הודעות ברירת מחדל לפי סיבה',
+        defaultsHint: 'מוצגות בפאנלים ברובלוקס כשנדחית גישה. שורה חדשה = שורה חדשה. ריק = ברירת מחדל מובנית.',
+        saveDefaults: 'שמור הודעות ברירת מחדל',
+        saved: 'נשמר!',
+        personalTitle: 'הודעות אישיות',
+        personalHint: 'דריסה להודעה לפי מפתח, Place ID או Creator ID. כלל אישי גובר על ברירת המחדל.',
+        scope: 'היקף',
+        target: 'יעד',
+        message: 'הודעה',
+        addPersonal: 'הוסף הודעה אישית',
+        noPersonal: 'אין עדיין הודעות אישיות',
+        dashboard: 'לוח בקרה',
+        onlyOwnerMaint: 'רק הבעלים יכול להפעיל/לכבות מצב תחזוקה.',
+        approve: 'אישור',
+        reject: 'דחייה',
+        you: '(אתה)',
+        disconnect: 'ניתוק'
+    }
+};
+
+function getLang(req) {
+    const l = req.session && req.session.lang;
+    return l === 'he' ? 'he' : 'en';
+}
+
+function t(req, key) {
+    const lang = getLang(req);
+    return (TRANSLATIONS[lang] && TRANSLATIONS[lang][key]) || TRANSLATIONS.en[key] || key;
+}
+
 const DEFAULT_PANEL_MESSAGES = {
     maintenance: 'System is under maintenance.\nAccess is temporarily blocked.\nPlease try again later.',
     invalid_key: 'Invalid license key.\nAccess denied.',
@@ -672,6 +855,18 @@ app.get('/resend-2fa', async (req, res) => {
     res.redirect('/verify-2fa');
 });
 
+app.get('/set-lang/:lang', (req, res) => {
+    const lang = req.params.lang === 'he' ? 'he' : 'en';
+    if (req.session) req.session.lang = lang;
+    const back = req.get('Referer') || '/';
+    // avoid open redirect — only relative paths on same host or just go home
+    try {
+        const u = new URL(back, 'http://localhost');
+        if (u.pathname && u.pathname.startsWith('/')) return res.redirect(u.pathname + (u.search || ''));
+    } catch (_) {}
+    res.redirect('/');
+});
+
 app.get('/logout', (req, res) => {
     const sid = req.sessionID;
     delete sessionFocusMap[sid];
@@ -849,6 +1044,9 @@ app.post('/api/verify', async (req, res) => {
 app.get('/', checkAuth, (req, res) => {
     const data = db.getData();
     const isOwner = req.session.userEmail === OWNER_EMAIL;
+    const lang = getLang(req);
+    const dir = lang === 'he' ? 'rtl' : 'ltr';
+    const tr = (key) => t(req, key);
     const keyOptions = data.keys.map(k => {
         const allTag = isAllAccessKey(k, k.key) ? ' 🌐 ALL' : '';
         const lockTag = k.isLocked ? ' 🔒' : '';
@@ -859,12 +1057,15 @@ app.get('/', checkAuth, (req, res) => {
 
     res.send(`
     <!DOCTYPE html>
-    <html lang="en">
+    <html lang="${lang}" dir="${dir}">
     <head>
         <meta charset="UTF-8">
-        <title>Universal Whitelist System</title>
+        <title>${tr('title')}</title>
         <style>
             body { font-family: system-ui, sans-serif; background: #0b0f19; color: #f1f5f9; margin: 0; padding: 30px; }
+            .lang-switch { display: inline-flex; gap: 4px; align-items: center; }
+            .lang-switch a { padding: 4px 8px; border-radius: 4px; font-size: 11px; text-decoration: none; color: #94a3b8; border: 1px solid #374151; background: #1f2937; }
+            .lang-switch a.active { background: #0284c7; color: white; border-color: #0284c7; }
             .container { max-width: 1200px; margin: 0 auto; }
             .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 15px; margin-bottom: 25px; flex-wrap: wrap; gap: 12px; }
             .header-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; }
@@ -924,34 +1125,38 @@ app.get('/', checkAuth, (req, res) => {
     <body>
         <div class="container">
             <div class="header">
-                <h1>🛡️ Universal Whitelist Hub</h1>
+                <h1>🛡️ ${tr('hub')}</h1>
                 <div class="header-actions">
+                    <span class="lang-switch" title="${tr('lang')}">
+                        <a href="/set-lang/en" class="${lang === 'en' ? 'active' : ''}">EN</a>
+                        <a href="/set-lang/he" class="${lang === 'he' ? 'active' : ''}">עב</a>
+                    </span>
                     <span style="font-size:12px;color:#94a3b8;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${req.session.userEmail}">${req.session.userEmail}</span>
-                    ${isOwner ? `<button type="button" id="maint-btn" class="hdr-btn ${maintenanceOn ? 'btn-maint-on' : 'btn-maint-off'}" onclick="toggleMaintenance()">${maintenanceOn ? '🛠️ Maintenance ON' : '🛠️ Maintenance'}</button>` : ''}
-                    <a href="/messages" class="btn-obfuscate-page" style="background:#f59e0b;border-color:#d97706;">💬 Messages</a>
-                    <a href="/obfuscate" class="btn-obfuscate-page">🔒 Obfuscate</a>
-                    <a href="/force-save" class="btn-save-db">💾 Save</a>
-                    <a href="/force-load" class="btn-load-db">📂 Load</a>
-                    <a href="/" class="btn-refresh">🔄 Refresh</a>
-                    <a href="/logout" class="btn-logout">🚪 Logout</a>
+                    ${isOwner ? `<button type="button" id="maint-btn" class="hdr-btn ${maintenanceOn ? 'btn-maint-on' : 'btn-maint-off'}" onclick="toggleMaintenance()">${maintenanceOn ? '🛠️ ' + tr('maintenanceOn') : '🛠️ ' + tr('maintenance')}</button>` : ''}
+                    <a href="/messages" class="btn-obfuscate-page" style="background:#f59e0b;border-color:#d97706;">💬 ${tr('messages')}</a>
+                    <a href="/obfuscate" class="btn-obfuscate-page">🔒 ${tr('obfuscate')}</a>
+                    <a href="/force-save" class="btn-save-db">💾 ${tr('save')}</a>
+                    <a href="/force-load" class="btn-load-db">📂 ${tr('load')}</a>
+                    <a href="/" class="btn-refresh">🔄 ${tr('refresh')}</a>
+                    <a href="/logout" class="btn-logout">🚪 ${tr('logout')}</a>
                 </div>
             </div>
-            <div id="maint-banner" class="maint-banner" style="${maintenanceOn ? 'display:block;' : 'display:none;'}">⚠️ MAINTENANCE MODE — all game verifies are denied until Owner turns this off</div>
+            <div id="maint-banner" class="maint-banner" style="${maintenanceOn ? 'display:block;' : 'display:none;'}">⚠️ ${tr('maintenanceBanner')}</div>
             <div class="grid">
                 <div class="card" style="grid-column: span 2;">
-                    <div class="card-header"><h3>📊 Usage Statistics</h3></div>
+                    <div class="card-header"><h3>📊 ${tr('stats')}</h3></div>
                     <div class="stat-grid" id="stats-grid">
-                        <div class="stat-box"><div class="num" id="stat-total">—</div><div class="lbl">Total Checks</div></div>
-                        <div class="stat-box"><div class="num" id="stat-allowed" style="color:#10b981;">—</div><div class="lbl">Allowed</div></div>
-                        <div class="stat-box"><div class="num" id="stat-denied" style="color:#f43f5e;">—</div><div class="lbl">Denied</div></div>
-                        <div class="stat-box"><div class="num" id="stat-24a" style="color:#10b981;">—</div><div class="lbl">Allowed (24h)</div></div>
-                        <div class="stat-box"><div class="num" id="stat-24d" style="color:#f43f5e;">—</div><div class="lbl">Denied (24h)</div></div>
+                        <div class="stat-box"><div class="num" id="stat-total">—</div><div class="lbl">${tr('totalChecks')}</div></div>
+                        <div class="stat-box"><div class="num" id="stat-allowed" style="color:#10b981;">—</div><div class="lbl">${tr('allowed')}</div></div>
+                        <div class="stat-box"><div class="num" id="stat-denied" style="color:#f43f5e;">—</div><div class="lbl">${tr('denied')}</div></div>
+                        <div class="stat-box"><div class="num" id="stat-24a" style="color:#10b981;">—</div><div class="lbl">${tr('allowed24h')}</div></div>
+                        <div class="stat-box"><div class="num" id="stat-24d" style="color:#f43f5e;">—</div><div class="lbl">${tr('denied24h')}</div></div>
                     </div>
                     <div id="stats-by-key" style="margin-top:12px;font-size:12px;color:#94a3b8;max-height:120px;overflow-y:auto;"></div>
                 </div>
                 <div id="sessions-container" class="card" style="grid-column: span 2; display:none;">
                     <div class="card-header">
-                        <h3>👥 Active Connected Users</h3>
+                        <h3>👥 ${tr('activeUsers')}</h3>
                     </div>
                     <div id="sessions-box" style="display:grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap:12px; margin-top:10px; max-height:200px; overflow-y:auto;"></div>
                 </div>
@@ -959,17 +1164,17 @@ app.get('/', checkAuth, (req, res) => {
                 ${showLogsSection ? `
                 <div class="card" style="grid-column: span 2;">
                     <div class="card-header">
-                        <h3>📜 Internal Action Logs</h3>
-                        <input type="text" class="search-input" placeholder="Search logs..." oninput="searchTable(this, 'logs-table')">
+                        <h3>📜 ${tr('logs')}</h3>
+                        <input type="text" class="search-input" placeholder="${tr('searchLogs')}" oninput="searchTable(this, 'logs-table')">
                     </div>
                     <div style="max-height: 300px; overflow-y: auto;">
                         <table>
                             <thead>
                                 <tr>
-                                    <th>User</th>
-                                    <th>Action</th>
-                                    <th>Details</th>
-                                    <th>Auto Delete In</th>
+                                    <th>${tr('user')}</th>
+                                    <th>${tr('action')}</th>
+                                    <th>${tr('details')}</th>
+                                    <th>${tr('autoDelete')}</th>
                                 </tr>
                             </thead>
                             <tbody id="logs-table"></tbody>
@@ -980,54 +1185,54 @@ app.get('/', checkAuth, (req, res) => {
 
                 <div class="card">
                     <div class="card-header">
-                        <h3>🔑 System License Keys</h3>
-                        <input type="text" class="search-input" placeholder="Search keys..." oninput="searchKeys(this)">
+                        <h3>🔑 ${tr('systemKeys')}</h3>
+                        <input type="text" class="search-input" placeholder="${tr('searchKeys')}" oninput="searchKeys(this)">
                     </div>
                     <div class="key-container" id="keys-box"></div>
                     <form onsubmit="handleFormSubmit(event, '/add-key')" style="display: flex; flex-direction: column; gap: 8px; align-items: stretch;">
-                        <input type="text" name="key" placeholder="Key string (use ALL for full access)" required style="margin-bottom:0;">
-                        ${isOwner ? `<label style="font-size:12px;color:#fbbf24;display:flex;align-items:center;gap:6px;"><input type="checkbox" name="isAllAccess" value="1" style="width:auto;margin:0;"> 🌐 Mark as ALL access key (Owner only)</label>` : ''}
-                        <button type="submit">Create Key</button>
+                        <input type="text" name="key" placeholder="${tr('keyPlaceholder')}" required style="margin-bottom:0;">
+                        ${isOwner ? `<label style="font-size:12px;color:#fbbf24;display:flex;align-items:center;gap:6px;"><input type="checkbox" name="isAllAccess" value="1" style="width:auto;margin:0;"> 🌐 ${tr('markAll')}</label>` : ''}
+                        <button type="submit">${tr('createKey')}</button>
                     </form>
                 </div>
                 <div class="card">
                     <div class="card-header">
-                        <h3>📡 Pending Game Requests</h3>
-                        <input type="text" class="search-input" placeholder="Search requests..." oninput="searchTable(this, 'pending-table')">
+                        <h3>📡 ${tr('pending')}</h3>
+                        <input type="text" class="search-input" placeholder="${tr('searchRequests')}" oninput="searchTable(this, 'pending-table')">
                     </div>
                     <div style="display:flex; gap:8px; margin-bottom:10px; align-items:center; flex-wrap:wrap;">
-                        <input type="text" id="pending-user-lookup" placeholder="Roblox username..." style="margin-bottom:0; flex:1; min-width:140px; padding:8px; background:#1f2937; border:1px solid #374151; border-radius:6px; color:white;">
-                        <button type="button" onclick="lookupPendingByUsername()" style="width:auto; padding:8px 12px; background:#0284c7; border:none; border-radius:6px; color:white; font-weight:bold; cursor:pointer; white-space:nowrap;">🔍 Find by username</button>
+                        <input type="text" id="pending-user-lookup" placeholder="${tr('robloxUsername')}" style="margin-bottom:0; flex:1; min-width:140px; padding:8px; background:#1f2937; border:1px solid #374151; border-radius:6px; color:white;">
+                        <button type="button" onclick="lookupPendingByUsername()" style="width:auto; padding:8px 12px; background:#0284c7; border:none; border-radius:6px; color:white; font-weight:bold; cursor:pointer; white-space:nowrap;">🔍 ${tr('findByUsername')}</button>
                     </div>
                     <div id="pending-lookup-status" style="font-size:12px; color:#94a3b8; margin-bottom:8px;"></div>
                     <table>
-                        <thead><tr><th>Request Metadata</th><th>Action</th></tr></thead>
+                        <thead><tr><th>${tr('requestMeta')}</th><th>${tr('actionCol')}</th></tr></thead>
                         <tbody id="pending-table"></tbody>
                     </table>
                 </div>
                 <div class="card" style="grid-column: span 2;">
-                    <div class="card-header"><h3>➕ Direct Whitelist Access Grant</h3></div>
+                    <div class="card-header"><h3>➕ ${tr('grantAccess')}</h3></div>
                     <form onsubmit="handleFormSubmit(event, '/add')" style="display: flex; flex-direction: column; gap: 12px;">
                         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
                             <div>
-                                <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:5px;">Target Entity</label>
+                                <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:5px;">${tr('targetEntity')}</label>
                                 <select name="type" style="margin-bottom:0;">
-                                    <option value="creators">Creator (User/Group)</option>
-                                    <option value="places">Place ID</option>
+                                    <option value="creators">${tr('creators')}</option>
+                                    <option value="places">${tr('places')}</option>
                                 </select>
                             </div>
                             <div>
-                                <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:5px;">Input Name/ID</label>
-                                <input type="text" name="input" placeholder="Name or numerical ID" style="margin-bottom:0;" required>
+                                <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:5px;">${tr('inputId')}</label>
+                                <input type="text" name="input" placeholder="${tr('inputId')}" style="margin-bottom:0;" required>
                             </div>
                         </div>
                         <div style="border-top: 1px solid #1e293b; padding-top: 10px;">
-                            <label style="font-size:14px;color:#e2e8f0;display:block;margin-bottom:8px;">Keys & Expirations Mapping</label>
-                            <button type="button" class="btn-add-row" onclick="addKeyRow()">➕ Add Key & Date</button>
+                            <label style="font-size:14px;color:#e2e8f0;display:block;margin-bottom:8px;">${tr('assignKeys')}</label>
+                            <button type="button" class="btn-add-row" onclick="addKeyRow()">${tr('addRow')}</button>
                             <div id="dynamic-keys-container">
                                 <div class="dynamic-key-row">
                                     <select name="assignedKeys" id="grant-key-select" style="margin-bottom:0; flex: 1; height: 38px;">
-                                        <option value="">None</option>
+                                        <option value="">—</option>
                                         ${keyOptions}
                                     </select>
                                     <input type="datetime-local" name="expiresAtKeys" style="margin-bottom:0; flex: 1; height: 38px;">
@@ -1035,32 +1240,34 @@ app.get('/', checkAuth, (req, res) => {
                                 </div>
                             </div>
                         </div>
-                        <button type="submit" style="margin-top:10px;">Authorize Entity</button>
+                        <button type="submit" style="margin-top:10px;">${tr('grantBtn')}</button>
                     </form>
                 </div>
                 <div class="card">
                     <div class="card-header">
-                        <h3>👥 Authorized Creators</h3>
-                        <input type="text" class="search-input" placeholder="Search creators..." oninput="searchTable(this, 'creators-table')">
+                        <h3>👥 ${tr('authCreators')}</h3>
+                        <input type="text" class="search-input" placeholder="${tr('searchCreators')}" oninput="searchTable(this, 'creators-table')">
                     </div>
                     <table>
-                        <thead><tr><th>Identity</th><th>Action</th></tr></thead>
+                        <thead><tr><th>${tr('identity')}</th><th>${tr('actionCol')}</th></tr></thead>
                         <tbody id="creators-table"></tbody>
                     </table>
                 </div>
                 <div class="card">
                     <div class="card-header">
-                        <h3>🏢 Authorized Places</h3>
-                        <input type="text" class="search-input" placeholder="Search places..." oninput="searchTable(this, 'places-table')">
+                        <h3>🏢 ${tr('authPlaces')}</h3>
+                        <input type="text" class="search-input" placeholder="${tr('searchPlaces')}" oninput="searchTable(this, 'places-table')">
                     </div>
                     <table>
-                        <thead><tr><th>Place Records</th><th>Action</th></tr></thead>
+                        <thead><tr><th>${tr('identity')}</th><th>${tr('actionCol')}</th></tr></thead>
                         <tbody id="places-table"></tbody>
                     </table>
                 </div>
             </div>
         </div>
         <script>
+            const I18N = ${JSON.stringify(TRANSLATIONS[lang])};
+            function tt(k) { return I18N[k] || k; }
             let currentKeysMarkup = '';
 
                 async function checkSessionStatus() {
@@ -1122,7 +1329,7 @@ app.get('/', checkAuth, (req, res) => {
                 try {
                     const res = await fetch('/toggle-maintenance', { method: 'POST' });
                     if (res.status === 403) {
-                        alert('Only the Owner can toggle maintenance mode.');
+                        alert(tt('onlyOwnerMaint'));
                         return;
                     }
                     fetchDashboardData();
@@ -1221,7 +1428,7 @@ app.get('/', checkAuth, (req, res) => {
             setInterval(updateTimers, 1000);
 
             function buildRows(arr, type, adminEmail) {
-                if(!arr || arr.length === 0) return '<tr><td colspan="2" style="color:#64748b;">Empty list</td></tr>';
+                if(!arr || arr.length === 0) return '<tr><td colspan="2" style="color:#64748b;">' + tt('emptyList') + '</td></tr>';
                 return arr.map(item => {
                     let timeLeft = '';
                     let keysListHtml = '';
@@ -1274,7 +1481,7 @@ app.get('/', checkAuth, (req, res) => {
                         <tr data-search="\${searchData}" class="\${entityFrozen ? 'frozen-row' : ''}">
                             <td>
                                 <strong>\${item.name || 'Unknown'}</strong> (\${item.id})
-                                \${entityFrozen ? '<span class="frozen-badge">❄️ FROZEN</span>' : ''}
+                                \${entityFrozen ? '<span class="frozen-badge">❄️ ' + tt('frozen') + '</span>' : ''}
                                 \${ownerLine}
                                 \${item.assignedKey ? \`<br><span class="key-badge">🔑 \${item.assignedKey}</span>\` : ''}
                                 \${keysListHtml}
@@ -1282,8 +1489,8 @@ app.get('/', checkAuth, (req, res) => {
                                 \${timeLeft}
                             </td>
                             <td style="white-space:nowrap;">
-                                <span onclick="executeAction('/toggle-entity-freeze/\${type}/\${item.id}')" class="btn-freeze \${entityFrozen ? 'on' : ''}" title="\${entityFrozen ? 'Unfreeze entity' : 'Freeze entity'}">\${entityFrozen ? '❄️ Unfreeze' : '🧊 Freeze'}</span>
-                                <span onclick="executeAction('/delete/\${type}/\${item.id}')" class="btn-delete">Remove</span>
+                                <span onclick="executeAction('/toggle-entity-freeze/\${type}/\${item.id}')" class="btn-freeze \${entityFrozen ? 'on' : ''}">\${entityFrozen ? '❄️ ' + tt('unfreeze') : '🧊 ' + tt('freeze')}</span>
+                                <span onclick="executeAction('/delete/\${type}/\${item.id}')" class="btn-delete">\${tt('remove')}</span>
                             </td>
                         </tr>
                     \`;
@@ -1322,7 +1529,7 @@ app.get('/', checkAuth, (req, res) => {
                                     \${disconnectBtn}
                                 </div>
                             \`;
-                        }).join('') || '<span style="color:#64748b; font-size:13px;">No active sessions recorded</span>';
+                        }).join('') || '<span style="color:#64748b; font-size:13px;">' + tt('noSessions') + '</span>';
 
                         const logsTable = document.getElementById('logs-table');
                         if (logsTable && data.logs) {
@@ -1333,7 +1540,7 @@ app.get('/', checkAuth, (req, res) => {
                                     <td style="color:#94a3b8; max-width:300px; word-break:break-all;">\${log.details}</td>
                                     <td class="log-countdown" data-expire="\${log.expiresAt}" style="color:#fbbf24; font-family:monospace; font-weight:bold;"></td>
                                 </tr>
-                            \`).join('') || '<tr><td colspan="4" style="color:#64748b; text-align:center;">No logs available</td></tr>';
+                            \`).join('') || '<tr><td colspan="4" style="color:#64748b; text-align:center;">' + tt('noLogs') + '</td></tr>';
                         }
                     }
 
@@ -1350,24 +1557,24 @@ app.get('/', checkAuth, (req, res) => {
                             let html = '';
                             const week = data.stats.topKeysWeek || [];
                             if (week.length) {
-                                html += '<div style="font-weight:bold;margin-bottom:6px;color:#e2e8f0;">🏆 Most used keys this week</div>';
+                                html += '<div style="font-weight:bold;margin-bottom:6px;color:#e2e8f0;">🏆 ' + tt('mostUsedWeek') + '</div>';
                                 html += week.map((s, i) => {
                                     const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : (i + 1) + '.';
                                     return \`<div style="display:flex;justify-content:space-between;gap:8px;padding:3px 0;border-bottom:1px solid #1e293b;"><span>\${medal} 🔑 \${s.key}</span><span style="color:#38bdf8;font-weight:bold;">\${s.total} checks</span> <span><span style="color:#10b981;">✓\${s.allowed||0}</span> / <span style="color:#f43f5e;">✗\${s.denied||0}</span></span></div>\`;
                                 }).join('');
                             } else {
-                                html += '<div style="color:#64748b;margin-bottom:8px;">No weekly key usage yet (data builds as verifies come in)</div>';
+                                html += '<div style="color:#64748b;margin-bottom:8px;">' + tt('noWeekly') + '</div>';
                             }
                             if (data.stats.byKey) {
                                 const entries = Object.entries(data.stats.byKey).sort((a,b) => (b[1].allowed+b[1].denied) - (a[1].allowed+a[1].denied)).slice(0, 12);
                                 if (entries.length) {
-                                    html += '<div style="font-weight:bold;margin:10px 0 6px;color:#e2e8f0;">All-time per key</div>';
+                                    html += '<div style="font-weight:bold;margin:10px 0 6px;color:#e2e8f0;">' + tt('allTimePerKey') + '</div>';
                                     html += entries.map(([key, s]) =>
                                         \`<div style="display:flex;justify-content:space-between;gap:8px;padding:2px 0;border-bottom:1px solid #1e293b;"><span>🔑 \${key}</span><span><span style="color:#10b981;">✓\${s.allowed||0}</span> / <span style="color:#f43f5e;">✗\${s.denied||0}</span></span></div>\`
                                     ).join('');
                                 }
                             }
-                            byKeyBox.innerHTML = html || '<span style="color:#64748b;">No key usage yet</span>';
+                            byKeyBox.innerHTML = html || '<span style="color:#64748b;">' + tt('noKeyUsage') + '</span>';
                         }
                     }
 
@@ -1376,7 +1583,7 @@ app.get('/', checkAuth, (req, res) => {
                     if (banner) banner.style.display = data.maintenanceMode ? 'block' : 'none';
                     const maintBtn = document.getElementById('maint-btn');
                     if (maintBtn) {
-                        maintBtn.textContent = data.maintenanceMode ? '🛠️ Maintenance ON' : '🛠️ Maintenance';
+                        maintBtn.textContent = data.maintenanceMode ? '🛠️ ' + tt('maintenanceOn') : '🛠️ ' + tt('maintenance');
                         maintBtn.className = 'hdr-btn ' + (data.maintenanceMode ? 'btn-maint-on' : 'btn-maint-off');
                     }
 
@@ -1397,7 +1604,7 @@ app.get('/', checkAuth, (req, res) => {
                                 <span onclick="executeAction('/delete-key/\${encodeURIComponent(k.key)}')" style="color:#f43f5e;margin-left:5px;text-decoration:none;cursor:pointer;font-weight:bold;">×</span>
                             </span>
                         \`;
-                    }).join('') || '<span style="color:#64748b;font-size:13px;">No keys generated</span>';
+                    }).join('') || '<span style="color:#64748b;font-size:13px;">' + tt('noKeys') + '</span>';
 
                     currentKeysMarkup = data.keys.map(k => {
                         const isAll = !!(k.isAllAccess || (k.key || '').toUpperCase() === 'ALL');
@@ -1429,7 +1636,7 @@ app.get('/', checkAuth, (req, res) => {
                                     </div>
                                 </td>
                             </tr>
-                        \`).join('') || '<tr><td colspan="2" style="color:#64748b; text-align:center;">No pending requests incoming</td></tr>';
+                        \`).join('') || '<tr><td colspan="2" style="color:#64748b; text-align:center;">' + tt('noPending') + '</td></tr>';
                     }
 
                     document.getElementById('creators-table').innerHTML = buildRows(data.whitelist.creators, 'creators', data.userEmail);
@@ -1503,6 +1710,9 @@ app.get('/', checkAuth, (req, res) => {
 
 app.get('/messages', checkAuth, (req, res) => {
     const data = db.getData();
+    const lang = getLang(req);
+    const dir = lang === 'he' ? 'rtl' : 'ltr';
+    const tr = (key) => t(req, key);
     const msgs = getPanelMessages(data);
     const customs = data.customPanelMessages || [];
     const reasonMeta = [
@@ -1529,13 +1739,13 @@ app.get('/messages', checkAuth, (req, res) => {
             <td style="white-space:pre-wrap;max-width:320px;">${String(c.message || '').replace(/</g, '&lt;')}</td>
             <td><button type="button" class="btn-del" onclick="deleteCustom(${i})">×</button></td>
         </tr>
-    `).join('') || '<tr><td colspan="4" style="color:#64748b;text-align:center;">No personal messages yet</td></tr>';
+    `).join('') || `<tr><td colspan="4" style="color:#64748b;text-align:center;">${tr('noPersonal')}</td></tr>`;
 
     res.send(`<!DOCTYPE html>
-<html lang="en">
+<html lang="${lang}" dir="${dir}">
 <head>
 <meta charset="UTF-8">
-<title>Panel Messages</title>
+<title>${tr('panelMessagesTitle')}</title>
 <style>
 body{font-family:system-ui,sans-serif;background:#0b0f19;color:#f1f5f9;margin:0;padding:30px;}
 .container{max-width:900px;margin:0 auto;}
@@ -1560,32 +1770,40 @@ th,td{padding:8px;border-bottom:1px solid #1e293b;text-align:left;}
 .grid-3{display:grid;grid-template-columns:1fr 1fr 2fr;gap:8px;}
 @media(max-width:700px){.grid-3{grid-template-columns:1fr;}}
 .status{margin-top:10px;font-size:13px;color:#10b981;display:none;}
+.lang-switch{display:inline-flex;gap:4px;margin-right:8px;}
+.lang-switch a{padding:4px 8px;border-radius:4px;font-size:11px;text-decoration:none;color:#94a3b8;border:1px solid #374151;background:#1f2937;}
+.lang-switch a.active{background:#0284c7;color:white;border-color:#0284c7;}
 </style>
 </head>
 <body>
 <div class="container">
   <div class="header">
-    <h1>💬 Panel Error Messages</h1>
-    <a href="/" class="btn-back">⬅️ Dashboard</a>
+    <h1>💬 ${tr('panelMessagesTitle')}</h1>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span class="lang-switch">
+        <a href="/set-lang/en" class="${lang === 'en' ? 'active' : ''}">EN</a>
+        <a href="/set-lang/he" class="${lang === 'he' ? 'active' : ''}">עב</a>
+      </span>
+      <a href="/" class="btn-back">⬅️ ${tr('dashboard')}</a>
+    </div>
   </div>
 
   <div class="card">
-    <h3>Default messages by reason</h3>
-    <p class="hint">These appear on Roblox panels when access is denied. Use new lines for multi-line text. Leave blank to keep the built-in default.</p>
+    <h3>${tr('defaultsTitle')}</h3>
+    <p class="hint">${tr('defaultsHint')}</p>
     <form id="defaults-form">
       ${reasonFields}
-      <button type="submit" class="btn-save">💾 Save default messages</button>
-      <div class="status" id="defaults-status">Saved!</div>
+      <button type="submit" class="btn-save">💾 ${tr('saveDefaults')}</button>
+      <div class="status" id="defaults-status">${tr('saved')}</div>
     </form>
   </div>
 
   <div class="card">
-    <h3>Personal messages</h3>
-    <p class="hint">Override the message for a specific <b>key</b>, <b>place ID</b>, or <b>creator ID</b>. Personal rules win over defaults.<br>
-    Example: scope = key, target = <code>Bots</code> → only that tag shows your custom text.</p>
+    <h3>${tr('personalTitle')}</h3>
+    <p class="hint">${tr('personalHint')}</p>
     <div class="grid-3">
       <div>
-        <label style="font-size:12px;color:#94a3b8;">Scope</label>
+        <label style="font-size:12px;color:#94a3b8;">${tr('scope')}</label>
         <select id="c-scope">
           <option value="key">Key / Tag</option>
           <option value="place">Place ID</option>
@@ -1593,18 +1811,18 @@ th,td{padding:8px;border-bottom:1px solid #1e293b;text-align:left;}
         </select>
       </div>
       <div>
-        <label style="font-size:12px;color:#94a3b8;">Target</label>
+        <label style="font-size:12px;color:#94a3b8;">${tr('target')}</label>
         <input id="c-target" placeholder="e.g. Bots or 123456">
       </div>
       <div>
-        <label style="font-size:12px;color:#94a3b8;">Message</label>
+        <label style="font-size:12px;color:#94a3b8;">${tr('message')}</label>
         <input id="c-message" placeholder="Custom panel text...">
       </div>
     </div>
-    <button type="button" class="btn-add" onclick="addCustom()">➕ Add personal message</button>
-    <div class="status" id="custom-status">Saved!</div>
+    <button type="button" class="btn-add" onclick="addCustom()">➕ ${tr('addPersonal')}</button>
+    <div class="status" id="custom-status">${tr('saved')}</div>
     <table style="margin-top:16px;">
-      <thead><tr><th>Scope</th><th>Target</th><th>Message</th><th></th></tr></thead>
+      <thead><tr><th>${tr('scope')}</th><th>${tr('target')}</th><th>${tr('message')}</th><th></th></tr></thead>
       <tbody id="custom-body">${customRows}</tbody>
     </table>
   </div>
