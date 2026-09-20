@@ -118,7 +118,7 @@ const TRANSLATIONS = {
         saveDefaults: 'Save default messages',
         saved: 'Saved!',
         personalTitle: 'Personal messages',
-        personalHint: 'Override the message for a specific key, place ID, or creator ID. Personal rules win over defaults.',
+        personalHint: 'Personal rules override defaults — except Maintenance, which always wins. You can bind a message to a key, place, creator, or creator+tag.',
         scope: 'Scope',
         target: 'Target',
         message: 'Message',
@@ -129,7 +129,23 @@ const TRANSLATIONS = {
         approve: 'Approve',
         reject: 'Reject',
         you: '(You)',
-        disconnect: 'Disconnect'
+        disconnect: 'Disconnect',
+        reason_maintenance: 'Maintenance mode',
+        reason_invalid_key: 'Invalid license key',
+        reason_key_frozen: 'System key frozen',
+        reason_entity_frozen: 'Place / Creator frozen',
+        reason_tag_frozen: 'Tag frozen on entity',
+        reason_tag_expired: 'Tag / license expired',
+        reason_pending: 'Pending approval',
+        reason_not_whitelisted: 'Not authorized',
+        reason_missing_ids: 'Missing IDs (rare)',
+        scopeKey: 'Key / Tag only',
+        scopePlace: 'Place ID',
+        scopeCreator: 'Creator (user)',
+        scopeCreatorKey: 'Creator + Tag',
+        tagLabel: 'Tag / Key',
+        resolveBtn: 'Resolve username',
+        targetHint: 'Username or ID — will save as Name (id)'
     },
     he: {
         title: 'מערכת רשימת מורשים',
@@ -203,7 +219,7 @@ const TRANSLATIONS = {
         saveDefaults: 'שמור הודעות ברירת מחדל',
         saved: 'נשמר!',
         personalTitle: 'הודעות אישיות',
-        personalHint: 'דריסה להודעה לפי מפתח, Place ID או Creator ID. כלל אישי גובר על ברירת המחדל.',
+        personalHint: 'כללים אישיים גוברים על ברירת מחדל — חוץ מתחזוקה, שתמיד מנצחת. אפשר לקשור הודעה למפתח, מפה, יוצר, או יוצר+טאג.',
         scope: 'היקף',
         target: 'יעד',
         message: 'הודעה',
@@ -214,7 +230,23 @@ const TRANSLATIONS = {
         approve: 'אישור',
         reject: 'דחייה',
         you: '(אתה)',
-        disconnect: 'ניתוק'
+        disconnect: 'ניתוק',
+        reason_maintenance: 'מצב תחזוקה',
+        reason_invalid_key: 'מפתח רישיון לא תקין',
+        reason_key_frozen: 'מפתח מערכת מוקפא',
+        reason_entity_frozen: 'מפה / יוצר מוקפא',
+        reason_tag_frozen: 'טאג מוקפא על ישות',
+        reason_tag_expired: 'טאג / רישיון פג תוקף',
+        reason_pending: 'ממתין לאישור',
+        reason_not_whitelisted: 'אין הרשאה',
+        reason_missing_ids: 'חסרים מזהים (נדיר)',
+        scopeKey: 'מפתח / טאג בלבד',
+        scopePlace: 'מזהה מפה',
+        scopeCreator: 'יוצר (משתמש)',
+        scopeCreatorKey: 'יוצר + טאג',
+        tagLabel: 'טאג / מפתח',
+        resolveBtn: 'פתור שם משתמש',
+        targetHint: 'שם משתמש או ID — יישמר כ־Name (id)'
     }
 };
 
@@ -249,23 +281,86 @@ function getPanelMessages(data) {
     return out;
 }
 
-/** Custom personal messages: { id, scope: 'key'|'place'|'creator', target, message } */
+/** Extract numeric id from "Name (12345)" or plain "12345" */
+function extractTargetId(target) {
+    if (target == null) return null;
+    const s = String(target).trim();
+    const m = s.match(/\((\d+)\)\s*$/);
+    if (m) return m[1];
+    if (/^\d+$/.test(s)) return s;
+    return null;
+}
+
+function targetMatchesCreator(target, creatorId) {
+    if (creatorId == null) return false;
+    const id = extractTargetId(target);
+    if (id && String(id) === String(creatorId)) return true;
+    // also allow exact string match on raw target
+    return String(target) === String(creatorId);
+}
+
+/**
+ * Custom personal messages:
+ * { id, scope: 'key'|'place'|'creator'|'creator_key', target, tag?, message }
+ * - key: matches licenseKey
+ * - place: matches placeId
+ * - creator: matches creatorId (target stored as "username (id)")
+ * - creator_key: matches creatorId AND tag (license key)
+ * Custom messages NEVER override maintenance.
+ */
 function resolvePanelMessage(data, reason, { licenseKey, placeId, creatorId } = {}) {
+    const msgs = getPanelMessages(data);
+    // Maintenance always wins — no personal override
+    if (reason === 'maintenance') {
+        return msgs.maintenance || DEFAULT_PANEL_MESSAGES.maintenance;
+    }
+
     const customs = (data && data.customPanelMessages) || [];
-    // Priority: key > place > creator
+
+    // 1) Most specific: creator + tag
+    if (creatorId != null && licenseKey) {
+        const hit = customs.find(c =>
+            c.scope === 'creator_key' &&
+            targetMatchesCreator(c.target, creatorId) &&
+            String(c.tag || '') === String(licenseKey)
+        );
+        if (hit && hit.message) return hit.message;
+    }
+
+    // 2) place + tag (optional future-friendly)
+    if (placeId != null && licenseKey) {
+        const hit = customs.find(c =>
+            c.scope === 'place_key' &&
+            String(extractTargetId(c.target) || c.target) === String(placeId) &&
+            String(c.tag || '') === String(licenseKey)
+        );
+        if (hit && hit.message) return hit.message;
+    }
+
+    // 3) key only
     if (licenseKey) {
         const hit = customs.find(c => c.scope === 'key' && String(c.target) === String(licenseKey));
         if (hit && hit.message) return hit.message;
     }
+
+    // 4) place only
     if (placeId != null) {
-        const hit = customs.find(c => c.scope === 'place' && String(c.target) === String(placeId));
+        const hit = customs.find(c =>
+            c.scope === 'place' &&
+            String(extractTargetId(c.target) || c.target) === String(placeId)
+        );
         if (hit && hit.message) return hit.message;
     }
+
+    // 5) creator only
     if (creatorId != null) {
-        const hit = customs.find(c => c.scope === 'creator' && String(c.target) === String(creatorId));
+        const hit = customs.find(c =>
+            c.scope === 'creator' &&
+            targetMatchesCreator(c.target, creatorId)
+        );
         if (hit && hit.message) return hit.message;
     }
-    const msgs = getPanelMessages(data);
+
     return msgs[reason] || DEFAULT_PANEL_MESSAGES[reason] || 'Access denied.';
 }
 
@@ -1714,30 +1809,35 @@ app.get('/messages', checkAuth, (req, res) => {
     const msgs = getPanelMessages(data);
     const customs = data.customPanelMessages || [];
     const reasonMeta = [
-        { key: 'maintenance', label: 'Maintenance mode' },
-        { key: 'invalid_key', label: 'Invalid license key' },
-        { key: 'key_frozen', label: 'System key frozen' },
-        { key: 'entity_frozen', label: 'Place / Creator frozen' },
-        { key: 'tag_frozen', label: 'Tag frozen on entity' },
-        { key: 'tag_expired', label: 'Tag / license expired' },
-        { key: 'pending', label: 'Pending approval' },
-        { key: 'not_whitelisted', label: 'Not authorized' },
-        { key: 'missing_ids', label: 'Missing IDs (rare)' }
+        { key: 'maintenance' },
+        { key: 'invalid_key' },
+        { key: 'key_frozen' },
+        { key: 'entity_frozen' },
+        { key: 'tag_frozen' },
+        { key: 'tag_expired' },
+        { key: 'pending' },
+        { key: 'not_whitelisted' },
+        { key: 'missing_ids' }
     ];
     const reasonFields = reasonMeta.map(r => `
         <div class="msg-row">
-            <label>${r.label} <span class="code">(${r.key})</span></label>
+            <label>${tr('reason_' + r.key)} <span class="code">(${r.key})</span></label>
             <textarea name="msg_${r.key}" rows="3" placeholder="${DEFAULT_PANEL_MESSAGES[r.key].replace(/"/g, '&quot;')}">${(msgs[r.key] || '').replace(/</g, '&lt;')}</textarea>
         </div>
     `).join('');
-    const customRows = customs.map((c, i) => `
+    const keyOptionsMsg = (data.keys || []).map(k =>
+        `<option value="${String(k.key).replace(/"/g, '&quot;')}">${String(k.key).replace(/</g, '&lt;')}</option>`
+    ).join('');
+    const customRows = customs.map((c, i) => {
+        const tagPart = c.tag ? ` + 🔑 ${String(c.tag).replace(/</g, '&lt;')}` : '';
+        return `
         <tr>
             <td><span class="badge">${c.scope}</span></td>
-            <td><code>${String(c.target || '').replace(/</g, '&lt;')}</code></td>
+            <td><code>${String(c.target || '').replace(/</g, '&lt;')}</code>${tagPart}</td>
             <td style="white-space:pre-wrap;max-width:320px;">${String(c.message || '').replace(/</g, '&lt;')}</td>
             <td><button type="button" class="btn-del" onclick="deleteCustom(${i})">×</button></td>
-        </tr>
-    `).join('') || `<tr><td colspan="4" style="color:#64748b;text-align:center;">${tr('noPersonal')}</td></tr>`;
+        </tr>`;
+    }).join('') || `<tr><td colspan="4" style="color:#64748b;text-align:center;">${tr('noPersonal')}</td></tr>`;
 
     res.send(`<!DOCTYPE html>
 <html lang="${lang}" dir="ltr">
@@ -1799,23 +1899,35 @@ th,td{padding:8px;border-bottom:1px solid #1e293b;text-align:left;}
   <div class="card">
     <h3>${tr('personalTitle')}</h3>
     <p class="hint">${tr('personalHint')}</p>
-    <div class="grid-3">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;">
       <div>
         <label style="font-size:12px;color:#94a3b8;">${tr('scope')}</label>
-        <select id="c-scope">
-          <option value="key">Key / Tag</option>
-          <option value="place">Place ID</option>
-          <option value="creator">Creator ID</option>
+        <select id="c-scope" onchange="onScopeChange()">
+          <option value="key">${tr('scopeKey')}</option>
+          <option value="place">${tr('scopePlace')}</option>
+          <option value="creator">${tr('scopeCreator')}</option>
+          <option value="creator_key">${tr('scopeCreatorKey')}</option>
         </select>
       </div>
-      <div>
-        <label style="font-size:12px;color:#94a3b8;">${tr('target')}</label>
-        <input id="c-target" placeholder="e.g. Bots or 123456">
+      <div id="tag-wrap" style="display:none;">
+        <label style="font-size:12px;color:#94a3b8;">${tr('tagLabel')}</label>
+        <select id="c-tag">
+          <option value="">—</option>
+          ${keyOptionsMsg}
+        </select>
       </div>
-      <div>
-        <label style="font-size:12px;color:#94a3b8;">${tr('message')}</label>
-        <input id="c-message" placeholder="Custom panel text...">
+    </div>
+    <div style="margin-bottom:10px;">
+      <label style="font-size:12px;color:#94a3b8;">${tr('target')} <span style="color:#64748b;">(${tr('targetHint')})</span></label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <input id="c-target" placeholder="username / id / key name" style="flex:1;min-width:160px;">
+        <button type="button" class="btn-add" style="margin-top:0;" onclick="resolveTarget()">${tr('resolveBtn')}</button>
       </div>
+      <div id="resolve-status" style="font-size:12px;color:#94a3b8;margin-top:4px;"></div>
+    </div>
+    <div style="margin-bottom:10px;">
+      <label style="font-size:12px;color:#94a3b8;">${tr('message')}</label>
+      <textarea id="c-message" rows="2" placeholder="Custom panel text..."></textarea>
     </div>
     <button type="button" class="btn-add" onclick="addCustom()">➕ ${tr('addPersonal')}</button>
     <div class="status" id="custom-status">${tr('saved')}</div>
@@ -1827,6 +1939,47 @@ th,td{padding:8px;border-bottom:1px solid #1e293b;text-align:left;}
 </div>
 <script>
 let customs = ${JSON.stringify(customs)};
+function onScopeChange() {
+  const s = document.getElementById('c-scope').value;
+  document.getElementById('tag-wrap').style.display = (s === 'creator_key') ? 'block' : 'none';
+}
+onScopeChange();
+
+async function resolveTarget() {
+  const scope = document.getElementById('c-scope').value;
+  const input = document.getElementById('c-target');
+  const status = document.getElementById('resolve-status');
+  const raw = (input.value || '').trim();
+  if (!raw) return;
+  // Only resolve for creator scopes (username → Name (id))
+  if (scope !== 'creator' && scope !== 'creator_key') {
+    status.textContent = '';
+    return;
+  }
+  status.textContent = 'Resolving...';
+  try {
+    const res = await fetch('/api/lookup-username?username=' + encodeURIComponent(raw));
+    const data = await res.json();
+    if (!data.ok) {
+      // try as numeric id
+      if (/^\\d+$/.test(raw)) {
+        const r2 = await fetch('/api/lookup-userid?id=' + encodeURIComponent(raw));
+        const d2 = await r2.json();
+        if (d2.ok) {
+          input.value = d2.name + ' (' + d2.id + ')';
+          status.innerHTML = 'Resolved: <strong style="color:#38bdf8;">' + d2.name + ' (' + d2.id + ')</strong>';
+          return;
+        }
+      }
+      status.textContent = data.error || 'Not found';
+      return;
+    }
+    input.value = data.name + ' (' + data.id + ')';
+    status.innerHTML = 'Resolved: <strong style="color:#38bdf8;">' + data.name + ' (' + data.id + ')</strong>';
+  } catch (e) {
+    status.textContent = 'Lookup failed';
+  }
+}
 
 document.getElementById('defaults-form').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -1865,23 +2018,54 @@ function renderCustoms() {
     body.innerHTML = '<tr><td colspan="4" style="color:#64748b;text-align:center;">No personal messages yet</td></tr>';
     return;
   }
-  body.innerHTML = customs.map((c, i) =>
-    '<tr><td><span class="badge">' + c.scope + '</span></td><td><code>' +
-    String(c.target).replace(/</g,'&lt;') + '</code></td><td style="white-space:pre-wrap;max-width:320px;">' +
-    String(c.message).replace(/</g,'&lt;') + '</td><td><button type="button" class="btn-del" onclick="deleteCustom(' + i + ')">×</button></td></tr>'
-  ).join('');
+  body.innerHTML = customs.map((c, i) => {
+    const tagPart = c.tag ? ' + 🔑 ' + String(c.tag).replace(/</g,'&lt;') : '';
+    return '<tr><td><span class="badge">' + c.scope + '</span></td><td><code>' +
+      String(c.target).replace(/</g,'&lt;') + '</code>' + tagPart + '</td><td style="white-space:pre-wrap;max-width:320px;">' +
+      String(c.message).replace(/</g,'&lt;') + '</td><td><button type="button" class="btn-del" onclick="deleteCustom(' + i + ')">×</button></td></tr>';
+  }).join('');
 }
 
 async function addCustom() {
   const scope = document.getElementById('c-scope').value;
-  const target = document.getElementById('c-target').value.trim();
+  let target = document.getElementById('c-target').value.trim();
   const message = document.getElementById('c-message').value.trim();
+  const tag = (document.getElementById('c-tag') && document.getElementById('c-tag').value) || '';
   if (!target || !message) { alert('Target and message are required'); return; }
-  // replace existing same scope+target
-  customs = customs.filter(c => !(c.scope === scope && String(c.target) === target));
-  customs.push({ id: Date.now().toString(36), scope, target, message });
+  if (scope === 'creator_key' && !tag) { alert('Select a tag for Creator + Tag'); return; }
+
+  // Auto-resolve username → Name (id) for creator scopes
+  if (scope === 'creator' || scope === 'creator_key') {
+    if (!/\\(\\d+\\)\\s*$/.test(target)) {
+      try {
+        let data = null;
+        const r1 = await fetch('/api/lookup-username?username=' + encodeURIComponent(target));
+        data = await r1.json();
+        if (!data.ok && /^\\d+$/.test(target)) {
+          const r2 = await fetch('/api/lookup-userid?id=' + encodeURIComponent(target));
+          data = await r2.json();
+        }
+        if (data && data.ok) {
+          target = data.name + ' (' + data.id + ')';
+          document.getElementById('c-target').value = target;
+        }
+      } catch (e) {}
+    }
+  }
+
+  // replace existing same scope+target(+tag)
+  customs = customs.filter(c => {
+    if (c.scope !== scope) return true;
+    if (String(c.target) !== target) return true;
+    if (scope === 'creator_key' && String(c.tag || '') !== tag) return true;
+    return false;
+  });
+  const entry = { id: Date.now().toString(36), scope, target, message };
+  if (scope === 'creator_key') entry.tag = tag;
+  customs.push(entry);
   document.getElementById('c-target').value = '';
   document.getElementById('c-message').value = '';
+  if (document.getElementById('c-tag')) document.getElementById('c-tag').value = '';
   await persistCustoms();
 }
 
@@ -1911,14 +2095,23 @@ app.post('/messages/save-defaults', checkAuth, async (req, res) => {
 app.post('/messages/save-customs', checkAuth, async (req, res) => {
     const data = db.getData();
     const list = Array.isArray(req.body.customPanelMessages) ? req.body.customPanelMessages : [];
+    const allowedScopes = ['key', 'place', 'creator', 'creator_key', 'place_key'];
     data.customPanelMessages = list
         .filter(c => c && c.scope && c.target && c.message)
-        .map(c => ({
-            id: c.id || Date.now().toString(36),
-            scope: ['key', 'place', 'creator'].includes(c.scope) ? c.scope : 'key',
-            target: String(c.target).trim(),
-            message: String(c.message)
-        }));
+        .map(c => {
+            const scope = allowedScopes.includes(c.scope) ? c.scope : 'key';
+            const entry = {
+                id: c.id || Date.now().toString(36),
+                scope,
+                target: String(c.target).trim(),
+                message: String(c.message)
+            };
+            if ((scope === 'creator_key' || scope === 'place_key') && c.tag) {
+                entry.tag = String(c.tag).trim();
+            }
+            return entry;
+        })
+        .filter(c => c.scope !== 'creator_key' || c.tag);
     await safeSave();
     await saveActionLogInternal(req.session.userEmail, 'Update Custom Panel Messages', `${data.customPanelMessages.length} personal rules`);
     res.json({ ok: true });
@@ -2273,6 +2466,18 @@ app.get('/api/lookup-username', checkAuth, async (req, res) => {
         const row = userRes.data && userRes.data.data && userRes.data.data[0];
         if (!row) return res.json({ ok: false, error: 'User not found' });
         res.json({ ok: true, id: row.id, name: row.name || row.requestedUsername || username });
+    } catch (e) {
+        res.json({ ok: false, error: 'Roblox lookup failed' });
+    }
+});
+
+app.get('/api/lookup-userid', checkAuth, async (req, res) => {
+    const id = (req.query.id || '').trim();
+    if (!id || !/^\d+$/.test(id)) return res.json({ ok: false, error: 'Missing or invalid id' });
+    try {
+        const userRes = await axios.get(`https://users.roblox.com/v1/users/${id}`, { timeout: 8000 });
+        if (!userRes.data || !userRes.data.id) return res.json({ ok: false, error: 'User not found' });
+        res.json({ ok: true, id: userRes.data.id, name: userRes.data.name || String(id) });
     } catch (e) {
         res.json({ ok: false, error: 'Roblox lookup failed' });
     }
