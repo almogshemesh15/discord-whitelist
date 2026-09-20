@@ -692,17 +692,29 @@ app.post('/api/verify', async (req, res) => {
         return res.status(400).json({ allowed: false, reason: 'missing_ids', message: 'Missing creatorId or placeId' });
     }
 
+    // Hebrew panel messages — clear, multi-line, premium feel
+    const MSG = {
+        maintenance: 'המערכת בתחזוקה כרגע\nהגישה נחסמה זמנית\nנחזור בקרוב',
+        invalid_key: 'מפתח הרישיון אינו תקין\nהגישה נדחתה',
+        key_frozen: 'מפתח הרישיון הוקפא\nהשימוש במפתח זה נחסם\nפנה למנהל המערכת',
+        entity_frozen: 'הגישה לישות זו הוקפאה\nהמוצר נעול כרגע\nפנה למנהל לקבלת סיוע',
+        tag_frozen: 'רישיון המוצר הוקפא\nהטאג של מוצר זה נעול\nאין גישה עד להפשרה',
+        tag_expired: 'תוקף הרישיון פג\nהגישה למוצר זה הסתיימה\nיש לחדש את הרישיון',
+        pending: 'הבקשה ממתינה לאישור\nהגישה טרם אושרה\nנעדכן כשיתאפשר',
+        not_whitelisted: 'אין הרשאה למקום זה\nהמוצר אינו ברשימת המורשים\nפנה למנהל לקבלת גישה'
+    };
+
     if (data.maintenanceMode) {
-        return deny('maintenance', 'Server under maintenance');
+        return deny('maintenance', MSG.maintenance);
     }
 
     if (licenseKey) {
         const keyObj = data.keys.find(k => k.key === licenseKey);
         if (!keyObj) {
-            return deny('invalid_key', 'Invalid license key');
+            return deny('invalid_key', MSG.invalid_key);
         }
         if (keyObj.frozen) {
-            return deny('key_frozen', 'License key is frozen');
+            return deny('key_frozen', MSG.key_frozen);
         }
     }
 
@@ -711,16 +723,16 @@ app.post('/api/verify', async (req, res) => {
     // Detailed access check — returns { ok, reason, message }
     const evalEntity = (item) => {
         if (!item) return { ok: false };
-        if (item.frozen) return { ok: false, reason: 'entity_frozen', message: 'This place/creator is frozen' };
+        if (item.frozen) return { ok: false, reason: 'entity_frozen', message: MSG.entity_frozen };
         if (entityHasAllAccess(item, data)) return { ok: true, reason: 'all_access' };
         if (!licenseKey) return { ok: true, reason: 'no_key_required' };
         if (item.assignedKey === licenseKey) return { ok: true };
         if (item.keys && Array.isArray(item.keys)) {
             const match = item.keys.find(k => k.key === licenseKey);
             if (match) {
-                if (match.frozen) return { ok: false, reason: 'tag_frozen', message: 'This license tag is frozen' };
+                if (match.frozen) return { ok: false, reason: 'tag_frozen', message: MSG.tag_frozen };
                 if (match.expiresAt && match.expiresAt <= now) {
-                    return { ok: false, reason: 'tag_expired', message: 'License tag has expired' };
+                    return { ok: false, reason: 'tag_expired', message: MSG.tag_expired };
                 }
                 return { ok: true };
             }
@@ -735,11 +747,13 @@ app.post('/api/verify', async (req, res) => {
         }
     }
 
+    const hardDenyReasons = new Set(['entity_frozen', 'tag_frozen', 'tag_expired']);
+
     const placeItem = (data.whitelist.places || []).find(p => p.id === Number(placeId));
     if (placeItem) {
         const result = evalEntity(placeItem);
         if (result.ok) return allow(result.reason);
-        if (result.reason === 'entity_frozen' || result.reason === 'tag_frozen' || result.reason === 'tag_expired') {
+        if (result.reason && hardDenyReasons.has(result.reason)) {
             return deny(result.reason, result.message);
         }
     }
@@ -755,8 +769,29 @@ app.post('/api/verify', async (req, res) => {
         if (!matches) continue;
         const result = evalEntity(c);
         if (result.ok) return allow(result.reason);
-        if (result.reason === 'entity_frozen' || result.reason === 'tag_frozen' || result.reason === 'tag_expired') {
+        if (result.reason && hardDenyReasons.has(result.reason)) {
             return deny(result.reason, result.message);
+        }
+    }
+
+    // Never show "pending" when this key is frozen on the matching place/creator
+    if (licenseKey) {
+        for (const p of (data.whitelist.places || [])) {
+            if (p.id !== Number(placeId) || !p.keys) continue;
+            const m = p.keys.find(k => k.key === licenseKey);
+            if (m && m.frozen) return deny('tag_frozen', MSG.tag_frozen);
+        }
+        for (const c of (data.whitelist.creators || [])) {
+            let matches = c.id === Number(creatorId);
+            if (!matches && c.groups) {
+                matches = c.groups.some(gName => {
+                    const m = gName.match(/\((\d+)\)/);
+                    return m && Number(m[1]) === Number(creatorId);
+                });
+            }
+            if (!matches || !c.keys) continue;
+            const m = c.keys.find(k => k.key === licenseKey);
+            if (m && m.frozen) return deny('tag_frozen', MSG.tag_frozen);
         }
     }
 
@@ -773,10 +808,10 @@ app.post('/api/verify', async (req, res) => {
             });
             await safeSave();
         }
-        return deny('pending', 'Access pending approval');
+        return deny('pending', MSG.pending);
     }
 
-    return deny('not_whitelisted', 'Not authorized for this place');
+    return deny('not_whitelisted', MSG.not_whitelisted);
 });
 
 app.get('/', checkAuth, (req, res) => {
@@ -1571,11 +1606,18 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
                 TextLabel.BackgroundTransparency = 1
                 TextLabel.AnchorPoint = Vector2.new(0.5, 0.5)
                 TextLabel.Position = UDim2.new(0.5, 0, 0.5, 0)
-                TextLabel.Size = UDim2.new(0.8, 0, 0.8, 0)
-                TextLabel.Font = Enum.Font.SourceSansBold
-                TextLabel.Text = tostring(msg or "Access Denied")
-                TextLabel.TextColor3 = Color3.fromRGB(255, 80, 80)
+                TextLabel.Size = UDim2.new(0.85, 0, 0.85, 0)
+                -- Prefer Rubik Bold; fallback to SourceSansBold if unavailable
+                local fontOk = pcall(function()
+                    TextLabel.FontFace = Font.new("rbxasset://fonts/families/Rubik.json", Enum.FontWeight.Bold, Enum.FontStyle.Normal)
+                end)
+                if not fontOk then
+                    TextLabel.Font = Enum.Font.SourceSansBold
+                end
+                TextLabel.Text = tostring(msg or "הגישה נדחתה")
+                TextLabel.TextColor3 = Color3.fromRGB(255, 90, 90)
                 TextLabel.TextScaled = true
+                TextLabel.TextWrapped = true
                 TextLabel.Parent = Frame
                 local UIStroke = Instance.new("UIStroke")
                 UIStroke.Thickness = 3
@@ -1590,7 +1632,7 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
         if status == "DESTROY" then
             return
         elseif status == "DENIED" then
-            showPanelError(errMsg or "Access Denied")
+            showPanelError(errMsg or "הגישה נדחתה")
             script.Enabled = false
             return
         elseif status == "ALLOWED" then
@@ -1630,7 +1672,7 @@ ${panelErrorFn}
         if decodeSuccess and data and data.allowed then
             return "ALLOWED", nil
         else
-            local msg = "Access Denied"
+            local msg = "הגישה נדחתה"
             if decodeSuccess and data then
                 if type(data.message) == "string" and data.message ~= "" then
                     msg = data.message
