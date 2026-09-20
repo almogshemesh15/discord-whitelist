@@ -1045,7 +1045,6 @@ app.get('/', checkAuth, (req, res) => {
     const data = db.getData();
     const isOwner = req.session.userEmail === OWNER_EMAIL;
     const lang = getLang(req);
-    const dir = lang === 'he' ? 'rtl' : 'ltr';
     const tr = (key) => t(req, key);
     const keyOptions = data.keys.map(k => {
         const allTag = isAllAccessKey(k, k.key) ? ' 🌐 ALL' : '';
@@ -1057,7 +1056,7 @@ app.get('/', checkAuth, (req, res) => {
 
     res.send(`
     <!DOCTYPE html>
-    <html lang="${lang}" dir="${dir}">
+    <html lang="${lang}" dir="ltr">
     <head>
         <meta charset="UTF-8">
         <title>${tr('title')}</title>
@@ -1711,7 +1710,6 @@ app.get('/', checkAuth, (req, res) => {
 app.get('/messages', checkAuth, (req, res) => {
     const data = db.getData();
     const lang = getLang(req);
-    const dir = lang === 'he' ? 'rtl' : 'ltr';
     const tr = (key) => t(req, key);
     const msgs = getPanelMessages(data);
     const customs = data.customPanelMessages || [];
@@ -1742,7 +1740,7 @@ app.get('/messages', checkAuth, (req, res) => {
     `).join('') || `<tr><td colspan="4" style="color:#64748b;text-align:center;">${tr('noPersonal')}</td></tr>`;
 
     res.send(`<!DOCTYPE html>
-<html lang="${lang}" dir="${dir}">
+<html lang="${lang}" dir="ltr">
 <head>
 <meta charset="UTF-8">
 <title>${tr('panelMessagesTitle')}</title>
@@ -2340,7 +2338,11 @@ app.get('/force-load', checkAuth, async (req, res) => {
     // Re-load data from Google Sheets (same place Save writes to)
     try {
         if (typeof db.loadData === 'function') {
-            await db.loadData();
+            const ok = await db.loadData();
+            if (!ok) {
+                const st = typeof db.getLoadStatus === 'function' ? db.getLoadStatus() : {};
+                console.error('force-load failed:', st.lastLoadError || 'unknown');
+            }
         } else {
             console.warn('force-load: db.loadData not available');
         }
