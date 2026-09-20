@@ -292,17 +292,9 @@ const DEFAULT_PANEL_MESSAGES_HE = {
     missing_ids: 'חסרים מזהים (creatorId / placeId).'
 };
 
-/**
- * Resolve panel messages for a language.
- * Hebrew is resolved LIVE by reason key (DEFAULT_PANEL_MESSAGES_HE) —
- * nothing is snapshotted when assigning a user language.
- * English uses defaults + admin overrides from panelMessages.
- */
-function getPanelMessages(data, lang) {
+/** English panel messages (defaults + admin overrides). Never stores Hebrew. */
+function getPanelMessagesEn(data) {
     const stored = (data && data.panelMessages) || {};
-    if (lang === 'he') {
-        return { ...DEFAULT_PANEL_MESSAGES_HE };
-    }
     const out = { ...DEFAULT_PANEL_MESSAGES };
     for (const k of Object.keys(DEFAULT_PANEL_MESSAGES)) {
         if (typeof stored[k] === 'string' && stored[k].trim()) out[k] = stored[k];
@@ -310,7 +302,43 @@ function getPanelMessages(data, lang) {
     return out;
 }
 
-/** userPanelLang entry: "he" | "en" | { lang, name } */
+/** In-memory only — never written to Google Sheets / DB */
+const liveTranslateCache = new Map();
+
+/**
+ * Live EN→HE translation at request time.
+ * Result is cached in RAM only so changing English defaults picks up on next miss after cache clear,
+ * and we never persist translations.
+ */
+async function translateEnToHeLive(text) {
+    if (!text || typeof text !== 'string') return text;
+    if (liveTranslateCache.has(text)) return liveTranslateCache.get(text);
+    try {
+        const url = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=he&dt=t&q='
+            + encodeURIComponent(text);
+        const res = await axios.get(url, { timeout: 6000 });
+        let out = '';
+        if (Array.isArray(res.data) && Array.isArray(res.data[0])) {
+            out = res.data[0].map(part => (part && part[0]) || '').join('');
+        }
+        if (out) {
+            liveTranslateCache.set(text, out);
+            return out;
+        }
+    } catch (e) {
+        console.warn('live translate failed:', e.message || e);
+    }
+    // Fallback: static HE defaults by matching exact default EN string
+    for (const k of Object.keys(DEFAULT_PANEL_MESSAGES)) {
+        if (DEFAULT_PANEL_MESSAGES[k] === text && DEFAULT_PANEL_MESSAGES_HE[k]) {
+            liveTranslateCache.set(text, DEFAULT_PANEL_MESSAGES_HE[k]);
+            return DEFAULT_PANEL_MESSAGES_HE[k];
+        }
+    }
+    return text;
+}
+
+/** userPanelLang entry: "he" | "en" | { lang, name } — language preference only */
 function getUserPanelLang(data, creatorId) {
     if (creatorId == null) return 'en';
     const map = (data && data.userPanelLang) || {};
@@ -358,14 +386,23 @@ function targetMatchesCreator(target, creatorId) {
  * - creator_key: matches creatorId AND tag (license key)
  * Custom messages NEVER override maintenance.
  */
-function resolvePanelMessage(data, reason, { licenseKey, placeId, creatorId } = {}) {
+/**
+ * Build the English message for a reason (customs first, then EN defaults).
+ * If user language is Hebrew → translate that English text LIVE (RAM cache only).
+ */
+async function resolvePanelMessage(data, reason, { licenseKey, placeId, creatorId } = {}) {
     const userLang = getUserPanelLang(data, creatorId);
-    const msgs = getPanelMessages(data, userLang);
-    const fallback = userLang === 'he' ? DEFAULT_PANEL_MESSAGES_HE : DEFAULT_PANEL_MESSAGES;
+    const enMsgs = getPanelMessagesEn(data);
 
-    // Maintenance always wins — no personal override
+    const finalize = async (englishText) => {
+        const text = englishText || enMsgs[reason] || DEFAULT_PANEL_MESSAGES[reason] || 'Access denied.';
+        if (userLang === 'he') return translateEnToHeLive(text);
+        return text;
+    };
+
+    // Maintenance always wins — no personal override (still live-translated if needed)
     if (reason === 'maintenance') {
-        return msgs.maintenance || fallback.maintenance;
+        return finalize(enMsgs.maintenance || DEFAULT_PANEL_MESSAGES.maintenance);
     }
 
     const customs = (data && data.customPanelMessages) || [];
@@ -377,7 +414,7 @@ function resolvePanelMessage(data, reason, { licenseKey, placeId, creatorId } = 
             targetMatchesCreator(c.target, creatorId) &&
             String(c.tag || '') === String(licenseKey)
         );
-        if (hit && hit.message) return hit.message;
+        if (hit && hit.message) return finalize(hit.message);
     }
 
     // 2) place + tag
@@ -387,13 +424,13 @@ function resolvePanelMessage(data, reason, { licenseKey, placeId, creatorId } = 
             String(extractTargetId(c.target) || c.target) === String(placeId) &&
             String(c.tag || '') === String(licenseKey)
         );
-        if (hit && hit.message) return hit.message;
+        if (hit && hit.message) return finalize(hit.message);
     }
 
     // 3) key only
     if (licenseKey) {
         const hit = customs.find(c => c.scope === 'key' && String(c.target) === String(licenseKey));
-        if (hit && hit.message) return hit.message;
+        if (hit && hit.message) return finalize(hit.message);
     }
 
     // 4) place only
@@ -402,7 +439,7 @@ function resolvePanelMessage(data, reason, { licenseKey, placeId, creatorId } = 
             c.scope === 'place' &&
             String(extractTargetId(c.target) || c.target) === String(placeId)
         );
-        if (hit && hit.message) return hit.message;
+        if (hit && hit.message) return finalize(hit.message);
     }
 
     // 5) creator only
@@ -411,10 +448,10 @@ function resolvePanelMessage(data, reason, { licenseKey, placeId, creatorId } = 
             c.scope === 'creator' &&
             targetMatchesCreator(c.target, creatorId)
         );
-        if (hit && hit.message) return hit.message;
+        if (hit && hit.message) return finalize(hit.message);
     }
 
-    return msgs[reason] || fallback[reason] || 'Access denied.';
+    return finalize(enMsgs[reason] || DEFAULT_PANEL_MESSAGES[reason]);
 }
 
 function isBadMetaName(n) {
@@ -1073,35 +1110,35 @@ app.post('/api/verify', async (req, res) => {
     };
 
     const ctx = { licenseKey, placeId, creatorId };
-    const msg = (reason) => resolvePanelMessage(data, reason, ctx);
+    const msg = async (reason) => resolvePanelMessage(data, reason, ctx);
 
     if (!creatorId || !placeId) {
-        return res.status(400).json({ allowed: false, reason: 'missing_ids', message: msg('missing_ids') });
+        return res.status(400).json({ allowed: false, reason: 'missing_ids', message: await msg('missing_ids') });
     }
 
     if (data.maintenanceMode) {
-        return deny('maintenance', msg('maintenance'));
+        return deny('maintenance', await msg('maintenance'));
     }
 
     if (licenseKey) {
         const keyObj = data.keys.find(k => k.key === licenseKey);
         if (!keyObj) {
-            return deny('invalid_key', msg('invalid_key'));
+            return deny('invalid_key', await msg('invalid_key'));
         }
         if (keyObj.frozen) {
-            return deny('key_frozen', msg('key_frozen'));
+            return deny('key_frozen', await msg('key_frozen'));
         }
     }
 
     const now = Date.now();
 
-    // Detailed access check — returns { ok, reason, message }
+    // Detailed access check — returns { ok, reason } (message resolved via await msg)
     const evalEntity = (item) => {
         if (!item) return { ok: false };
-        if (item.frozen) return { ok: false, reason: 'entity_frozen', message: msg('entity_frozen') };
+        if (item.frozen) return { ok: false, reason: 'entity_frozen' };
         // Frozen ALL tag on this entity → always tag_frozen (even if another key is used)
         if (entityHasFrozenAllTag(item, data)) {
-            return { ok: false, reason: 'tag_frozen', message: msg('tag_frozen') };
+            return { ok: false, reason: 'tag_frozen' };
         }
         if (entityHasAllAccess(item, data)) return { ok: true, reason: 'all_access' };
         if (!licenseKey) return { ok: true, reason: 'no_key_required' };
@@ -1109,9 +1146,9 @@ app.post('/api/verify', async (req, res) => {
         if (item.keys && Array.isArray(item.keys)) {
             const match = item.keys.find(k => k.key === licenseKey);
             if (match) {
-                if (match.frozen) return { ok: false, reason: 'tag_frozen', message: msg('tag_frozen') };
+                if (match.frozen) return { ok: false, reason: 'tag_frozen' };
                 if (match.expiresAt && match.expiresAt <= now) {
-                    return { ok: false, reason: 'tag_expired', message: msg('tag_expired') };
+                    return { ok: false, reason: 'tag_expired' };
                 }
                 return { ok: true };
             }
@@ -1127,7 +1164,7 @@ app.post('/api/verify', async (req, res) => {
         const result = evalEntity(placeItem);
         if (result.ok) return allow(result.reason);
         if (result.reason && hardDenyReasons.has(result.reason)) {
-            return deny(result.reason, result.message);
+            return deny(result.reason, await msg(result.reason));
         }
     }
 
@@ -1143,7 +1180,7 @@ app.post('/api/verify', async (req, res) => {
         const result = evalEntity(c);
         if (result.ok) return allow(result.reason);
         if (result.reason && hardDenyReasons.has(result.reason)) {
-            return deny(result.reason, result.message);
+            return deny(result.reason, await msg(result.reason));
         }
     }
 
@@ -1152,7 +1189,7 @@ app.post('/api/verify', async (req, res) => {
         const keyObj = data.keys.find(k => k.key === licenseKey);
         if (isAllAccessKey(keyObj, licenseKey) && !keyObj.frozen) {
             if (placeItem && entityHasFrozenAllTag(placeItem, data)) {
-                return deny('tag_frozen', msg('tag_frozen'));
+                return deny('tag_frozen', await msg('tag_frozen'));
             }
             for (const c of (data.whitelist.creators || [])) {
                 let matches = c.id === Number(creatorId);
@@ -1163,7 +1200,7 @@ app.post('/api/verify', async (req, res) => {
                     });
                 }
                 if (matches && entityHasFrozenAllTag(c, data)) {
-                    return deny('tag_frozen', msg('tag_frozen'));
+                    return deny('tag_frozen', await msg('tag_frozen'));
                 }
             }
             return allow('all_key');
@@ -1175,8 +1212,8 @@ app.post('/api/verify', async (req, res) => {
         for (const p of (data.whitelist.places || [])) {
             if (p.id !== Number(placeId) || !p.keys) continue;
             const m = p.keys.find(k => k.key === licenseKey);
-            if (m && m.frozen) return deny('tag_frozen', msg('tag_frozen'));
-            if (entityHasFrozenAllTag(p, data)) return deny('tag_frozen', msg('tag_frozen'));
+            if (m && m.frozen) return deny('tag_frozen', await msg('tag_frozen'));
+            if (entityHasFrozenAllTag(p, data)) return deny('tag_frozen', await msg('tag_frozen'));
         }
         for (const c of (data.whitelist.creators || [])) {
             let matches = c.id === Number(creatorId);
@@ -1188,8 +1225,8 @@ app.post('/api/verify', async (req, res) => {
             }
             if (!matches || !c.keys) continue;
             const m = c.keys.find(k => k.key === licenseKey);
-            if (m && m.frozen) return deny('tag_frozen', msg('tag_frozen'));
-            if (entityHasFrozenAllTag(c, data)) return deny('tag_frozen', msg('tag_frozen'));
+            if (m && m.frozen) return deny('tag_frozen', await msg('tag_frozen'));
+            if (entityHasFrozenAllTag(c, data)) return deny('tag_frozen', await msg('tag_frozen'));
         }
     }
 
@@ -1206,10 +1243,10 @@ app.post('/api/verify', async (req, res) => {
             });
             await safeSave();
         }
-        return deny('pending', msg('pending'));
+        return deny('pending', await msg('pending'));
     }
 
-    return deny('not_whitelisted', msg('not_whitelisted'));
+    return deny('not_whitelisted', await msg('not_whitelisted'));
 });
 
 app.get('/', checkAuth, (req, res) => {
@@ -1882,7 +1919,7 @@ app.get('/messages', checkAuth, (req, res) => {
     const data = db.getData();
     const lang = getLang(req);
     const tr = (key) => t(req, key);
-    const msgs = getPanelMessages(data);
+    const msgs = getPanelMessagesEn(data);
     const customs = data.customPanelMessages || [];
     const reasonMeta = [
         { key: 'maintenance' },
@@ -2175,6 +2212,8 @@ async function deleteCustom(i) {
   await persistCustoms();
 }
 
+const NO_USER_LANG_TEXT = ${JSON.stringify(tr('noUserLang'))};
+
 function formatUserLangLabel(id, entry) {
   const lang = (typeof entry === 'string') ? entry : (entry && entry.lang);
   const name = (typeof entry === 'object' && entry && entry.name) ? entry.name : null;
@@ -2185,16 +2224,22 @@ function formatUserLangLabel(id, entry) {
 
 function renderUserLang() {
   const body = document.getElementById('ul-body');
+  if (!body) return;
   const entries = Object.entries(userPanelLang || {});
   if (!entries.length) {
-    body.innerHTML = '<tr><td colspan="3" style="color:#64748b;text-align:center;">${tr('noUserLang')}</td></tr>';
+    body.innerHTML = '<tr><td colspan="3" style="color:#64748b;text-align:center;">' + NO_USER_LANG_TEXT + '</td></tr>';
     return;
   }
   body.innerHTML = entries.map(([id, entry]) => {
     const { display, langLabel } = formatUserLangLabel(id, entry);
     return '<tr><td><code>' + display.replace(/</g,'&lt;') + '</code></td><td>' + langLabel +
-      '</td><td><button type="button" class="btn-del" onclick="deleteUserLang(\\'' + id + '\\')">×</button></td></tr>';
+      '</td><td><button type="button" class="btn-del" data-ul-del="' + String(id).replace(/"/g,'') + '">×</button></td></tr>';
   }).join('');
+  body.querySelectorAll('[data-ul-del]').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      deleteUserLang(btn.getAttribute('data-ul-del'));
+    });
+  });
 }
 renderUserLang();
 
@@ -2227,26 +2272,28 @@ async function saveUserLang() {
       document.getElementById('ul-target').value = name + ' (' + id + ')';
     } catch (e) { status.textContent = 'Lookup failed'; return; }
   }
-  // Only store language preference + display name — never a translated message snapshot
-  userPanelLang[id] = { lang, name: name || null };
+  // Preference only — no translated text stored in DB
+  userPanelLang[String(id)] = { lang: lang, name: name || null };
   await fetch('/messages/save-user-lang', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ userPanelLang })
+    body: JSON.stringify({ userPanelLang: userPanelLang })
   });
+  // Clear in-memory translate cache so next verify uses latest English text
+  try { await fetch('/messages/clear-translate-cache', { method: 'POST' }); } catch (e) {}
   const label = name ? (name + ' (' + id + ')') : id;
-  status.innerHTML = 'Saved for <strong style="color:#38bdf8;">' + label + '</strong> → ' + (lang === 'he' ? 'עברית' : 'English') +
-    '<br><span style="color:#64748b;">Messages are translated live (not saved as a copy).</span>';
+  status.innerHTML = 'Saved for <strong style="color:#38bdf8;">' + label + '</strong> → ' + (lang === 'he' ? 'עברית' : 'English');
   document.getElementById('ul-target').value = '';
   renderUserLang();
 }
 
 async function deleteUserLang(id) {
-  delete userPanelLang[id];
+  id = String(id);
+  if (userPanelLang[id] !== undefined) delete userPanelLang[id];
   await fetch('/messages/save-user-lang', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ userPanelLang })
+    body: JSON.stringify({ userPanelLang: userPanelLang })
   });
   renderUserLang();
 }
@@ -2265,6 +2312,8 @@ app.post('/messages/save-defaults', checkAuth, async (req, res) => {
         }
     }
     await safeSave();
+    // English text changed → invalidate live HE translations in RAM
+    liveTranslateCache.clear();
     await saveActionLogInternal(req.session.userEmail, 'Update Panel Messages', 'Saved default panel messages');
     res.json({ ok: true });
 });
@@ -2313,6 +2362,11 @@ app.post('/messages/save-user-lang', checkAuth, async (req, res) => {
     data.userPanelLang = cleaned;
     await safeSave();
     await saveActionLogInternal(req.session.userEmail, 'Update User Panel Languages', `${Object.keys(cleaned).length} users`);
+    res.json({ ok: true, userPanelLang: cleaned });
+});
+
+app.post('/messages/clear-translate-cache', checkAuth, (req, res) => {
+    liveTranslateCache.clear();
     res.json({ ok: true });
 });
 
