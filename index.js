@@ -147,9 +147,11 @@ const TRANSLATIONS = {
         resolveBtn: 'Resolve username',
         targetHint: 'Username or ID — will save as Name (id)',
         userLangTitle: 'User message language',
-        userLangHint: 'Choose English or Hebrew for a specific creator. Hebrew uses auto-translated default panel messages for that user.',
+        userLangHint: 'Choose English or Hebrew for a specific creator or Place ID. Hebrew translates messages live for that target. Place overrides creator when both match.',
         userLangSave: 'Save language',
-        noUserLang: 'No per-user languages set'
+        noUserLang: 'No per-user languages set',
+        scopeUser: 'Creator (user)',
+        scopePlaceId: 'Place ID'
     },
     he: {
         title: 'מערכת רשימת מורשים',
@@ -252,9 +254,11 @@ const TRANSLATIONS = {
         resolveBtn: 'פתור שם משתמש',
         targetHint: 'שם משתמש או ID — יישמר כ־Name (id)',
         userLangTitle: 'שפת הודעות למשתמש',
-        userLangHint: 'בחר אנגלית או עברית ליוצר ספציפי. בעברית יוצגו תרגומים אוטומטיים של הודעות ברירת המחדל למשתמש הזה.',
+        userLangHint: 'בחר אנגלית או עברית ליוצר או ל־Place ID. עברית מתורגמת בלייב ליעד הזה. Place גובר על יוצר כששניהם מוגדרים.',
         userLangSave: 'שמור שפה',
-        noUserLang: 'לא הוגדרו שפות לפי משתמש'
+        noUserLang: 'לא הוגדרו שפות לפי משתמש',
+        scopeUser: 'יוצר (משתמש)',
+        scopePlaceId: 'מזהה מפה (Place ID)'
     }
 };
 
@@ -338,14 +342,62 @@ async function translateEnToHeLive(text) {
     return text;
 }
 
-/** userPanelLang entry: "he" | "en" | { lang, name } — language preference only */
-function getUserPanelLang(data, creatorId) {
-    if (creatorId == null) return 'en';
-    const map = (data && data.userPanelLang) || {};
-    const entry = map[String(creatorId)];
-    if (!entry) return 'en';
-    if (typeof entry === 'string') return entry === 'he' ? 'he' : 'en';
-    if (entry && typeof entry === 'object') return entry.lang === 'he' ? 'he' : 'en';
+/**
+ * userPanelLang structure (normalized):
+ * { creators: { "123": { lang, name } }, places: { "456": { lang, name } } }
+ * Legacy flat map is treated as creators. Place wins over creator when both match.
+ */
+function normalizePanelLangMap(raw) {
+    const out = { creators: {}, places: {} };
+    if (!raw || typeof raw !== 'object') return out;
+    if (raw.creators || raw.places) {
+        for (const [id, val] of Object.entries(raw.creators || {})) {
+            if (!/^\d+$/.test(String(id))) continue;
+            if (typeof val === 'string') out.creators[String(id)] = { lang: val === 'he' ? 'he' : 'en', name: null };
+            else if (val && typeof val === 'object') {
+                out.creators[String(id)] = {
+                    lang: val.lang === 'he' ? 'he' : 'en',
+                    name: val.name ? String(val.name) : null
+                };
+            }
+        }
+        for (const [id, val] of Object.entries(raw.places || {})) {
+            if (!/^\d+$/.test(String(id))) continue;
+            if (typeof val === 'string') out.places[String(id)] = { lang: val === 'he' ? 'he' : 'en', name: null };
+            else if (val && typeof val === 'object') {
+                out.places[String(id)] = {
+                    lang: val.lang === 'he' ? 'he' : 'en',
+                    name: val.name ? String(val.name) : null
+                };
+            }
+        }
+        return out;
+    }
+    for (const [id, val] of Object.entries(raw)) {
+        if (!/^\d+$/.test(String(id))) continue;
+        if (typeof val === 'string') out.creators[String(id)] = { lang: val === 'he' ? 'he' : 'en', name: null };
+        else if (val && typeof val === 'object') {
+            const bucket = val.type === 'place' ? 'places' : 'creators';
+            out[bucket][String(id)] = {
+                lang: val.lang === 'he' ? 'he' : 'en',
+                name: val.name ? String(val.name) : null
+            };
+        }
+    }
+    return out;
+}
+
+function getUserPanelLang(data, ctx) {
+    // Support legacy call: getUserPanelLang(data, creatorId)
+    const creatorId = (ctx && typeof ctx === 'object') ? ctx.creatorId : ctx;
+    const placeId = (ctx && typeof ctx === 'object') ? ctx.placeId : null;
+    const map = normalizePanelLangMap(data && data.userPanelLang);
+    if (placeId != null && map.places[String(placeId)]) {
+        return map.places[String(placeId)].lang === 'he' ? 'he' : 'en';
+    }
+    if (creatorId != null && map.creators[String(creatorId)]) {
+        return map.creators[String(creatorId)].lang === 'he' ? 'he' : 'en';
+    }
     return 'en';
 }
 
@@ -391,7 +443,7 @@ function targetMatchesCreator(target, creatorId) {
  * If user language is Hebrew → translate that English text LIVE (RAM cache only).
  */
 async function resolvePanelMessage(data, reason, { licenseKey, placeId, creatorId } = {}) {
-    const userLang = getUserPanelLang(data, creatorId);
+    const userLang = getUserPanelLang(data, { creatorId, placeId });
     const enMsgs = getPanelMessagesEn(data);
 
     const finalize = async (englishText) => {
@@ -2053,10 +2105,17 @@ th,td{padding:8px;border-bottom:1px solid #1e293b;text-align:left;}
   <div class="card">
     <h3>${tr('userLangTitle')}</h3>
     <p class="hint">${tr('userLangHint')}</p>
-    <div style="display:grid;grid-template-columns:2fr 1fr auto;gap:8px;align-items:end;">
+    <div style="display:grid;grid-template-columns:1fr 2fr 1fr auto;gap:8px;align-items:end;">
       <div>
-        <label style="font-size:12px;color:#94a3b8;">${tr('target')} (${tr('targetHint')})</label>
-        <input id="ul-target" placeholder="username or id">
+        <label style="font-size:12px;color:#94a3b8;">${tr('scope')}</label>
+        <select id="ul-scope">
+          <option value="creator">${tr('scopeUser')}</option>
+          <option value="place">${tr('scopePlaceId')}</option>
+        </select>
+      </div>
+      <div>
+        <label style="font-size:12px;color:#94a3b8;">${tr('target')}</label>
+        <input id="ul-target" placeholder="username / user id / place id">
       </div>
       <div>
         <label style="font-size:12px;color:#94a3b8;">${tr('lang')}</label>
@@ -2069,14 +2128,22 @@ th,td{padding:8px;border-bottom:1px solid #1e293b;text-align:left;}
     </div>
     <div id="ul-status" style="font-size:12px;color:#94a3b8;margin-top:6px;"></div>
     <table style="margin-top:14px;">
-      <thead><tr><th>${tr('target')}</th><th>${tr('lang')}</th><th></th></tr></thead>
+      <thead><tr><th>${tr('scope')}</th><th>${tr('target')}</th><th>${tr('lang')}</th><th></th></tr></thead>
       <tbody id="ul-body"></tbody>
     </table>
   </div>
 </div>
 <script>
 let customs = ${JSON.stringify(customs)};
-let userPanelLang = ${JSON.stringify(data.userPanelLang || {})};
+let userPanelLang = ${JSON.stringify((() => {
+    const raw = data.userPanelLang || {};
+    if (raw.creators || raw.places) return { creators: raw.creators || {}, places: raw.places || {} };
+    const creators = {};
+    for (const [id, val] of Object.entries(raw)) {
+        if (/^\\d+$/.test(String(id))) creators[String(id)] = val;
+    }
+    return { creators, places: {} };
+})())};
 function onScopeChange() {
   const s = document.getElementById('c-scope').value;
   document.getElementById('tag-wrap').style.display = (s === 'creator_key') ? 'block' : 'none';
@@ -2214,6 +2281,12 @@ async function deleteCustom(i) {
 
 const NO_USER_LANG_TEXT = ${JSON.stringify(tr('noUserLang'))};
 
+function ensureLangBuckets() {
+  if (!userPanelLang || typeof userPanelLang !== 'object') userPanelLang = { creators: {}, places: {} };
+  if (!userPanelLang.creators) userPanelLang.creators = {};
+  if (!userPanelLang.places) userPanelLang.places = {};
+}
+
 function formatUserLangLabel(id, entry) {
   const lang = (typeof entry === 'string') ? entry : (entry && entry.lang);
   const name = (typeof entry === 'object' && entry && entry.name) ? entry.name : null;
@@ -2223,73 +2296,101 @@ function formatUserLangLabel(id, entry) {
 }
 
 function renderUserLang() {
+  ensureLangBuckets();
   const body = document.getElementById('ul-body');
   if (!body) return;
-  const entries = Object.entries(userPanelLang || {});
-  if (!entries.length) {
-    body.innerHTML = '<tr><td colspan="3" style="color:#64748b;text-align:center;">' + NO_USER_LANG_TEXT + '</td></tr>';
+  const rows = [];
+  Object.entries(userPanelLang.creators || {}).forEach(([id, entry]) => {
+    const { display, langLabel } = formatUserLangLabel(id, entry);
+    rows.push({ type: 'creator', id, display, langLabel });
+  });
+  Object.entries(userPanelLang.places || {}).forEach(([id, entry]) => {
+    const { display, langLabel } = formatUserLangLabel(id, entry);
+    rows.push({ type: 'place', id, display, langLabel });
+  });
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="4" style="color:#64748b;text-align:center;">' + NO_USER_LANG_TEXT + '</td></tr>';
     return;
   }
-  body.innerHTML = entries.map(([id, entry]) => {
-    const { display, langLabel } = formatUserLangLabel(id, entry);
-    return '<tr><td><code>' + display.replace(/</g,'&lt;') + '</code></td><td>' + langLabel +
-      '</td><td><button type="button" class="btn-del" data-ul-del="' + String(id).replace(/"/g,'') + '">×</button></td></tr>';
+  body.innerHTML = rows.map(function(r) {
+    const badge = r.type === 'place' ? 'place' : 'creator';
+    return '<tr><td><span class="badge">' + badge + '</span></td><td><code>' + r.display.replace(/</g,'&lt;') +
+      '</code></td><td>' + r.langLabel + '</td><td><button type="button" class="btn-del" data-ul-type="' +
+      r.type + '" data-ul-del="' + String(r.id).replace(/"/g,'') + '">×</button></td></tr>';
   }).join('');
   body.querySelectorAll('[data-ul-del]').forEach(function(btn) {
     btn.addEventListener('click', function() {
-      deleteUserLang(btn.getAttribute('data-ul-del'));
+      deleteUserLang(btn.getAttribute('data-ul-type'), btn.getAttribute('data-ul-del'));
     });
   });
 }
 renderUserLang();
 
 async function saveUserLang() {
+  ensureLangBuckets();
+  const scope = document.getElementById('ul-scope').value === 'place' ? 'place' : 'creator';
   let target = (document.getElementById('ul-target').value || '').trim();
   const lang = document.getElementById('ul-lang').value === 'he' ? 'he' : 'en';
   const status = document.getElementById('ul-status');
   if (!target) { alert('Target required'); return; }
   let id = null;
   let name = null;
-  const m = target.match(/\\((\\d+)\\)\\s*$/);
-  if (m) {
-    id = m[1];
-    name = target.replace(/\\s*\\(\\d+\\)\\s*$/, '').trim() || null;
-  } else if (/^\\d+$/.test(target)) {
+
+  if (scope === 'place') {
+    if (!/^\\d+$/.test(target)) {
+      status.textContent = 'Place ID must be numeric';
+      return;
+    }
     id = target;
-    try {
-      const r2 = await fetch('/api/lookup-userid?id=' + encodeURIComponent(id));
-      const d2 = await r2.json();
-      if (d2.ok) name = d2.name;
-    } catch (e) {}
+    name = 'Place ' + id;
+    // optional: try resolve place name from whitelist
   } else {
-    status.textContent = 'Resolving...';
-    try {
-      const res = await fetch('/api/lookup-username?username=' + encodeURIComponent(target));
-      const data = await res.json();
-      if (!data.ok) { status.textContent = data.error || 'Not found'; return; }
-      id = String(data.id);
-      name = data.name;
-      document.getElementById('ul-target').value = name + ' (' + id + ')';
-    } catch (e) { status.textContent = 'Lookup failed'; return; }
+    const m = target.match(/\\((\\d+)\\)\\s*$/);
+    if (m) {
+      id = m[1];
+      name = target.replace(/\\s*\\(\\d+\\)\\s*$/, '').trim() || null;
+    } else if (/^\\d+$/.test(target)) {
+      id = target;
+      try {
+        const r2 = await fetch('/api/lookup-userid?id=' + encodeURIComponent(id));
+        const d2 = await r2.json();
+        if (d2.ok) name = d2.name;
+      } catch (e) {}
+    } else {
+      status.textContent = 'Resolving...';
+      try {
+        const res = await fetch('/api/lookup-username?username=' + encodeURIComponent(target));
+        const data = await res.json();
+        if (!data.ok) { status.textContent = data.error || 'Not found'; return; }
+        id = String(data.id);
+        name = data.name;
+        document.getElementById('ul-target').value = name + ' (' + id + ')';
+      } catch (e) { status.textContent = 'Lookup failed'; return; }
+    }
   }
-  // Preference only — no translated text stored in DB
-  userPanelLang[String(id)] = { lang: lang, name: name || null };
+
+  const bucket = scope === 'place' ? 'places' : 'creators';
+  userPanelLang[bucket][String(id)] = { lang: lang, name: name || null };
   await fetch('/messages/save-user-lang', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ userPanelLang: userPanelLang })
   });
-  // Clear in-memory translate cache so next verify uses latest English text
   try { await fetch('/messages/clear-translate-cache', { method: 'POST' }); } catch (e) {}
   const label = name ? (name + ' (' + id + ')') : id;
-  status.innerHTML = 'Saved for <strong style="color:#38bdf8;">' + label + '</strong> → ' + (lang === 'he' ? 'עברית' : 'English');
+  status.innerHTML = 'Saved <span class="badge">' + scope + '</span> <strong style="color:#38bdf8;">' + label +
+    '</strong> → ' + (lang === 'he' ? 'עברית' : 'English');
   document.getElementById('ul-target').value = '';
   renderUserLang();
 }
 
-async function deleteUserLang(id) {
+async function deleteUserLang(type, id) {
+  ensureLangBuckets();
   id = String(id);
-  if (userPanelLang[id] !== undefined) delete userPanelLang[id];
+  const bucket = type === 'place' ? 'places' : 'creators';
+  if (userPanelLang[bucket] && userPanelLang[bucket][id] !== undefined) {
+    delete userPanelLang[bucket][id];
+  }
   await fetch('/messages/save-user-lang', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -2345,23 +2446,12 @@ app.post('/messages/save-customs', checkAuth, async (req, res) => {
 
 app.post('/messages/save-user-lang', checkAuth, async (req, res) => {
     const data = db.getData();
-    const incoming = req.body.userPanelLang || {};
-    const cleaned = {};
-    for (const [id, val] of Object.entries(incoming)) {
-        if (!/^\d+$/.test(String(id))) continue;
-        if (typeof val === 'string') {
-            cleaned[String(id)] = { lang: val === 'he' ? 'he' : 'en', name: null };
-        } else if (val && typeof val === 'object') {
-            cleaned[String(id)] = {
-                lang: val.lang === 'he' ? 'he' : 'en',
-                name: val.name ? String(val.name).trim() : null
-            };
-        }
-    }
+    const cleaned = normalizePanelLangMap(req.body.userPanelLang || {});
     // Preference only — no translated message text is stored here
     data.userPanelLang = cleaned;
     await safeSave();
-    await saveActionLogInternal(req.session.userEmail, 'Update User Panel Languages', `${Object.keys(cleaned).length} users`);
+    const total = Object.keys(cleaned.creators).length + Object.keys(cleaned.places).length;
+    await saveActionLogInternal(req.session.userEmail, 'Update User Panel Languages', `${total} targets`);
     res.json({ ok: true, userPanelLang: cleaned });
 });
 
@@ -2488,12 +2578,29 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
                     surfaceGui.Face = Enum.NormalId.Front
                     surfaceGui.Parent = Panel
                 end
+                -- Bring SurfaceGui to front among other SurfaceGuis on this part
+                local maxDisplay = 0
+                for _, child in pairs(Panel:GetChildren()) do
+                    if child:IsA("SurfaceGui") and typeof(child.DisplayOrder) == "number" and child.DisplayOrder > maxDisplay then
+                        maxDisplay = child.DisplayOrder
+                    end
+                end
+                surfaceGui.DisplayOrder = math.max(maxDisplay + 1, 2147483647)
+                surfaceGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
                 -- clear previous error UI
                 for _, child in pairs(surfaceGui:GetChildren()) do
                     if child:GetAttribute("WLErrorPanel") then
                         child:Destroy()
                     end
                 end
+                -- Highest ZIndex among siblings so the error sits above everything
+                local maxZ = 0
+                for _, child in pairs(surfaceGui:GetChildren()) do
+                    if child:IsA("GuiObject") and child.ZIndex > maxZ then
+                        maxZ = child.ZIndex
+                    end
+                end
+                local topZ = math.max(maxZ + 1, 2147483647)
                 local Frame = Instance.new("Frame")
                 Frame:SetAttribute("WLErrorPanel", true)
                 Frame.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -2501,6 +2608,7 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
                 Frame.Size = UDim2.new(1, 0, 1, 0)
                 Frame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
                 Frame.BackgroundTransparency = 0.2
+                Frame.ZIndex = topZ
                 Frame.Parent = surfaceGui
                 local UICorner = Instance.new("UICorner")
                 UICorner.Parent = Frame
@@ -2509,6 +2617,7 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
                 TextLabel.AnchorPoint = Vector2.new(0.5, 0.5)
                 TextLabel.Position = UDim2.new(0.5, 0, 0.5, 0)
                 TextLabel.Size = UDim2.new(0.85, 0, 0.85, 0)
+                TextLabel.ZIndex = topZ
                 -- Prefer Rubik Bold; fallback to SourceSansBold if unavailable
                 local fontOk = pcall(function()
                     TextLabel.FontFace = Font.new("rbxasset://fonts/families/Rubik.json", Enum.FontWeight.Bold, Enum.FontStyle.Normal)
