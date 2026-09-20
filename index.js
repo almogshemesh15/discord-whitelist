@@ -45,6 +45,47 @@ function parseLocalTime(inputString) {
 
 const OWNER_EMAIL = 'almogshemesh11@gmail.com';
 
+const DEFAULT_PANEL_MESSAGES = {
+    maintenance: 'System is under maintenance.\nAccess is temporarily blocked.\nPlease try again later.',
+    invalid_key: 'Invalid license key.\nAccess denied.',
+    key_frozen: 'This license key has been frozen.\nAccess is blocked until it is restored.',
+    entity_frozen: 'Access to this place/creator has been frozen.\nContact the administrator.',
+    tag_frozen: 'The license for this product has been frozen.\nThis tag is locked until unfrozen.',
+    tag_expired: 'This license has expired.\nRenew the license to restore access.',
+    pending: 'Your request is pending approval.\nAccess has not been granted yet.',
+    not_whitelisted: 'Not authorized for this place.\nContact the administrator for access.',
+    missing_ids: 'Missing creatorId or placeId.'
+};
+
+function getPanelMessages(data) {
+    const stored = (data && data.panelMessages) || {};
+    const out = { ...DEFAULT_PANEL_MESSAGES };
+    for (const k of Object.keys(DEFAULT_PANEL_MESSAGES)) {
+        if (typeof stored[k] === 'string' && stored[k].trim()) out[k] = stored[k];
+    }
+    return out;
+}
+
+/** Custom personal messages: { id, scope: 'key'|'place'|'creator', target, message } */
+function resolvePanelMessage(data, reason, { licenseKey, placeId, creatorId } = {}) {
+    const customs = (data && data.customPanelMessages) || [];
+    // Priority: key > place > creator
+    if (licenseKey) {
+        const hit = customs.find(c => c.scope === 'key' && String(c.target) === String(licenseKey));
+        if (hit && hit.message) return hit.message;
+    }
+    if (placeId != null) {
+        const hit = customs.find(c => c.scope === 'place' && String(c.target) === String(placeId));
+        if (hit && hit.message) return hit.message;
+    }
+    if (creatorId != null) {
+        const hit = customs.find(c => c.scope === 'creator' && String(c.target) === String(creatorId));
+        if (hit && hit.message) return hit.message;
+    }
+    const msgs = getPanelMessages(data);
+    return msgs[reason] || DEFAULT_PANEL_MESSAGES[reason] || 'Access denied.';
+}
+
 function isBadMetaName(n) {
     return !n ||
         n === '[TITLE UNAVAILABLE]' ||
@@ -688,33 +729,24 @@ app.post('/api/verify', async (req, res) => {
         return res.json({ allowed: true, reason: reason || 'allowed', message: 'Access granted' });
     };
 
+    const ctx = { licenseKey, placeId, creatorId };
+    const msg = (reason) => resolvePanelMessage(data, reason, ctx);
+
     if (!creatorId || !placeId) {
-        return res.status(400).json({ allowed: false, reason: 'missing_ids', message: 'Missing creatorId or placeId' });
+        return res.status(400).json({ allowed: false, reason: 'missing_ids', message: msg('missing_ids') });
     }
 
-    // Hebrew panel messages — clear, multi-line, premium feel
-    const MSG = {
-        maintenance: 'המערכת בתחזוקה כרגע\nהגישה נחסמה זמנית\nנחזור בקרוב',
-        invalid_key: 'מפתח הרישיון אינו תקין\nהגישה נדחתה',
-        key_frozen: 'מפתח הרישיון הוקפא\nהשימוש במפתח זה נחסם\nפנה למנהל המערכת',
-        entity_frozen: 'הגישה לישות זו הוקפאה\nהמוצר נעול כרגע\nפנה למנהל לקבלת סיוע',
-        tag_frozen: 'רישיון המוצר הוקפא\nהטאג של מוצר זה נעול\nאין גישה עד להפשרה',
-        tag_expired: 'תוקף הרישיון פג\nהגישה למוצר זה הסתיימה\nיש לחדש את הרישיון',
-        pending: 'הבקשה ממתינה לאישור\nהגישה טרם אושרה\nנעדכן כשיתאפשר',
-        not_whitelisted: 'אין הרשאה למקום זה\nהמוצר אינו ברשימת המורשים\nפנה למנהל לקבלת גישה'
-    };
-
     if (data.maintenanceMode) {
-        return deny('maintenance', MSG.maintenance);
+        return deny('maintenance', msg('maintenance'));
     }
 
     if (licenseKey) {
         const keyObj = data.keys.find(k => k.key === licenseKey);
         if (!keyObj) {
-            return deny('invalid_key', MSG.invalid_key);
+            return deny('invalid_key', msg('invalid_key'));
         }
         if (keyObj.frozen) {
-            return deny('key_frozen', MSG.key_frozen);
+            return deny('key_frozen', msg('key_frozen'));
         }
     }
 
@@ -723,16 +755,16 @@ app.post('/api/verify', async (req, res) => {
     // Detailed access check — returns { ok, reason, message }
     const evalEntity = (item) => {
         if (!item) return { ok: false };
-        if (item.frozen) return { ok: false, reason: 'entity_frozen', message: MSG.entity_frozen };
+        if (item.frozen) return { ok: false, reason: 'entity_frozen', message: msg('entity_frozen') };
         if (entityHasAllAccess(item, data)) return { ok: true, reason: 'all_access' };
         if (!licenseKey) return { ok: true, reason: 'no_key_required' };
         if (item.assignedKey === licenseKey) return { ok: true };
         if (item.keys && Array.isArray(item.keys)) {
             const match = item.keys.find(k => k.key === licenseKey);
             if (match) {
-                if (match.frozen) return { ok: false, reason: 'tag_frozen', message: MSG.tag_frozen };
+                if (match.frozen) return { ok: false, reason: 'tag_frozen', message: msg('tag_frozen') };
                 if (match.expiresAt && match.expiresAt <= now) {
-                    return { ok: false, reason: 'tag_expired', message: MSG.tag_expired };
+                    return { ok: false, reason: 'tag_expired', message: msg('tag_expired') };
                 }
                 return { ok: true };
             }
@@ -779,7 +811,7 @@ app.post('/api/verify', async (req, res) => {
         for (const p of (data.whitelist.places || [])) {
             if (p.id !== Number(placeId) || !p.keys) continue;
             const m = p.keys.find(k => k.key === licenseKey);
-            if (m && m.frozen) return deny('tag_frozen', MSG.tag_frozen);
+            if (m && m.frozen) return deny('tag_frozen', msg('tag_frozen'));
         }
         for (const c of (data.whitelist.creators || [])) {
             let matches = c.id === Number(creatorId);
@@ -791,7 +823,7 @@ app.post('/api/verify', async (req, res) => {
             }
             if (!matches || !c.keys) continue;
             const m = c.keys.find(k => k.key === licenseKey);
-            if (m && m.frozen) return deny('tag_frozen', MSG.tag_frozen);
+            if (m && m.frozen) return deny('tag_frozen', msg('tag_frozen'));
         }
     }
 
@@ -808,10 +840,10 @@ app.post('/api/verify', async (req, res) => {
             });
             await safeSave();
         }
-        return deny('pending', MSG.pending);
+        return deny('pending', msg('pending'));
     }
 
-    return deny('not_whitelisted', MSG.not_whitelisted);
+    return deny('not_whitelisted', msg('not_whitelisted'));
 });
 
 app.get('/', checkAuth, (req, res) => {
@@ -896,6 +928,7 @@ app.get('/', checkAuth, (req, res) => {
                 <div class="header-actions">
                     <span style="font-size:12px;color:#94a3b8;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${req.session.userEmail}">${req.session.userEmail}</span>
                     ${isOwner ? `<button type="button" id="maint-btn" class="hdr-btn ${maintenanceOn ? 'btn-maint-on' : 'btn-maint-off'}" onclick="toggleMaintenance()">${maintenanceOn ? '🛠️ Maintenance ON' : '🛠️ Maintenance'}</button>` : ''}
+                    <a href="/messages" class="btn-obfuscate-page" style="background:#f59e0b;border-color:#d97706;">💬 Messages</a>
                     <a href="/obfuscate" class="btn-obfuscate-page">🔒 Obfuscate</a>
                     <a href="/force-save" class="btn-save-db">💾 Save</a>
                     <a href="/force-load" class="btn-load-db">📂 Load</a>
@@ -1468,6 +1501,213 @@ app.get('/', checkAuth, (req, res) => {
     `);
 });
 
+app.get('/messages', checkAuth, (req, res) => {
+    const data = db.getData();
+    const msgs = getPanelMessages(data);
+    const customs = data.customPanelMessages || [];
+    const reasonMeta = [
+        { key: 'maintenance', label: 'Maintenance mode' },
+        { key: 'invalid_key', label: 'Invalid license key' },
+        { key: 'key_frozen', label: 'System key frozen' },
+        { key: 'entity_frozen', label: 'Place / Creator frozen' },
+        { key: 'tag_frozen', label: 'Tag frozen on entity' },
+        { key: 'tag_expired', label: 'Tag / license expired' },
+        { key: 'pending', label: 'Pending approval' },
+        { key: 'not_whitelisted', label: 'Not authorized' },
+        { key: 'missing_ids', label: 'Missing IDs (rare)' }
+    ];
+    const reasonFields = reasonMeta.map(r => `
+        <div class="msg-row">
+            <label>${r.label} <span class="code">(${r.key})</span></label>
+            <textarea name="msg_${r.key}" rows="3" placeholder="${DEFAULT_PANEL_MESSAGES[r.key].replace(/"/g, '&quot;')}">${(msgs[r.key] || '').replace(/</g, '&lt;')}</textarea>
+        </div>
+    `).join('');
+    const customRows = customs.map((c, i) => `
+        <tr>
+            <td><span class="badge">${c.scope}</span></td>
+            <td><code>${String(c.target || '').replace(/</g, '&lt;')}</code></td>
+            <td style="white-space:pre-wrap;max-width:320px;">${String(c.message || '').replace(/</g, '&lt;')}</td>
+            <td><button type="button" class="btn-del" onclick="deleteCustom(${i})">×</button></td>
+        </tr>
+    `).join('') || '<tr><td colspan="4" style="color:#64748b;text-align:center;">No personal messages yet</td></tr>';
+
+    res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Panel Messages</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#0b0f19;color:#f1f5f9;margin:0;padding:30px;}
+.container{max-width:900px;margin:0 auto;}
+.header{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #1e293b;padding-bottom:15px;margin-bottom:25px;flex-wrap:wrap;gap:10px;}
+h1{font-size:22px;color:#f59e0b;margin:0;}
+.card{background:#111827;padding:20px;border-radius:10px;border:1px solid #1e293b;margin-bottom:20px;}
+h3{margin:0 0 12px;color:#e2e8f0;font-size:16px;}
+.msg-row{margin-bottom:14px;}
+.msg-row label{display:block;font-size:13px;color:#94a3b8;margin-bottom:6px;}
+.msg-row .code{color:#64748b;font-size:11px;}
+textarea,input,select{width:100%;padding:10px;background:#1f2937;border:1px solid #374151;border-radius:6px;color:#f1f5f9;box-sizing:border-box;font-family:inherit;}
+textarea{resize:vertical;min-height:70px;}
+.btn-save{background:#10b981;border:none;color:white;padding:12px 20px;border-radius:6px;font-weight:bold;cursor:pointer;width:100%;}
+.btn-save:hover{background:#059669;}
+.btn-back{background:#1f2937;color:#94a3b8;padding:8px 14px;border-radius:6px;text-decoration:none;font-weight:bold;border:1px solid #374151;}
+.btn-add{background:#0284c7;border:none;color:white;padding:10px 14px;border-radius:6px;font-weight:bold;cursor:pointer;margin-top:8px;}
+.btn-del{background:#f43f5e;border:none;color:white;width:32px;height:32px;border-radius:6px;cursor:pointer;font-weight:bold;}
+table{width:100%;border-collapse:collapse;font-size:13px;}
+th,td{padding:8px;border-bottom:1px solid #1e293b;text-align:left;}
+.badge{background:#1e293b;color:#38bdf8;padding:2px 8px;border-radius:4px;font-size:11px;text-transform:uppercase;}
+.hint{font-size:12px;color:#64748b;margin-bottom:12px;line-height:1.5;}
+.grid-3{display:grid;grid-template-columns:1fr 1fr 2fr;gap:8px;}
+@media(max-width:700px){.grid-3{grid-template-columns:1fr;}}
+.status{margin-top:10px;font-size:13px;color:#10b981;display:none;}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>💬 Panel Error Messages</h1>
+    <a href="/" class="btn-back">⬅️ Dashboard</a>
+  </div>
+
+  <div class="card">
+    <h3>Default messages by reason</h3>
+    <p class="hint">These appear on Roblox panels when access is denied. Use new lines for multi-line text. Leave blank to keep the built-in default.</p>
+    <form id="defaults-form">
+      ${reasonFields}
+      <button type="submit" class="btn-save">💾 Save default messages</button>
+      <div class="status" id="defaults-status">Saved!</div>
+    </form>
+  </div>
+
+  <div class="card">
+    <h3>Personal messages</h3>
+    <p class="hint">Override the message for a specific <b>key</b>, <b>place ID</b>, or <b>creator ID</b>. Personal rules win over defaults.<br>
+    Example: scope = key, target = <code>Bots</code> → only that tag shows your custom text.</p>
+    <div class="grid-3">
+      <div>
+        <label style="font-size:12px;color:#94a3b8;">Scope</label>
+        <select id="c-scope">
+          <option value="key">Key / Tag</option>
+          <option value="place">Place ID</option>
+          <option value="creator">Creator ID</option>
+        </select>
+      </div>
+      <div>
+        <label style="font-size:12px;color:#94a3b8;">Target</label>
+        <input id="c-target" placeholder="e.g. Bots or 123456">
+      </div>
+      <div>
+        <label style="font-size:12px;color:#94a3b8;">Message</label>
+        <input id="c-message" placeholder="Custom panel text...">
+      </div>
+    </div>
+    <button type="button" class="btn-add" onclick="addCustom()">➕ Add personal message</button>
+    <div class="status" id="custom-status">Saved!</div>
+    <table style="margin-top:16px;">
+      <thead><tr><th>Scope</th><th>Target</th><th>Message</th><th></th></tr></thead>
+      <tbody id="custom-body">${customRows}</tbody>
+    </table>
+  </div>
+</div>
+<script>
+let customs = ${JSON.stringify(customs)};
+
+document.getElementById('defaults-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const panelMessages = {};
+  for (const [k, v] of fd.entries()) {
+    if (k.startsWith('msg_')) panelMessages[k.slice(4)] = v;
+  }
+  const res = await fetch('/messages/save-defaults', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ panelMessages })
+  });
+  if (res.ok) {
+    const s = document.getElementById('defaults-status');
+    s.style.display = 'block';
+    setTimeout(() => s.style.display = 'none', 2000);
+  }
+});
+
+async function persistCustoms() {
+  await fetch('/messages/save-customs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ customPanelMessages: customs })
+  });
+  const s = document.getElementById('custom-status');
+  s.style.display = 'block';
+  setTimeout(() => s.style.display = 'none', 2000);
+  renderCustoms();
+}
+
+function renderCustoms() {
+  const body = document.getElementById('custom-body');
+  if (!customs.length) {
+    body.innerHTML = '<tr><td colspan="4" style="color:#64748b;text-align:center;">No personal messages yet</td></tr>';
+    return;
+  }
+  body.innerHTML = customs.map((c, i) =>
+    '<tr><td><span class="badge">' + c.scope + '</span></td><td><code>' +
+    String(c.target).replace(/</g,'&lt;') + '</code></td><td style="white-space:pre-wrap;max-width:320px;">' +
+    String(c.message).replace(/</g,'&lt;') + '</td><td><button type="button" class="btn-del" onclick="deleteCustom(' + i + ')">×</button></td></tr>'
+  ).join('');
+}
+
+async function addCustom() {
+  const scope = document.getElementById('c-scope').value;
+  const target = document.getElementById('c-target').value.trim();
+  const message = document.getElementById('c-message').value.trim();
+  if (!target || !message) { alert('Target and message are required'); return; }
+  // replace existing same scope+target
+  customs = customs.filter(c => !(c.scope === scope && String(c.target) === target));
+  customs.push({ id: Date.now().toString(36), scope, target, message });
+  document.getElementById('c-target').value = '';
+  document.getElementById('c-message').value = '';
+  await persistCustoms();
+}
+
+async function deleteCustom(i) {
+  customs.splice(i, 1);
+  await persistCustoms();
+}
+</script>
+</body>
+</html>`);
+});
+
+app.post('/messages/save-defaults', checkAuth, async (req, res) => {
+    const data = db.getData();
+    const incoming = req.body.panelMessages || {};
+    data.panelMessages = data.panelMessages || {};
+    for (const k of Object.keys(DEFAULT_PANEL_MESSAGES)) {
+        if (typeof incoming[k] === 'string') {
+            data.panelMessages[k] = incoming[k];
+        }
+    }
+    await safeSave();
+    await saveActionLogInternal(req.session.userEmail, 'Update Panel Messages', 'Saved default panel messages');
+    res.json({ ok: true });
+});
+
+app.post('/messages/save-customs', checkAuth, async (req, res) => {
+    const data = db.getData();
+    const list = Array.isArray(req.body.customPanelMessages) ? req.body.customPanelMessages : [];
+    data.customPanelMessages = list
+        .filter(c => c && c.scope && c.target && c.message)
+        .map(c => ({
+            id: c.id || Date.now().toString(36),
+            scope: ['key', 'place', 'creator'].includes(c.scope) ? c.scope : 'key',
+            target: String(c.target).trim(),
+            message: String(c.message)
+        }));
+    await safeSave();
+    await saveActionLogInternal(req.session.userEmail, 'Update Custom Panel Messages', `${data.customPanelMessages.length} personal rules`);
+    res.json({ ok: true });
+});
+
 app.get('/obfuscate', checkAuth, (req, res) => {
     const data = db.getData();
     const keyOptions = data.keys.map(k => `<option value="${k.key}">${k.key} ${k.isLocked ? '(🔒 Locked)' : ''}</option>`).join('');
@@ -1614,7 +1854,7 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
                 if not fontOk then
                     TextLabel.Font = Enum.Font.SourceSansBold
                 end
-                TextLabel.Text = tostring(msg or "הגישה נדחתה")
+                TextLabel.Text = tostring(msg or "Access denied")
                 TextLabel.TextColor3 = Color3.fromRGB(255, 90, 90)
                 TextLabel.TextScaled = true
                 TextLabel.TextWrapped = true
@@ -1632,7 +1872,7 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
         if status == "DESTROY" then
             return
         elseif status == "DENIED" then
-            showPanelError(errMsg or "הגישה נדחתה")
+            showPanelError(errMsg or "Access denied")
             script.Enabled = false
             return
         elseif status == "ALLOWED" then
@@ -1672,7 +1912,7 @@ ${panelErrorFn}
         if decodeSuccess and data and data.allowed then
             return "ALLOWED", nil
         else
-            local msg = "הגישה נדחתה"
+            local msg = "Access denied"
             if decodeSuccess and data then
                 if type(data.message) == "string" and data.message ~= "" then
                     msg = data.message
