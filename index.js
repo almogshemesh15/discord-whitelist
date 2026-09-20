@@ -292,31 +292,33 @@ const DEFAULT_PANEL_MESSAGES_HE = {
     missing_ids: 'חסרים מזהים (creatorId / placeId).'
 };
 
+/**
+ * Resolve panel messages for a language.
+ * Hebrew is resolved LIVE by reason key (DEFAULT_PANEL_MESSAGES_HE) —
+ * nothing is snapshotted when assigning a user language.
+ * English uses defaults + admin overrides from panelMessages.
+ */
 function getPanelMessages(data, lang) {
-    const useHe = lang === 'he';
-    const base = useHe ? DEFAULT_PANEL_MESSAGES_HE : DEFAULT_PANEL_MESSAGES;
-    const out = { ...base };
-    // Custom default overrides (stored in English) apply only for English users
-    if (!useHe) {
-        const stored = (data && data.panelMessages) || {};
-        for (const k of Object.keys(DEFAULT_PANEL_MESSAGES)) {
-            if (typeof stored[k] === 'string' && stored[k].trim()) out[k] = stored[k];
-        }
-    } else {
-        // Optional: if admin saved Hebrew overrides under panelMessagesHe
-        const storedHe = (data && data.panelMessagesHe) || {};
-        for (const k of Object.keys(DEFAULT_PANEL_MESSAGES_HE)) {
-            if (typeof storedHe[k] === 'string' && storedHe[k].trim()) out[k] = storedHe[k];
-        }
+    const stored = (data && data.panelMessages) || {};
+    if (lang === 'he') {
+        return { ...DEFAULT_PANEL_MESSAGES_HE };
+    }
+    const out = { ...DEFAULT_PANEL_MESSAGES };
+    for (const k of Object.keys(DEFAULT_PANEL_MESSAGES)) {
+        if (typeof stored[k] === 'string' && stored[k].trim()) out[k] = stored[k];
     }
     return out;
 }
 
+/** userPanelLang entry: "he" | "en" | { lang, name } */
 function getUserPanelLang(data, creatorId) {
     if (creatorId == null) return 'en';
     const map = (data && data.userPanelLang) || {};
-    const lang = map[String(creatorId)];
-    return lang === 'he' ? 'he' : 'en';
+    const entry = map[String(creatorId)];
+    if (!entry) return 'en';
+    if (typeof entry === 'string') return entry === 'he' ? 'he' : 'en';
+    if (entry && typeof entry === 'object') return entry.lang === 'he' ? 'he' : 'en';
+    return 'en';
 }
 
 function entityHasFrozenAllTag(item, data) {
@@ -2173,6 +2175,14 @@ async function deleteCustom(i) {
   await persistCustoms();
 }
 
+function formatUserLangLabel(id, entry) {
+  const lang = (typeof entry === 'string') ? entry : (entry && entry.lang);
+  const name = (typeof entry === 'object' && entry && entry.name) ? entry.name : null;
+  const display = name ? (name + ' (' + id + ')') : String(id);
+  const langLabel = lang === 'he' ? 'עברית' : 'English';
+  return { display, langLabel };
+}
+
 function renderUserLang() {
   const body = document.getElementById('ul-body');
   const entries = Object.entries(userPanelLang || {});
@@ -2180,10 +2190,11 @@ function renderUserLang() {
     body.innerHTML = '<tr><td colspan="3" style="color:#64748b;text-align:center;">${tr('noUserLang')}</td></tr>';
     return;
   }
-  body.innerHTML = entries.map(([id, lang]) =>
-    '<tr><td><code>' + id + '</code></td><td>' + (lang === 'he' ? 'עברית' : 'English') +
-    '</td><td><button type="button" class="btn-del" onclick="deleteUserLang(\\'' + id + '\\')">×</button></td></tr>'
-  ).join('');
+  body.innerHTML = entries.map(([id, entry]) => {
+    const { display, langLabel } = formatUserLangLabel(id, entry);
+    return '<tr><td><code>' + display.replace(/</g,'&lt;') + '</code></td><td>' + langLabel +
+      '</td><td><button type="button" class="btn-del" onclick="deleteUserLang(\\'' + id + '\\')">×</button></td></tr>';
+  }).join('');
 }
 renderUserLang();
 
@@ -2192,29 +2203,40 @@ async function saveUserLang() {
   const lang = document.getElementById('ul-lang').value === 'he' ? 'he' : 'en';
   const status = document.getElementById('ul-status');
   if (!target) { alert('Target required'); return; }
-  // Resolve to numeric id
   let id = null;
+  let name = null;
   const m = target.match(/\\((\\d+)\\)\\s*$/);
-  if (m) id = m[1];
-  else if (/^\\d+$/.test(target)) id = target;
-  else {
+  if (m) {
+    id = m[1];
+    name = target.replace(/\\s*\\(\\d+\\)\\s*$/, '').trim() || null;
+  } else if (/^\\d+$/.test(target)) {
+    id = target;
+    try {
+      const r2 = await fetch('/api/lookup-userid?id=' + encodeURIComponent(id));
+      const d2 = await r2.json();
+      if (d2.ok) name = d2.name;
+    } catch (e) {}
+  } else {
     status.textContent = 'Resolving...';
     try {
       const res = await fetch('/api/lookup-username?username=' + encodeURIComponent(target));
       const data = await res.json();
       if (!data.ok) { status.textContent = data.error || 'Not found'; return; }
       id = String(data.id);
-      target = data.name + ' (' + data.id + ')';
-      document.getElementById('ul-target').value = target;
+      name = data.name;
+      document.getElementById('ul-target').value = name + ' (' + id + ')';
     } catch (e) { status.textContent = 'Lookup failed'; return; }
   }
-  userPanelLang[id] = lang;
+  // Only store language preference + display name — never a translated message snapshot
+  userPanelLang[id] = { lang, name: name || null };
   await fetch('/messages/save-user-lang', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ userPanelLang })
   });
-  status.innerHTML = 'Saved for <strong style="color:#38bdf8;">' + id + '</strong> → ' + (lang === 'he' ? 'עברית' : 'English');
+  const label = name ? (name + ' (' + id + ')') : id;
+  status.innerHTML = 'Saved for <strong style="color:#38bdf8;">' + label + '</strong> → ' + (lang === 'he' ? 'עברית' : 'English') +
+    '<br><span style="color:#64748b;">Messages are translated live (not saved as a copy).</span>';
   document.getElementById('ul-target').value = '';
   renderUserLang();
 }
@@ -2276,10 +2298,18 @@ app.post('/messages/save-user-lang', checkAuth, async (req, res) => {
     const data = db.getData();
     const incoming = req.body.userPanelLang || {};
     const cleaned = {};
-    for (const [id, lang] of Object.entries(incoming)) {
+    for (const [id, val] of Object.entries(incoming)) {
         if (!/^\d+$/.test(String(id))) continue;
-        cleaned[String(id)] = lang === 'he' ? 'he' : 'en';
+        if (typeof val === 'string') {
+            cleaned[String(id)] = { lang: val === 'he' ? 'he' : 'en', name: null };
+        } else if (val && typeof val === 'object') {
+            cleaned[String(id)] = {
+                lang: val.lang === 'he' ? 'he' : 'en',
+                name: val.name ? String(val.name).trim() : null
+            };
+        }
     }
+    // Preference only — no translated message text is stored here
     data.userPanelLang = cleaned;
     await safeSave();
     await saveActionLogInternal(req.session.userEmail, 'Update User Panel Languages', `${Object.keys(cleaned).length} users`);
