@@ -1393,6 +1393,7 @@ app.get('/', checkAuth, (req, res) => {
                     <span style="font-size:12px;color:#94a3b8;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${req.session.userEmail}">${req.session.userEmail}</span>
                     ${isOwner ? `<button type="button" id="maint-btn" class="hdr-btn ${maintenanceOn ? 'btn-maint-on' : 'btn-maint-off'}" onclick="toggleMaintenance()">${maintenanceOn ? '🛠️ ' + tr('maintenanceOn') : '🛠️ ' + tr('maintenance')}</button>` : ''}
                     <a href="/messages" class="btn-obfuscate-page" style="background:#f59e0b;border-color:#d97706;">💬 ${tr('messages')}</a>
+                    <a href="/bot" class="btn-obfuscate-page" style="background:#5865F2;border-color:#4752C4;">🤖 Bot</a>
                     <a href="/obfuscate" class="btn-obfuscate-page">🔒 ${tr('obfuscate')}</a>
                     <a href="/force-save" class="btn-save-db">💾 ${tr('save')}</a>
                     <a href="/force-load" class="btn-load-db">📂 ${tr('load')}</a>
@@ -1967,6 +1968,73 @@ app.get('/', checkAuth, (req, res) => {
     `);
 });
 
+app.get('/bot', checkAuth, (req, res) => {
+    let botStatus = { running: false, lastError: 'discord-bot module not loaded' };
+    try {
+        botStatus = require('./discord-bot').status();
+    } catch (e) {
+        botStatus.lastError = e.message || String(e);
+    }
+    const hasToken = !!(process.env.DISCORD_BOT_TOKEN);
+    const owners = process.env.DISCORD_OWNER_IDS || '(not set — all users can run commands)';
+    res.send(`<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><title>Discord Bot</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#0b0f19;color:#f1f5f9;margin:0;padding:30px;}
+.container{max-width:720px;margin:0 auto;}
+.card{background:#111827;border:1px solid #1e293b;border-radius:10px;padding:20px;margin-bottom:16px;}
+h1{color:#5865F2;margin:0 0 12px;}
+code,pre{background:#1f2937;padding:2px 6px;border-radius:4px;}
+.ok{color:#10b981;} .bad{color:#f87171;}
+a{color:#93c5fd;}
+li{margin:6px 0;}
+</style></head><body><div class="container">
+<h1>🤖 Discord Bot</h1>
+<p><a href="/">← Dashboard</a></p>
+<div class="card">
+  <h3>Status</h3>
+  <p>Token env: <strong class="${hasToken ? 'ok' : 'bad'}">${hasToken ? 'set' : 'missing DISCORD_BOT_TOKEN'}</strong></p>
+  <p>Running: <strong class="${botStatus.running ? 'ok' : 'bad'}">${botStatus.running ? 'yes' : 'no'}</strong>
+     ${botStatus.user ? '— ' + botStatus.user : ''}</p>
+  <p>Last error: ${botStatus.lastError ? '<span class="bad">' + String(botStatus.lastError).replace(/</g,'&lt;') + '</span>' : '—'}</p>
+  <p>Owner IDs: <code>${String(owners).replace(/</g,'&lt;')}</code></p>
+</div>
+<div class="card">
+  <h3>How to create the bot</h3>
+  <ol>
+    <li>Open <a href="https://discord.com/developers/applications" target="_blank">Discord Developer Portal</a> → <b>New Application</b></li>
+    <li><b>Bot</b> → Add Bot → <b>Reset Token</b> → copy the token</li>
+    <li><b>OAuth2 → URL Generator</b>: scopes <code>bot</code> + <code>applications.commands</code><br>
+        permissions: Send Messages, Embed Links, Use Application Commands</li>
+    <li>Open the generated URL and invite the bot to your server</li>
+    <li>On Render → Environment:
+      <pre>DISCORD_BOT_TOKEN=your_token_here
+DISCORD_OWNER_IDS=your_discord_user_id
+DISCORD_GUILD_ID=your_server_id</pre>
+      (Guild ID is optional but makes slash commands appear immediately)
+    </li>
+    <li>Install dependency: <code>npm install discord.js</code> then redeploy</li>
+    <li>In Discord type <code>/</code> — commands start with <code>wl-</code></li>
+  </ol>
+</div>
+<div class="card">
+  <h3>Commands</h3>
+  <ul>
+    <li><code>/wl-status</code> — system status</li>
+    <li><code>/wl-pending</code> — pending requests</li>
+    <li><code>/wl-approve place_id key?</code> — approve place</li>
+    <li><code>/wl-reject place_id</code> — reject pending</li>
+    <li><code>/wl-keys</code> — list keys</li>
+    <li><code>/wl-add-key</code> — add key</li>
+    <li><code>/wl-freeze-key</code> — freeze/unfreeze key</li>
+    <li><code>/wl-maintenance on|off</code></li>
+    <li><code>/wl-stats</code> — usage stats</li>
+    <li><code>/wl-lookup</code> — lookup creator/place</li>
+  </ul>
+</div>
+</div></body></html>`);
+});
+
 app.get('/messages', checkAuth, (req, res) => {
     const data = db.getData();
     const lang = getLang(req);
@@ -2206,29 +2274,45 @@ document.getElementById('defaults-form').addEventListener('submit', async (e) =>
 });
 
 async function persistCustoms() {
-  await fetch('/messages/save-customs', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ customPanelMessages: customs })
-  });
-  const s = document.getElementById('custom-status');
-  s.style.display = 'block';
-  setTimeout(() => s.style.display = 'none', 2000);
+  // Update table immediately (don't wait for network)
   renderCustoms();
+  const s = document.getElementById('custom-status');
+  if (s) { s.style.display = 'block'; s.textContent = 'Saving...'; }
+  try {
+    const res = await fetch('/messages/save-customs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ customPanelMessages: customs })
+    });
+    const data = await res.json().catch(function(){ return {}; });
+    if (data && Array.isArray(data.customPanelMessages)) {
+      customs = data.customPanelMessages;
+      renderCustoms();
+    }
+    if (s) { s.textContent = 'Saved'; setTimeout(function(){ s.style.display = 'none'; }, 2000); }
+  } catch (e) {
+    if (s) { s.textContent = 'Save failed — UI updated locally'; s.style.color = '#f87171'; }
+  }
 }
 
 function renderCustoms() {
   const body = document.getElementById('custom-body');
+  if (!body) return;
   if (!customs.length) {
     body.innerHTML = '<tr><td colspan="4" style="color:#64748b;text-align:center;">No personal messages yet</td></tr>';
     return;
   }
-  body.innerHTML = customs.map((c, i) => {
+  body.innerHTML = customs.map(function(c, i) {
     const tagPart = c.tag ? ' + 🔑 ' + String(c.tag).replace(/</g,'&lt;') : '';
     return '<tr><td><span class="badge">' + c.scope + '</span></td><td><code>' +
       String(c.target).replace(/</g,'&lt;') + '</code>' + tagPart + '</td><td style="white-space:pre-wrap;max-width:320px;">' +
-      String(c.message).replace(/</g,'&lt;') + '</td><td><button type="button" class="btn-del" onclick="deleteCustom(' + i + ')">×</button></td></tr>';
+      String(c.message).replace(/</g,'&lt;') + '</td><td><button type="button" class="btn-del" data-custom-del="' + i + '">×</button></td></tr>';
   }).join('');
+  body.querySelectorAll('[data-custom-del]').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      deleteCustom(parseInt(btn.getAttribute('data-custom-del'), 10));
+    });
+  });
 }
 
 async function addCustom() {
@@ -2276,6 +2360,7 @@ async function addCustom() {
 
 async function deleteCustom(i) {
   customs.splice(i, 1);
+  renderCustoms();
   await persistCustoms();
 }
 
@@ -2371,17 +2456,26 @@ async function saveUserLang() {
 
   const bucket = scope === 'place' ? 'places' : 'creators';
   userPanelLang[bucket][String(id)] = { lang: lang, name: name || null };
-  await fetch('/messages/save-user-lang', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ userPanelLang: userPanelLang })
-  });
-  try { await fetch('/messages/clear-translate-cache', { method: 'POST' }); } catch (e) {}
+  renderUserLang();
+  document.getElementById('ul-target').value = '';
   const label = name ? (name + ' (' + id + ')') : id;
   status.innerHTML = 'Saved <span class="badge">' + scope + '</span> <strong style="color:#38bdf8;">' + label +
     '</strong> → ' + (lang === 'he' ? 'עברית' : 'English');
-  document.getElementById('ul-target').value = '';
-  renderUserLang();
+  try {
+    const res = await fetch('/messages/save-user-lang', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userPanelLang: userPanelLang })
+    });
+    const data = await res.json().catch(function(){ return {}; });
+    if (data && data.userPanelLang) {
+      userPanelLang = data.userPanelLang;
+      renderUserLang();
+    }
+  } catch (e) {
+    status.innerHTML += '<br><span style="color:#f87171;">Save failed — shown locally only</span>';
+  }
+  try { await fetch('/messages/clear-translate-cache', { method: 'POST' }); } catch (e) {}
 }
 
 async function deleteUserLang(type, id) {
@@ -2391,12 +2485,19 @@ async function deleteUserLang(type, id) {
   if (userPanelLang[bucket] && userPanelLang[bucket][id] !== undefined) {
     delete userPanelLang[bucket][id];
   }
-  await fetch('/messages/save-user-lang', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ userPanelLang: userPanelLang })
-  });
   renderUserLang();
+  try {
+    const res = await fetch('/messages/save-user-lang', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userPanelLang: userPanelLang })
+    });
+    const data = await res.json().catch(function(){ return {}; });
+    if (data && data.userPanelLang) {
+      userPanelLang = data.userPanelLang;
+      renderUserLang();
+    }
+  } catch (e) {}
 }
 </script>
 </body>
@@ -2441,7 +2542,7 @@ app.post('/messages/save-customs', checkAuth, async (req, res) => {
         .filter(c => c.scope !== 'creator_key' || c.tag);
     await safeSave();
     await saveActionLogInternal(req.session.userEmail, 'Update Custom Panel Messages', `${data.customPanelMessages.length} personal rules`);
-    res.json({ ok: true });
+    res.json({ ok: true, customPanelMessages: data.customPanelMessages });
 });
 
 app.post('/messages/save-user-lang', checkAuth, async (req, res) => {
@@ -3267,5 +3368,12 @@ app.get('/delete/:type/:id', checkAuth, async (req, res) => {
     await saveActionLogInternal(req.session.userEmail, "Remove Whitelist Entity", `Revoked access completely from ${type === 'creators' ? 'Creator' : 'Place'} -> Name/ID: ${targetName} (${id})`);
     res.sendStatus(200);
 });
+
+// Discord bot (separate file — set DISCORD_BOT_TOKEN to enable)
+try {
+    require('./discord-bot').start().catch(e => console.warn('Discord bot:', e.message || e));
+} catch (e) {
+    console.warn('Discord bot not loaded:', e.message || e);
+}
 
 app.listen(PORT, () => {});
