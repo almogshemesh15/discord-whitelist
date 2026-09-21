@@ -15,15 +15,19 @@ process.on('uncaughtException', (err) => {
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+app.set('trust proxy', 1);
+const isProd = !!process.env.RENDER || process.env.NODE_ENV === 'production';
+
 app.use(session({
-    secret: 'secure_whitelist_hub_secret_key',
+    secret: process.env.SESSION_SECRET || 'secure_whitelist_hub_secret_key',
     resave: false,
     saveUninitialized: false,
-    rolling: true, // extends cookie on every request while active
+    rolling: true,
     cookie: {
-        maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days — stay logged in
+        maxAge: 30 * 24 * 60 * 60 * 1000,
         sameSite: 'lax',
-        httpOnly: true
+        httpOnly: true,
+        secure: isProd
     }
 }));
 
@@ -739,53 +743,80 @@ async function saveActionLogInternal(userEmail, action, details) {
     await safeSave();
 }
 
+function sleepMs(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function postDiscordWebhook(payload, label) {
+    for (let attempt = 1; attempt <= 5; attempt++) {
+        try {
+            const res = await axios.post(DISCORD_WEBHOOK_URL, payload, {
+                timeout: 15000,
+                headers: { 'Content-Type': 'application/json' },
+                validateStatus: () => true
+            });
+            if (res.status === 204 || (res.status >= 200 && res.status < 300)) {
+                return true;
+            }
+            if (res.status === 429) {
+                const ra = (res.data && res.data.retry_after) || 2;
+                const waitMs = Math.min(Math.ceil(Number(ra) * 1000) + 300, 12000);
+                console.warn(`Discord ${label} 429 — wait ${waitMs}ms (try ${attempt}/5)`);
+                await sleepMs(waitMs);
+                continue;
+            }
+            console.error(`Discord ${label} failed HTTP ${res.status}:`, typeof res.data === 'string' ? res.data.slice(0, 200) : res.data);
+            return false;
+        } catch (e) {
+            console.error(`Discord ${label} network error:`, e.code || e.message);
+            if (attempt < 5) await sleepMs(1500);
+        }
+    }
+    return false;
+}
+
 async function sendDisconnectLogToDiscord(adminEmail, targetEmail) {
-    try {
-        await axios.post(DISCORD_WEBHOOK_URL, {
-            embeds: [{
-                title: "🚫 Session Disconnected",
-                color: 16007990,
-                fields: [
-                    { name: "🛡️ Admin Account", value: adminEmail, inline: true },
-                    { name: "👤 Disconnected Account", value: targetEmail, inline: true }
-                ],
-                timestamp: new Date()
-            }]
-        });
-    } catch (e) {}
+    await postDiscordWebhook({
+        embeds: [{
+            title: "🚫 Session Disconnected",
+            color: 16007990,
+            fields: [
+                { name: "🛡️ Admin Account", value: String(adminEmail || '—'), inline: true },
+                { name: "👤 Disconnected Account", value: String(targetEmail || '—'), inline: true }
+            ],
+            timestamp: new Date()
+        }]
+    }, 'disconnect');
 }
 
 async function send2FAToDiscord(email, code) {
-    try {
-        await axios.post(DISCORD_WEBHOOK_URL, {
-            embeds: [{
-                title: "🔐 New Login Attempt & 2FA Code",
-                color: 11041015,
-                fields: [
-                    { name: "📧 Email", value: email, inline: true },
-                    { name: "🔢 2FA Code", value: `**${code}**`, inline: true },
-                    { name: "⏱️ Validity", value: "30 Seconds", inline: true }
-                ],
-                timestamp: new Date()
-            }]
-        });
-    } catch (e) {}
+    const ok = await postDiscordWebhook({
+        embeds: [{
+            title: "🔐 New Login Attempt & 2FA Code",
+            color: 11041015,
+            fields: [
+                { name: "📧 Email", value: String(email || '—'), inline: true },
+                { name: "🔢 2FA Code", value: `**${code}**`, inline: true },
+                { name: "⏱️ Validity", value: "90 Seconds", inline: true }
+            ],
+            timestamp: new Date()
+        }]
+    }, '2FA');
+    if (ok) console.log('2FA webhook sent for', email);
+    else console.error('2FA webhook NOT delivered for', email);
+    return ok;
 }
 
 async function sendSuccessLoginToDiscord(email) {
-    try {
-        await axios.post(DISCORD_WEBHOOK_URL, {
-            embeds: [{
-                title: "✅ Successful Login Verified",
-                color: 1049410,
-                fields: [
-                    { name: "📧 Authenticated Email", value: email, inline: true },
-                    { name: "🛡️ Status", value: "Access Granted", inline: true }
-                ],
-                timestamp: new Date()
-            }]
-        });
-    } catch (e) {}
+    await postDiscordWebhook({
+        embeds: [{
+            title: "✅ Successful Login Verified",
+            color: 1049410,
+            fields: [
+                { name: "📧 Authenticated Email", value: String(email || '—'), inline: true },
+                { name: "🛡️ Status", value: "Access Granted", inline: true }
+            ],
+            timestamp: new Date()
+        }]
+    }, 'login');
 }
 
 app.post('/api/session-status', (req, res) => {
@@ -961,7 +992,7 @@ app.get('/auth/google/callback', async (req, res) => {
         
         const numericCode = Math.floor(100000 + Math.random() * 900000).toString();
         req.session.twoFactorCode = numericCode;
-        req.session.twoFactorExpires = Date.now() + 30000;
+        req.session.twoFactorExpires = Date.now() + 90000;
 
         await send2FAToDiscord(userRes.data.email, numericCode);
 
@@ -1086,7 +1117,7 @@ app.get('/resend-2fa', async (req, res) => {
 
     const numericCode = Math.floor(100000 + Math.random() * 900000).toString();
     req.session.twoFactorCode = numericCode;
-    req.session.twoFactorExpires = Date.now() + 30000;
+    req.session.twoFactorExpires = Date.now() + 90000;
 
     await send2FAToDiscord(req.session.userEmail, numericCode);
     res.redirect('/verify-2fa');
@@ -3266,6 +3297,21 @@ app.get('/delete/:type/:id', checkAuth, async (req, res) => {
     await safeSave();
     await saveActionLogInternal(req.session.userEmail, "Remove Whitelist Entity", `Revoked access completely from ${type === 'creators' ? 'Creator' : 'Place'} -> Name/ID: ${targetName} (${id})`);
     res.sendStatus(200);
+});
+
+
+// Open once after deploy: https://YOUR-APP.onrender.com/api/test-webhook
+app.get('/api/test-webhook', async (req, res) => {
+    try {
+        const r = await axios.post(DISCORD_WEBHOOK_URL, {
+            content: '🧪 Test from Render at ' + new Date().toISOString()
+        }, { timeout: 15000, validateStatus: () => true });
+        console.log('test-webhook status', r.status, r.data);
+        res.type('text').send(`Webhook test done. Discord HTTP ${r.status}\\nURL ends with: ...${DISCORD_WEBHOOK_URL.slice(-12)}\\n`);
+    } catch (e) {
+        console.error('test-webhook error', e.message);
+        res.status(500).type('text').send('Failed: ' + (e.message || e));
+    }
 });
 
 app.listen(PORT, () => {});
