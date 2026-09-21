@@ -39,11 +39,22 @@ const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || 'YOUR_GOOGLE_CLIENT_ID';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || 'YOUR_GOOGLE_CLIENT_SECRET';
-const REDIRECT_URI = process.env.RENDER_EXTERNAL_URL
-    ? `${process.env.RENDER_EXTERNAL_URL.replace(/\/$/, '')}/auth/google/callback`
-    : 'http://localhost:3000/auth/google/callback';
+// Prefer explicit redirect URI (must match Google Cloud Console exactly)
+const REDIRECT_URI = (process.env.GOOGLE_REDIRECT_URI
+    || (process.env.RENDER_EXTERNAL_URL
+        ? `${String(process.env.RENDER_EXTERNAL_URL).replace(/\/$/, '')}/auth/google/callback`
+        : 'http://localhost:3000/auth/google/callback')).trim();
 
 const TWO_FA_TTL_MS = 90 * 1000; // 90s — enough time to open Discord
+
+// Prevent double-exchange of the same OAuth code (browser/prefetch → invalid_grant)
+const usedOAuthCodes = new Map(); // code -> timestamp
+setInterval(() => {
+    const cutoff = Date.now() - 10 * 60 * 1000;
+    for (const [c, t] of usedOAuthCodes) {
+        if (t < cutoff) usedOAuthCodes.delete(c);
+    }
+}, 60 * 1000);
 
 function saveSession(req) {
     return new Promise((resolve) => {
