@@ -1,21 +1,33 @@
+const { Pool } = require('pg');
 const axios = require('axios');
-const GOOGLE_SHEET_URL = 'https://script.google.com/macros/s/AKfycbzlYXcPdq5BtPttfrHBC290DK6tzS69fdc95GKwDD8cSbsiZzmkD-rVogxuUeia0HeL/exec';
 
-let data = {
-    whitelist: { creators: [], places: [] },
-    pendingPlaces: [],
-    keys: [],
-    activeSessions: [],
-    logs: [],
-    stats: { total: 0, allowed: 0, denied: 0, byKey: {}, byPlace: {}, recent: [] },
-    maintenanceMode: false,
-    panelMessages: {},
-    customPanelMessages: []
-};
+const DATABASE_URL = process.env.DATABASE_URL || '';
+const GOOGLE_SHEET_URL = process.env.GOOGLE_SHEET_URL || '';
 
+let pool = null;
+
+let data = defaultData();
 let lastLoadOk = false;
 let lastLoadError = null;
 let lastLoadAt = null;
+let saveInFlight = false;
+let saveQueued = false;
+let readyPromise = null;
+
+function defaultData() {
+    return {
+        whitelist: { creators: [], places: [] },
+        pendingPlaces: [],
+        keys: [],
+        activeSessions: [],
+        logs: [],
+        stats: { total: 0, allowed: 0, denied: 0, byKey: {}, byPlace: {}, recent: [] },
+        maintenanceMode: false,
+        panelMessages: {},
+        customPanelMessages: [],
+        userPanelLang: {}
+    };
+}
 
 function ensureStructure(obj) {
     if (!obj || typeof obj !== 'object') return false;
@@ -37,51 +49,8 @@ function ensureStructure(obj) {
     if (typeof obj.maintenanceMode !== 'boolean') obj.maintenanceMode = false;
     if (!obj.panelMessages || typeof obj.panelMessages !== 'object') obj.panelMessages = {};
     if (!Array.isArray(obj.customPanelMessages)) obj.customPanelMessages = [];
+    if (!obj.userPanelLang || typeof obj.userPanelLang !== 'object') obj.userPanelLang = {};
     return true;
-}
-
-/** Google Apps Script often returns a JSON string, double-encoded JSON, or { data: "..." } */
-function parseIncoming(raw) {
-    let payload = raw;
-
-    // Axios may already parse JSON; if not, parse string
-    if (typeof payload === 'string') {
-        const trimmed = payload.trim();
-        if (!trimmed) return null;
-        try {
-            payload = JSON.parse(trimmed);
-        } catch (e) {
-            console.error('parseIncoming: first JSON.parse failed', e.message);
-            return null;
-        }
-    }
-
-    if (!payload || typeof payload !== 'object') return null;
-
-    // Wrapper forms used by some GAS scripts
-    if (typeof payload.data === 'string') {
-        try {
-            const inner = JSON.parse(payload.data);
-            if (inner && typeof inner === 'object') payload = inner;
-        } catch (_) {}
-    } else if (payload.data && typeof payload.data === 'object' && payload.data.whitelist) {
-        payload = payload.data;
-    } else if (payload.result && typeof payload.result === 'object' && payload.result.whitelist) {
-        payload = payload.result;
-    }
-
-    // Still a string after unwrap?
-    if (typeof payload === 'string') {
-        try {
-            payload = JSON.parse(payload);
-        } catch (_) {
-            return null;
-        }
-    }
-
-    if (!payload || typeof payload !== 'object') return null;
-    if (!payload.whitelist) return null;
-    return payload;
 }
 
 function hasMeaningfulData(obj) {
@@ -92,31 +61,131 @@ function hasMeaningfulData(obj) {
     return c + p + k > 0;
 }
 
-async function loadData() {
+function getPool() {
+    if (!DATABASE_URL) return null;
+    if (!pool) {
+        pool = new Pool({
+            connectionString: DATABASE_URL,
+            ssl: DATABASE_URL.includes('localhost') ? false : { rejectUnauthorized: false },
+            max: 3,
+            idleTimeoutMillis: 30000,
+            connectionTimeoutMillis: 15000
+        });
+        pool.on('error', (err) => {
+            console.error('[DB] pool error:', err.message || err);
+        });
+    }
+    return pool;
+}
+
+async function ensureTable(client) {
+    await client.query(`
+        CREATE TABLE IF NOT EXISTS app_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            data JSONB NOT NULL DEFAULT '{}'::jsonb,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+    `);
+}
+
+async function importFromGoogleSheets() {
+    if (!GOOGLE_SHEET_URL) return null;
     try {
+        console.log('[DB] Importing from Google Sheets (one-time)...');
         const res = await axios.get(GOOGLE_SHEET_URL, {
-            timeout: 20000,
-            // Force text so we always control JSON parsing (GAS content-type is inconsistent)
+            timeout: 45000,
             transformResponse: [(body) => body],
             headers: { Accept: 'application/json, text/plain, */*' }
         });
+        let payload = res.data;
+        if (typeof payload === 'string') {
+            payload = JSON.parse(payload.trim());
+        }
+        if (payload && typeof payload.data === 'string') {
+            try { payload = JSON.parse(payload.data); } catch (_) {}
+        } else if (payload && payload.data && payload.data.whitelist) {
+            payload = payload.data;
+        }
+        if (payload && payload.whitelist && hasMeaningfulData(payload)) {
+            ensureStructure(payload);
+            console.log('[DB] Sheets import OK — creators:', payload.whitelist.creators.length,
+                'places:', payload.whitelist.places.length, 'keys:', payload.keys.length);
+            return payload;
+        }
+        console.warn('[DB] Sheets import: no meaningful data');
+        return null;
+    } catch (e) {
+        console.error('[DB] Sheets import failed:', e.message || e);
+        return null;
+    }
+}
 
-        const incoming = parseIncoming(res.data);
-        if (!incoming) {
+async function init() {
+    if (!DATABASE_URL) {
+        lastLoadOk = false;
+        lastLoadError = 'DATABASE_URL not set — data only in memory (will reset on restart!)';
+        console.error('[DB]', lastLoadError);
+        return false;
+    }
+
+    const p = getPool();
+    const client = await p.connect();
+    try {
+        await ensureTable(client);
+        const result = await client.query('SELECT data FROM app_state WHERE id = 1');
+        if (result.rows.length === 0) {
+            // Empty DB — try import from Sheets once, else seed default
+            let seed = await importFromGoogleSheets();
+            if (!seed) seed = defaultData();
+            ensureStructure(seed);
+            await client.query(
+                `INSERT INTO app_state (id, data, updated_at) VALUES (1, $1::jsonb, NOW())
+                 ON CONFLICT (id) DO NOTHING`,
+                [JSON.stringify(seed)]
+            );
+            data = seed;
+            console.log('[DB] Seeded app_state row');
+        } else {
+            const row = result.rows[0].data;
+            const incoming = typeof row === 'string' ? JSON.parse(row) : row;
+            ensureStructure(incoming);
+            data = incoming;
+            console.log('[DB] Loaded — creators:', data.whitelist.creators.length,
+                'places:', data.whitelist.places.length, 'keys:', (data.keys || []).length);
+        }
+        lastLoadOk = true;
+        lastLoadError = null;
+        lastLoadAt = Date.now();
+        return true;
+    } catch (e) {
+        lastLoadOk = false;
+        lastLoadError = e.message || String(e);
+        console.error('[DB] init failed:', lastLoadError);
+        return false;
+    } finally {
+        client.release();
+    }
+}
+
+async function loadData() {
+    if (!DATABASE_URL) return false;
+    try {
+        const p = getPool();
+        const result = await p.query('SELECT data FROM app_state WHERE id = 1');
+        if (!result.rows.length) {
             lastLoadOk = false;
-            lastLoadError = 'Could not parse Google Sheets response (invalid JSON or missing whitelist)';
-            console.error('loadData:', lastLoadError, 'raw type:', typeof res.data,
-                typeof res.data === 'string' ? res.data.slice(0, 120) : '');
+            lastLoadError = 'No app_state row';
             return false;
         }
-
+        const row = result.rows[0].data;
+        const incoming = typeof row === 'string' ? JSON.parse(row) : row;
         ensureStructure(incoming);
 
-        // Never replace healthy local data with an empty remote payload
+        // Never replace healthy memory with empty DB (shouldn't happen, but safe)
         if (!hasMeaningfulData(incoming) && hasMeaningfulData(data)) {
             lastLoadOk = false;
-            lastLoadError = 'Remote data is empty — kept local data';
-            console.warn('loadData: refused to overwrite local data with empty remote payload');
+            lastLoadError = 'DB payload empty — kept memory';
+            console.warn('[DB] refused empty load');
             return false;
         }
 
@@ -124,33 +193,54 @@ async function loadData() {
         lastLoadOk = true;
         lastLoadError = null;
         lastLoadAt = Date.now();
-        console.log('loadData OK — creators:', data.whitelist.creators.length,
-            'places:', data.whitelist.places.length, 'keys:', data.keys.length);
         return true;
     } catch (e) {
         lastLoadOk = false;
         lastLoadError = e.message || String(e);
-        console.error('loadData error:', lastLoadError);
+        console.error('[DB] loadData error:', lastLoadError);
         return false;
     }
 }
 
-async function save() {
-    try {
-        ensureStructure(data);
-        const payload = {
-            action: 'update',
-            data: JSON.stringify(data)
-        };
-        const res = await axios.post(GOOGLE_SHEET_URL, payload, {
-            timeout: 25000,
-            headers: { 'Content-Type': 'application/json' }
-        });
-        console.log('save OK');
-        return true;
-    } catch (e) {
-        console.error('save error:', e.message || e);
+async function persist() {
+    if (!DATABASE_URL) {
+        console.error('[DB] save skipped — no DATABASE_URL');
         return false;
+    }
+    ensureStructure(data);
+    const p = getPool();
+    await p.query(
+        `INSERT INTO app_state (id, data, updated_at)
+         VALUES (1, $1::jsonb, NOW())
+         ON CONFLICT (id) DO UPDATE
+         SET data = EXCLUDED.data, updated_at = NOW()`,
+        [JSON.stringify(data)]
+    );
+    lastLoadAt = Date.now();
+    lastLoadOk = true;
+    lastLoadError = null;
+    return true;
+}
+
+async function save() {
+    if (saveInFlight) {
+        saveQueued = true;
+        return;
+    }
+    saveInFlight = true;
+    try {
+        await persist();
+        // quiet success — uncomment if you want spam: console.log('[DB] save OK');
+    } catch (e) {
+        console.error('[DB] save error:', e.message || e);
+        lastLoadError = e.message || String(e);
+        lastLoadOk = false;
+    } finally {
+        saveInFlight = false;
+    }
+    if (saveQueued) {
+        saveQueued = false;
+        await save();
     }
 }
 
@@ -158,12 +248,12 @@ function checkExpiration() {
     const now = Date.now();
     let changed = false;
 
-    ['creators', 'places'].forEach(type => {
+    ['creators', 'places'].forEach((type) => {
         if (!data.whitelist[type]) return;
-        data.whitelist[type].forEach(item => {
+        data.whitelist[type].forEach((item) => {
             if (item.keys && Array.isArray(item.keys)) {
                 const initialLength = item.keys.length;
-                item.keys = item.keys.filter(k => !k.expiresAt || k.expiresAt > now);
+                item.keys = item.keys.filter((k) => !k.expiresAt || k.expiresAt > now);
                 if (item.keys.length !== initialLength) changed = true;
             }
             if (item.expiresAt && item.expiresAt <= now) {
@@ -176,18 +266,23 @@ function checkExpiration() {
     if (changed) save().catch(() => {});
 }
 
-// Auto-sync from Google Sheets every 60s (less aggressive; less race with saves)
-setInterval(() => {
-    loadData().catch(() => {});
-}, 60000);
-
-// Initial load
-loadData().catch(() => {});
+// Boot
+readyPromise = init().catch((e) => {
+    console.error('[DB] boot error:', e.message || e);
+});
 
 module.exports = {
     getData: () => data,
     save,
     loadData,
     checkExpiration,
-    getLoadStatus: () => ({ lastLoadOk, lastLoadError, lastLoadAt })
+    getLoadStatus: () => ({
+        lastLoadOk,
+        lastLoadError,
+        lastLoadAt,
+        hasDatabaseUrl: !!DATABASE_URL,
+        engine: 'postgres'
+    }),
+    /** Wait until first DB init finished (optional use in index) */
+    ready: () => readyPromise
 };
