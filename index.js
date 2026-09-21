@@ -745,79 +745,92 @@ async function saveActionLogInternal(userEmail, action, details) {
 
 function sleepMs(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-async function postDiscordWebhook(payload, label) {
-    for (let attempt = 1; attempt <= 5; attempt++) {
-        try {
-            const res = await axios.post(DISCORD_WEBHOOK_URL, payload, {
-                timeout: 15000,
-                headers: { 'Content-Type': 'application/json' },
-                validateStatus: () => true
-            });
-            if (res.status === 204 || (res.status >= 200 && res.status < 300)) {
-                return true;
-            }
-            if (res.status === 429) {
-                const ra = (res.data && res.data.retry_after) || 2;
-                const waitMs = Math.min(Math.ceil(Number(ra) * 1000) + 300, 12000);
-                console.warn(`Discord ${label} 429 — wait ${waitMs}ms (try ${attempt}/5)`);
-                await sleepMs(waitMs);
-                continue;
-            }
-            console.error(`Discord ${label} failed HTTP ${res.status}:`, typeof res.data === 'string' ? res.data.slice(0, 200) : res.data);
-            return false;
-        } catch (e) {
-            console.error(`Discord ${label} network error:`, e.code || e.message);
-            if (attempt < 5) await sleepMs(1500);
+// Background queue — never block HTTP (login was hanging on 429 retries)
+let webhookChain = Promise.resolve();
+let webhookCooldownUntil = 0;
+
+function enqueueWebhook(payload, label) {
+    webhookChain = webhookChain.then(async () => {
+        const now = Date.now();
+        if (now < webhookCooldownUntil) {
+            await sleepMs(webhookCooldownUntil - now);
         }
-    }
-    return false;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+                const res = await axios.post(DISCORD_WEBHOOK_URL, payload, {
+                    timeout: 10000,
+                    headers: { 'Content-Type': 'application/json' },
+                    validateStatus: () => true
+                });
+                if (res.status === 204 || (res.status >= 200 && res.status < 300)) {
+                    console.log('Discord ' + label + ' OK');
+                    webhookCooldownUntil = Date.now() + 1500;
+                    return true;
+                }
+                if (res.status === 429) {
+                    const ra = (res.data && res.data.retry_after) != null ? Number(res.data.retry_after) : 8;
+                    const waitMs = Math.min(Math.ceil(ra * 1000) + 500, 30000);
+                    webhookCooldownUntil = Date.now() + waitMs;
+                    console.warn('Discord ' + label + ' 429 — cool down ' + waitMs + 'ms (try ' + attempt + '/3)');
+                    await sleepMs(waitMs);
+                    continue;
+                }
+                console.error('Discord ' + label + ' HTTP ' + res.status);
+                return false;
+            } catch (e) {
+                console.error('Discord ' + label + ' error:', e.code || e.message);
+                await sleepMs(2000);
+            }
+        }
+        console.error('Discord ' + label + ' gave up');
+        return false;
+    }).catch(function () {});
+    return webhookChain;
 }
 
-async function sendDisconnectLogToDiscord(adminEmail, targetEmail) {
-    await postDiscordWebhook({
+function sendDisconnectLogToDiscord(adminEmail, targetEmail) {
+    enqueueWebhook({
         embeds: [{
-            title: "🚫 Session Disconnected",
+            title: "Session Disconnected",
             color: 16007990,
             fields: [
-                { name: "🛡️ Admin Account", value: String(adminEmail || '—'), inline: true },
-                { name: "👤 Disconnected Account", value: String(targetEmail || '—'), inline: true }
+                { name: "Admin Account", value: String(adminEmail || '-'), inline: true },
+                { name: "Disconnected Account", value: String(targetEmail || '-'), inline: true }
             ],
             timestamp: new Date()
         }]
     }, 'disconnect');
 }
 
-async function send2FAToDiscord(email, code) {
-    const ok = await postDiscordWebhook({
+function send2FAToDiscord(email, code) {
+    enqueueWebhook({
         embeds: [{
-            title: "🔐 New Login Attempt & 2FA Code",
+            title: "New Login Attempt & 2FA Code",
             color: 11041015,
             fields: [
-                { name: "📧 Email", value: String(email || '—'), inline: true },
-                { name: "🔢 2FA Code", value: `**${code}**`, inline: true },
-                { name: "⏱️ Validity", value: "90 Seconds", inline: true }
+                { name: "Email", value: String(email || '-'), inline: true },
+                { name: "2FA Code", value: "**" + code + "**", inline: true },
+                { name: "Validity", value: "90 Seconds", inline: true }
             ],
             timestamp: new Date()
         }]
     }, '2FA');
-    if (ok) console.log('2FA webhook sent for', email);
-    else console.error('2FA webhook NOT delivered for', email);
-    return ok;
 }
 
-async function sendSuccessLoginToDiscord(email) {
-    await postDiscordWebhook({
+function sendSuccessLoginToDiscord(email) {
+    enqueueWebhook({
         embeds: [{
-            title: "✅ Successful Login Verified",
+            title: "Successful Login Verified",
             color: 1049410,
             fields: [
-                { name: "📧 Authenticated Email", value: String(email || '—'), inline: true },
-                { name: "🛡️ Status", value: "Access Granted", inline: true }
+                { name: "Authenticated Email", value: String(email || '-'), inline: true },
+                { name: "Status", value: "Access Granted", inline: true }
             ],
             timestamp: new Date()
         }]
     }, 'login');
 }
+
 
 app.post('/api/session-status', (req, res) => {
     if (!req.session.isAuthenticated || !req.session.is2FAVerified) {
@@ -974,31 +987,47 @@ app.get('/auth/google/callback', async (req, res) => {
     if (!code) return res.redirect('/login');
 
     try {
-        const tokenRes = await axios.post('https://oauth2.googleapis.com/token', {
-            code,
+        const body = new URLSearchParams({
+            code: String(code),
             client_id: GOOGLE_CLIENT_ID,
             client_secret: GOOGLE_CLIENT_SECRET,
             redirect_uri: REDIRECT_URI,
             grant_type: 'authorization_code'
         });
+        const tokenRes = await axios.post(
+            'https://oauth2.googleapis.com/token',
+            body.toString(),
+            { timeout: 15000, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+        );
 
         const { access_token } = tokenRes.data;
         const userRes = await axios.get('https://www.googleapis.com/oauth2/v2/userinfo', {
-            headers: { Authorization: `Bearer ${access_token}` }
+            headers: { Authorization: 'Bearer ' + access_token },
+            timeout: 10000
         });
 
         req.session.isAuthenticated = true;
+        req.session.is2FAVerified = false;
         req.session.userEmail = userRes.data.email;
-        
+
         const numericCode = Math.floor(100000 + Math.random() * 900000).toString();
         req.session.twoFactorCode = numericCode;
         req.session.twoFactorExpires = Date.now() + 90000;
 
-        await send2FAToDiscord(userRes.data.email, numericCode);
+        await new Promise(function (resolve) {
+            req.session.save(function (err) {
+                if (err) console.error('session.save', err.message || err);
+                resolve();
+            });
+        });
 
-        res.redirect('/verify-2fa');
+        // Do NOT await Discord — 429 retries were freezing the Google login page
+        send2FAToDiscord(userRes.data.email, numericCode);
+
+        return res.redirect('/verify-2fa');
     } catch (e) {
-        res.redirect('/login');
+        console.error('Google OAuth error:', e.response && e.response.data || e.message || e);
+        return res.redirect('/login');
     }
 });
 
@@ -1119,8 +1148,8 @@ app.get('/resend-2fa', async (req, res) => {
     req.session.twoFactorCode = numericCode;
     req.session.twoFactorExpires = Date.now() + 90000;
 
-    await send2FAToDiscord(req.session.userEmail, numericCode);
-    res.redirect('/verify-2fa');
+    send2FAToDiscord(req.session.userEmail, numericCode);
+    return res.redirect('/verify-2fa');
 });
 
 app.get('/set-lang/:lang', (req, res) => {
