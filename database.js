@@ -16,6 +16,16 @@ let data = {
 let lastLoadOk = false;
 let lastLoadError = null;
 let lastLoadAt = null;
+let consecutiveFailures = 0;
+let loadInFlight = false;
+let lastLoggedOkAt = 0;
+
+// How often to pull from Google (ms). GAS is slow/flaky — don't hammer it.
+const LOAD_INTERVAL_MS = 3 * 60 * 1000; // 3 minutes
+const LOAD_TIMEOUT_MS = 45000;
+// After failures, wait longer before trying again
+const BACKOFF_BASE_MS = 60 * 1000;
+const BACKOFF_MAX_MS = 10 * 60 * 1000;
 
 function ensureStructure(obj) {
     if (!obj || typeof obj !== 'object') return false;
@@ -44,21 +54,20 @@ function ensureStructure(obj) {
 function parseIncoming(raw) {
     let payload = raw;
 
-    // Axios may already parse JSON; if not, parse string
     if (typeof payload === 'string') {
         const trimmed = payload.trim();
         if (!trimmed) return null;
+        // HTML error page from GAS
+        if (trimmed.startsWith('<!') || trimmed.startsWith('<html')) return null;
         try {
             payload = JSON.parse(trimmed);
         } catch (e) {
-            console.error('parseIncoming: first JSON.parse failed', e.message);
             return null;
         }
     }
 
     if (!payload || typeof payload !== 'object') return null;
 
-    // Wrapper forms used by some GAS scripts
     if (typeof payload.data === 'string') {
         try {
             const inner = JSON.parse(payload.data);
@@ -70,7 +79,6 @@ function parseIncoming(raw) {
         payload = payload.result;
     }
 
-    // Still a string after unwrap?
     if (typeof payload === 'string') {
         try {
             payload = JSON.parse(payload);
@@ -92,31 +100,56 @@ function hasMeaningfulData(obj) {
     return c + p + k > 0;
 }
 
-async function loadData() {
+function backoffMs() {
+    if (consecutiveFailures <= 0) return 0;
+    const ms = BACKOFF_BASE_MS * Math.pow(2, Math.min(consecutiveFailures - 1, 4));
+    return Math.min(ms, BACKOFF_MAX_MS);
+}
+
+async function loadData(force) {
+    if (loadInFlight) return false;
+    if (!force && consecutiveFailures > 0) {
+        const wait = backoffMs();
+        if (lastLoadAt && Date.now() - lastLoadAt < wait) {
+            return false; // still in backoff — keep local data, stay quiet
+        }
+    }
+
+    loadInFlight = true;
     try {
         const res = await axios.get(GOOGLE_SHEET_URL, {
-            timeout: 20000,
-            // Force text so we always control JSON parsing (GAS content-type is inconsistent)
+            timeout: LOAD_TIMEOUT_MS,
+            maxRedirects: 5,
             transformResponse: [(body) => body],
-            headers: { Accept: 'application/json, text/plain, */*' }
+            headers: {
+                Accept: 'application/json, text/plain, */*',
+                'Cache-Control': 'no-cache'
+            },
+            // Treat 404/5xx as error without throwing weird shapes
+            validateStatus: (s) => s >= 200 && s < 300
         });
 
         const incoming = parseIncoming(res.data);
         if (!incoming) {
+            consecutiveFailures++;
             lastLoadOk = false;
-            lastLoadError = 'Could not parse Google Sheets response (invalid JSON or missing whitelist)';
-            console.error('loadData:', lastLoadError, 'raw type:', typeof res.data,
-                typeof res.data === 'string' ? res.data.slice(0, 120) : '');
+            lastLoadError = 'Invalid / empty Google Sheets response';
+            // Only log every few failures to avoid spam
+            if (consecutiveFailures <= 2 || consecutiveFailures % 5 === 0) {
+                console.warn('loadData: bad response (kept local data). failures=', consecutiveFailures);
+            }
             return false;
         }
 
         ensureStructure(incoming);
 
-        // Never replace healthy local data with an empty remote payload
         if (!hasMeaningfulData(incoming) && hasMeaningfulData(data)) {
+            consecutiveFailures++;
             lastLoadOk = false;
-            lastLoadError = 'Remote data is empty — kept local data';
-            console.warn('loadData: refused to overwrite local data with empty remote payload');
+            lastLoadError = 'Remote empty — kept local data';
+            if (consecutiveFailures <= 2) {
+                console.warn('loadData: refused empty remote payload');
+            }
             return false;
         }
 
@@ -124,14 +157,42 @@ async function loadData() {
         lastLoadOk = true;
         lastLoadError = null;
         lastLoadAt = Date.now();
-        console.log('loadData OK — creators:', data.whitelist.creators.length,
-            'places:', data.whitelist.places.length, 'keys:', data.keys.length);
+        const wasFailing = consecutiveFailures > 0;
+        consecutiveFailures = 0;
+
+        // Log OK only on recovery or at most once per 10 minutes
+        if (wasFailing || Date.now() - lastLoggedOkAt > 10 * 60 * 1000) {
+            console.log(
+                'loadData OK — creators:', data.whitelist.creators.length,
+                'places:', data.whitelist.places.length,
+                'keys:', data.keys.length
+            );
+            lastLoggedOkAt = Date.now();
+        }
         return true;
     } catch (e) {
+        consecutiveFailures++;
         lastLoadOk = false;
-        lastLoadError = e.message || String(e);
-        console.error('loadData error:', lastLoadError);
+        const status = e.response && e.response.status;
+        const code = e.code;
+        lastLoadError = status
+            ? `HTTP ${status}`
+            : (e.message || String(e));
+
+        // Quiet spam: log first 2 failures, then every 5th
+        if (consecutiveFailures <= 2 || consecutiveFailures % 5 === 0) {
+            if (code === 'ECONNABORTED' || /timeout/i.test(lastLoadError)) {
+                console.warn('loadData: Google timeout (kept local). failures=', consecutiveFailures);
+            } else if (status === 404) {
+                console.warn('loadData: Google 404 — check Apps Script deploy URL. failures=', consecutiveFailures);
+            } else {
+                console.warn('loadData error:', lastLoadError, 'failures=', consecutiveFailures);
+            }
+        }
         return false;
+    } finally {
+        loadInFlight = false;
+        if (!lastLoadAt) lastLoadAt = Date.now();
     }
 }
 
@@ -142,11 +203,11 @@ async function save() {
             action: 'update',
             data: JSON.stringify(data)
         };
-        const res = await axios.post(GOOGLE_SHEET_URL, payload, {
-            timeout: 25000,
+        await axios.post(GOOGLE_SHEET_URL, payload, {
+            timeout: 45000,
+            maxRedirects: 5,
             headers: { 'Content-Type': 'application/json' }
         });
-        console.log('save OK');
         return true;
     } catch (e) {
         console.error('save error:', e.message || e);
@@ -176,18 +237,24 @@ function checkExpiration() {
     if (changed) save().catch(() => {});
 }
 
-// Auto-sync from Google Sheets every 60s (less aggressive; less race with saves)
+// Periodic sync — slow on purpose (GAS is unreliable under load)
 setInterval(() => {
-    loadData().catch(() => {});
-}, 60000);
+    loadData(false).catch(() => {});
+}, LOAD_INTERVAL_MS);
 
 // Initial load
-loadData().catch(() => {});
+loadData(true).catch(() => {});
 
 module.exports = {
     getData: () => data,
     save,
     loadData,
     checkExpiration,
-    getLoadStatus: () => ({ lastLoadOk, lastLoadError, lastLoadAt })
+    getLoadStatus: () => ({
+        lastLoadOk,
+        lastLoadError,
+        lastLoadAt,
+        consecutiveFailures,
+        backoffMs: backoffMs()
+    })
 };
