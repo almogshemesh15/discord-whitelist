@@ -15,56 +15,26 @@ process.on('uncaughtException', (err) => {
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Render sits behind a proxy — required for secure cookies / correct IPs
-app.set('trust proxy', 1);
-
-const isProd = !!process.env.RENDER || process.env.NODE_ENV === 'production';
-
 app.use(session({
-    secret: process.env.SESSION_SECRET || 'secure_whitelist_hub_secret_key',
+    secret: 'secure_whitelist_hub_secret_key',
     resave: false,
     saveUninitialized: false,
-    rolling: true,
+    rolling: true, // extends cookie on every request while active
     cookie: {
-        maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+        maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days — stay logged in
         sameSite: 'lax',
-        httpOnly: true,
-        secure: isProd // HTTPS on Render
+        httpOnly: true
     }
 }));
 
 const PORT = process.env.PORT || 3000;
-// Webhook only (independent of discord-bot.js / DISCORD_BOT_TOKEN)
-const DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/1551695422697898086/OMzoS0L4GsCw4c2S99liw5I1Tur9XTahwnCQAKU_xijSRxXHl8O0f86_R_wmCdL60Eue';
+const DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/1525891693474353183/P3R9fF9qW_S5jSF7F94isfAw_eXHJAEuBxoIAYvI9HdvkxqsWC6ZrayTWwC6dEfA40ch';
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || 'YOUR_GOOGLE_CLIENT_ID';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || 'YOUR_GOOGLE_CLIENT_SECRET';
-// Prefer explicit redirect URI (must match Google Cloud Console exactly)
-const REDIRECT_URI = (process.env.GOOGLE_REDIRECT_URI
-    || (process.env.RENDER_EXTERNAL_URL
-        ? `${String(process.env.RENDER_EXTERNAL_URL).replace(/\/$/, '')}/auth/google/callback`
-        : 'http://localhost:3000/auth/google/callback')).trim();
-
-const TWO_FA_TTL_MS = 90 * 1000; // 90s — enough time to open Discord
-
-// Prevent double-exchange of the same OAuth code (browser/prefetch → invalid_grant)
-const usedOAuthCodes = new Map(); // code -> timestamp
-setInterval(() => {
-    const cutoff = Date.now() - 10 * 60 * 1000;
-    for (const [c, t] of usedOAuthCodes) {
-        if (t < cutoff) usedOAuthCodes.delete(c);
-    }
-}, 60 * 1000);
-
-function saveSession(req) {
-    return new Promise((resolve) => {
-        if (!req.session) return resolve();
-        req.session.save((err) => {
-            if (err) console.error('session.save error:', err.message || err);
-            resolve();
-        });
-    });
-}
+const REDIRECT_URI = process.env.RENDER_EXTERNAL_URL 
+    ? `${process.env.RENDER_EXTERNAL_URL}/auth/google/callback` 
+    : 'http://localhost:3000/auth/google/callback';
 
 let sessionFocusMap = {};
 
@@ -769,88 +739,53 @@ async function saveActionLogInternal(userEmail, action, details) {
     await safeSave();
 }
 
-// --- Discord WEBHOOK (channel notifications) — NOT related to discord-bot.js ---
-function sleepMs(ms) {
-    return new Promise(r => setTimeout(r, ms));
-}
-
-/** Post to Discord webhook; on 429 wait Retry-After and retry (up to maxAttempts) */
-async function postWebhookWithRetry(payload, label, maxAttempts = 6) {
-    let lastErr = null;
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        try {
-            await axios.post(DISCORD_WEBHOOK_URL, payload, {
-                timeout: 12000,
-                headers: { 'Content-Type': 'application/json' }
-            });
-            return true;
-        } catch (e) {
-            lastErr = e;
-            const status = e.response && e.response.status;
-            if (status === 429) {
-                const ra = e.response.headers && (e.response.headers['retry-after'] || e.response.headers['Retry-After']);
-                const bodyRa = e.response.data && e.response.data.retry_after;
-                let waitMs = 2500;
-                if (bodyRa != null) waitMs = Math.ceil(Number(bodyRa) * 1000) + 200;
-                else if (ra != null) waitMs = Math.ceil(Number(ra) * 1000) + 200;
-                waitMs = Math.min(Math.max(waitMs, 1500), 12000);
-                console.warn(`Discord webhook (${label}) 429 — wait ${waitMs}ms (try ${attempt}/${maxAttempts})`);
-                await sleepMs(waitMs);
-                continue;
-            }
-            console.error(`Discord webhook (${label}) failed:`, status || e.code || e.message);
-            return false;
-        }
-    }
-    console.error(`Discord webhook (${label}) failed after retries:`, lastErr && lastErr.response && lastErr.response.status || lastErr && lastErr.message);
-    return false;
-}
-
 async function sendDisconnectLogToDiscord(adminEmail, targetEmail) {
-    await postWebhookWithRetry({
-        embeds: [{
-            title: "🚫 Session Disconnected",
-            color: 16007990,
-            fields: [
-                { name: "🛡️ Admin Account", value: adminEmail, inline: true },
-                { name: "👤 Disconnected Account", value: targetEmail, inline: true }
-            ],
-            timestamp: new Date()
-        }]
-    }, 'disconnect', 3);
+    try {
+        await axios.post(DISCORD_WEBHOOK_URL, {
+            embeds: [{
+                title: "🚫 Session Disconnected",
+                color: 16007990,
+                fields: [
+                    { name: "🛡️ Admin Account", value: adminEmail, inline: true },
+                    { name: "👤 Disconnected Account", value: targetEmail, inline: true }
+                ],
+                timestamp: new Date()
+            }]
+        });
+    } catch (e) {}
 }
 
 async function send2FAToDiscord(email, code) {
-    const ok = await postWebhookWithRetry({
-        embeds: [{
-            title: "🔐 New Login Attempt & 2FA Code",
-            color: 11041015,
-            fields: [
-                { name: "📧 Email", value: email, inline: true },
-                { name: "🔢 2FA Code", value: `**${code}**`, inline: true },
-                { name: "⏱️ Validity", value: "90 Seconds", inline: true }
-            ],
-            timestamp: new Date()
-        }]
-    }, '2FA', 6);
-    if (ok) console.log('2FA webhook sent for', email);
-    else console.error('2FA webhook NOT delivered for', email);
-    return ok;
+    try {
+        await axios.post(DISCORD_WEBHOOK_URL, {
+            embeds: [{
+                title: "🔐 New Login Attempt & 2FA Code",
+                color: 11041015,
+                fields: [
+                    { name: "📧 Email", value: email, inline: true },
+                    { name: "🔢 2FA Code", value: `**${code}**`, inline: true },
+                    { name: "⏱️ Validity", value: "30 Seconds", inline: true }
+                ],
+                timestamp: new Date()
+            }]
+        });
+    } catch (e) {}
 }
 
 async function sendSuccessLoginToDiscord(email) {
-    // fire-and-forget style but still retry a bit — don't block login UX
-    postWebhookWithRetry({
-        embeds: [{
-            title: "✅ Successful Login Verified",
-            color: 1049410,
-            fields: [
-                { name: "📧 Authenticated Email", value: email, inline: true },
-                { name: "🛡️ Status", value: "Access Granted", inline: true }
-            ],
-            timestamp: new Date()
-        }]
-    }, 'login', 3).catch(() => {});
+    try {
+        await axios.post(DISCORD_WEBHOOK_URL, {
+            embeds: [{
+                title: "✅ Successful Login Verified",
+                color: 1049410,
+                fields: [
+                    { name: "📧 Authenticated Email", value: email, inline: true },
+                    { name: "🛡️ Status", value: "Access Granted", inline: true }
+                ],
+                timestamp: new Date()
+            }]
+        });
+    } catch (e) {}
 }
 
 app.post('/api/session-status', (req, res) => {
@@ -975,20 +910,8 @@ app.get('/login', (req, res) => {
     if (req.session.isAuthenticated && req.session.is2FAVerified) {
         return res.redirect('/');
     }
-    const googleAuthUrl =
-        'https://accounts.google.com/o/oauth2/v2/auth'
-        + `?client_id=${encodeURIComponent(GOOGLE_CLIENT_ID)}`
-        + `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}`
-        + '&response_type=code'
-        + '&scope=' + encodeURIComponent('email profile')
-        + '&access_type=online'
-        + '&prompt=select_account'
-        + '&include_granted_scopes=true';
-
-    const errMsg = req.query.error
-        ? `<p style="color:#f87171;font-size:13px;">${String(req.query.error).replace(/</g, '&lt;')}</p>`
-        : '';
-
+    const googleAuthUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${GOOGLE_CLIENT_ID}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&response_type=code&scope=email%20profile`;
+    
     res.send(`
     <!DOCTYPE html>
     <html lang="en">
@@ -1008,7 +931,6 @@ app.get('/login', (req, res) => {
         <div class="login-card">
             <h1>🛡️ Whitelist Hub Access</h1>
             <p>Please authenticate using your Google account to proceed.</p>
-            ${errMsg}
             <a href="${googleAuthUrl}" class="btn-google">Sign in with Google</a>
         </div>
     </body>
@@ -1017,73 +939,35 @@ app.get('/login', (req, res) => {
 });
 
 app.get('/auth/google/callback', async (req, res) => {
-    const { code, error: oauthError } = req.query;
-    if (oauthError) {
-        console.error('Google OAuth denied:', oauthError);
-        return res.redirect('/login?error=' + encodeURIComponent('Google login was cancelled'));
-    }
-    if (!code) return res.redirect('/login?error=' + encodeURIComponent('Missing authorization code'));
-
-    // Same code hit twice (refresh / double request) → invalid_grant
-    if (usedOAuthCodes.has(String(code))) {
-        console.warn('OAuth code already used — ignore duplicate callback');
-        if (req.session && req.session.isAuthenticated) return res.redirect('/verify-2fa');
-        return res.redirect('/login?error=' + encodeURIComponent('Login code already used. Click Sign in again.'));
-    }
-    usedOAuthCodes.set(String(code), Date.now());
+    const { code } = req.query;
+    if (!code) return res.redirect('/login');
 
     try {
-        // Google requires application/x-www-form-urlencoded for token exchange
-        const body = new URLSearchParams({
-            code: String(code),
+        const tokenRes = await axios.post('https://oauth2.googleapis.com/token', {
+            code,
             client_id: GOOGLE_CLIENT_ID,
             client_secret: GOOGLE_CLIENT_SECRET,
             redirect_uri: REDIRECT_URI,
             grant_type: 'authorization_code'
         });
 
-        const tokenRes = await axios.post(
-            'https://oauth2.googleapis.com/token',
-            body.toString(),
-            {
-                timeout: 15000,
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-            }
-        );
-
         const { access_token } = tokenRes.data;
-        if (!access_token) {
-            console.error('Google token response missing access_token:', tokenRes.data);
-            return res.redirect('/login?error=' + encodeURIComponent('No access token from Google'));
-        }
-
         const userRes = await axios.get('https://www.googleapis.com/oauth2/v2/userinfo', {
-            headers: { Authorization: `Bearer ${access_token}` },
-            timeout: 10000
+            headers: { Authorization: `Bearer ${access_token}` }
         });
 
         req.session.isAuthenticated = true;
         req.session.userEmail = userRes.data.email;
-        req.session.is2FAVerified = false;
-
+        
         const numericCode = Math.floor(100000 + Math.random() * 900000).toString();
         req.session.twoFactorCode = numericCode;
-        req.session.twoFactorExpires = Date.now() + TWO_FA_TTL_MS;
-
-        // Persist session BEFORE Discord + redirect (otherwise code is lost on Render)
-        await saveSession(req);
+        req.session.twoFactorExpires = Date.now() + 30000;
 
         await send2FAToDiscord(userRes.data.email, numericCode);
 
-        return res.redirect('/verify-2fa');
+        res.redirect('/verify-2fa');
     } catch (e) {
-        const gErr = e.response && e.response.data;
-        console.error('Google OAuth callback error:', gErr || e.message || e);
-        console.error('OAuth debug — redirect_uri used:', REDIRECT_URI);
-        const msg = (gErr && gErr.error === 'invalid_grant')
-            ? 'Login expired or already used. Click Sign in with Google again.'
-            : 'Google login failed. Try again.';
-        return res.redirect('/login?error=' + encodeURIComponent(msg));
+        res.redirect('/login');
     }
 });
 
@@ -1114,7 +998,7 @@ app.get('/verify-2fa', (req, res) => {
     <body>
         <div class="verify-card">
             <h1>🔐 Two-Factor Authentication</h1>
-            <p>Enter the 6-digit verification code sent to Discord. Code expires in 90 seconds.</p>
+            <p>Enter the 6-digit verification code sent to Discord. Code expires in 30 seconds.</p>
             <form action="/verify-2fa" method="POST" id="verify-form">
                 <input type="text" name="code" id="code-input" maxlength="6" required placeholder="000000" autocomplete="off" inputmode="numeric" pattern="[0-9]*">
                 <button type="submit">Verify & Access</button>
@@ -1172,7 +1056,7 @@ app.post('/verify-2fa', async (req, res) => {
     if (Date.now() > req.session.twoFactorExpires) {
         return res.send(`
             <script>
-                alert('The 2FA code has expired after 90 seconds. Please request a new one.');
+                alert('The 2FA code has expired after 30 seconds. Please request a new one.');
                 window.location.href = '/verify-2fa';
             </script>
         `);
@@ -1202,11 +1086,10 @@ app.get('/resend-2fa', async (req, res) => {
 
     const numericCode = Math.floor(100000 + Math.random() * 900000).toString();
     req.session.twoFactorCode = numericCode;
-    req.session.twoFactorExpires = Date.now() + TWO_FA_TTL_MS;
+    req.session.twoFactorExpires = Date.now() + 30000;
 
-    await saveSession(req);
     await send2FAToDiscord(req.session.userEmail, numericCode);
-    return res.redirect('/verify-2fa');
+    res.redirect('/verify-2fa');
 });
 
 app.get('/set-lang/:lang', (req, res) => {
@@ -1510,7 +1393,6 @@ app.get('/', checkAuth, (req, res) => {
                     <span style="font-size:12px;color:#94a3b8;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${req.session.userEmail}">${req.session.userEmail}</span>
                     ${isOwner ? `<button type="button" id="maint-btn" class="hdr-btn ${maintenanceOn ? 'btn-maint-on' : 'btn-maint-off'}" onclick="toggleMaintenance()">${maintenanceOn ? '🛠️ ' + tr('maintenanceOn') : '🛠️ ' + tr('maintenance')}</button>` : ''}
                     <a href="/messages" class="btn-obfuscate-page" style="background:#f59e0b;border-color:#d97706;">💬 ${tr('messages')}</a>
-                    <a href="/bot" class="btn-obfuscate-page" style="background:#5865F2;border-color:#4752C4;">🤖 Bot</a>
                     <a href="/obfuscate" class="btn-obfuscate-page">🔒 ${tr('obfuscate')}</a>
                     <a href="/force-save" class="btn-save-db">💾 ${tr('save')}</a>
                     <a href="/force-load" class="btn-load-db">📂 ${tr('load')}</a>
@@ -2085,73 +1967,6 @@ app.get('/', checkAuth, (req, res) => {
     `);
 });
 
-app.get('/bot', checkAuth, (req, res) => {
-    let botStatus = { running: false, lastError: 'discord-bot module not loaded' };
-    try {
-        botStatus = require('./discord-bot').status();
-    } catch (e) {
-        botStatus.lastError = e.message || String(e);
-    }
-    const hasToken = !!(process.env.DISCORD_BOT_TOKEN);
-    const owners = process.env.DISCORD_OWNER_IDS || '(not set — all users can run commands)';
-    res.send(`<!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8"><title>Discord Bot</title>
-<style>
-body{font-family:system-ui,sans-serif;background:#0b0f19;color:#f1f5f9;margin:0;padding:30px;}
-.container{max-width:720px;margin:0 auto;}
-.card{background:#111827;border:1px solid #1e293b;border-radius:10px;padding:20px;margin-bottom:16px;}
-h1{color:#5865F2;margin:0 0 12px;}
-code,pre{background:#1f2937;padding:2px 6px;border-radius:4px;}
-.ok{color:#10b981;} .bad{color:#f87171;}
-a{color:#93c5fd;}
-li{margin:6px 0;}
-</style></head><body><div class="container">
-<h1>🤖 Discord Bot</h1>
-<p><a href="/">← Dashboard</a></p>
-<div class="card">
-  <h3>Status</h3>
-  <p>Token env: <strong class="${hasToken ? 'ok' : 'bad'}">${hasToken ? 'set' : 'missing DISCORD_BOT_TOKEN'}</strong></p>
-  <p>Running: <strong class="${botStatus.running ? 'ok' : 'bad'}">${botStatus.running ? 'yes' : 'no'}</strong>
-     ${botStatus.user ? '— ' + botStatus.user : ''}</p>
-  <p>Last error: ${botStatus.lastError ? '<span class="bad">' + String(botStatus.lastError).replace(/</g,'&lt;') + '</span>' : '—'}</p>
-  <p>Owner IDs: <code>${String(owners).replace(/</g,'&lt;')}</code></p>
-</div>
-<div class="card">
-  <h3>How to create the bot</h3>
-  <ol>
-    <li>Open <a href="https://discord.com/developers/applications" target="_blank">Discord Developer Portal</a> → <b>New Application</b></li>
-    <li><b>Bot</b> → Add Bot → <b>Reset Token</b> → copy the token</li>
-    <li><b>OAuth2 → URL Generator</b>: scopes <code>bot</code> + <code>applications.commands</code><br>
-        permissions: Send Messages, Embed Links, Use Application Commands</li>
-    <li>Open the generated URL and invite the bot to your server</li>
-    <li>On Render → Environment:
-      <pre>DISCORD_BOT_TOKEN=your_token_here
-DISCORD_OWNER_IDS=your_discord_user_id
-DISCORD_GUILD_ID=your_server_id</pre>
-      (Guild ID is optional but makes slash commands appear immediately)
-    </li>
-    <li>Install dependency: <code>npm install discord.js</code> then redeploy</li>
-    <li>In Discord type <code>/</code> — commands start with <code>wl-</code></li>
-  </ol>
-</div>
-<div class="card">
-  <h3>Commands</h3>
-  <ul>
-    <li><code>/wl-status</code> — system status</li>
-    <li><code>/wl-pending</code> — pending requests</li>
-    <li><code>/wl-approve place_id key?</code> — approve place</li>
-    <li><code>/wl-reject place_id</code> — reject pending</li>
-    <li><code>/wl-keys</code> — list keys</li>
-    <li><code>/wl-add-key</code> — add key</li>
-    <li><code>/wl-freeze-key</code> — freeze/unfreeze key</li>
-    <li><code>/wl-maintenance on|off</code></li>
-    <li><code>/wl-stats</code> — usage stats</li>
-    <li><code>/wl-lookup</code> — lookup creator/place</li>
-  </ul>
-</div>
-</div></body></html>`);
-});
-
 app.get('/messages', checkAuth, (req, res) => {
     const data = db.getData();
     const lang = getLang(req);
@@ -2391,45 +2206,29 @@ document.getElementById('defaults-form').addEventListener('submit', async (e) =>
 });
 
 async function persistCustoms() {
-  // Update table immediately (don't wait for network)
-  renderCustoms();
+  await fetch('/messages/save-customs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ customPanelMessages: customs })
+  });
   const s = document.getElementById('custom-status');
-  if (s) { s.style.display = 'block'; s.textContent = 'Saving...'; }
-  try {
-    const res = await fetch('/messages/save-customs', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ customPanelMessages: customs })
-    });
-    const data = await res.json().catch(function(){ return {}; });
-    if (data && Array.isArray(data.customPanelMessages)) {
-      customs = data.customPanelMessages;
-      renderCustoms();
-    }
-    if (s) { s.textContent = 'Saved'; setTimeout(function(){ s.style.display = 'none'; }, 2000); }
-  } catch (e) {
-    if (s) { s.textContent = 'Save failed — UI updated locally'; s.style.color = '#f87171'; }
-  }
+  s.style.display = 'block';
+  setTimeout(() => s.style.display = 'none', 2000);
+  renderCustoms();
 }
 
 function renderCustoms() {
   const body = document.getElementById('custom-body');
-  if (!body) return;
   if (!customs.length) {
     body.innerHTML = '<tr><td colspan="4" style="color:#64748b;text-align:center;">No personal messages yet</td></tr>';
     return;
   }
-  body.innerHTML = customs.map(function(c, i) {
+  body.innerHTML = customs.map((c, i) => {
     const tagPart = c.tag ? ' + 🔑 ' + String(c.tag).replace(/</g,'&lt;') : '';
     return '<tr><td><span class="badge">' + c.scope + '</span></td><td><code>' +
       String(c.target).replace(/</g,'&lt;') + '</code>' + tagPart + '</td><td style="white-space:pre-wrap;max-width:320px;">' +
-      String(c.message).replace(/</g,'&lt;') + '</td><td><button type="button" class="btn-del" data-custom-del="' + i + '">×</button></td></tr>';
+      String(c.message).replace(/</g,'&lt;') + '</td><td><button type="button" class="btn-del" onclick="deleteCustom(' + i + ')">×</button></td></tr>';
   }).join('');
-  body.querySelectorAll('[data-custom-del]').forEach(function(btn) {
-    btn.addEventListener('click', function() {
-      deleteCustom(parseInt(btn.getAttribute('data-custom-del'), 10));
-    });
-  });
 }
 
 async function addCustom() {
@@ -2477,7 +2276,6 @@ async function addCustom() {
 
 async function deleteCustom(i) {
   customs.splice(i, 1);
-  renderCustoms();
   await persistCustoms();
 }
 
@@ -2573,26 +2371,17 @@ async function saveUserLang() {
 
   const bucket = scope === 'place' ? 'places' : 'creators';
   userPanelLang[bucket][String(id)] = { lang: lang, name: name || null };
-  renderUserLang();
-  document.getElementById('ul-target').value = '';
+  await fetch('/messages/save-user-lang', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userPanelLang: userPanelLang })
+  });
+  try { await fetch('/messages/clear-translate-cache', { method: 'POST' }); } catch (e) {}
   const label = name ? (name + ' (' + id + ')') : id;
   status.innerHTML = 'Saved <span class="badge">' + scope + '</span> <strong style="color:#38bdf8;">' + label +
     '</strong> → ' + (lang === 'he' ? 'עברית' : 'English');
-  try {
-    const res = await fetch('/messages/save-user-lang', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userPanelLang: userPanelLang })
-    });
-    const data = await res.json().catch(function(){ return {}; });
-    if (data && data.userPanelLang) {
-      userPanelLang = data.userPanelLang;
-      renderUserLang();
-    }
-  } catch (e) {
-    status.innerHTML += '<br><span style="color:#f87171;">Save failed — shown locally only</span>';
-  }
-  try { await fetch('/messages/clear-translate-cache', { method: 'POST' }); } catch (e) {}
+  document.getElementById('ul-target').value = '';
+  renderUserLang();
 }
 
 async function deleteUserLang(type, id) {
@@ -2602,19 +2391,12 @@ async function deleteUserLang(type, id) {
   if (userPanelLang[bucket] && userPanelLang[bucket][id] !== undefined) {
     delete userPanelLang[bucket][id];
   }
+  await fetch('/messages/save-user-lang', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userPanelLang: userPanelLang })
+  });
   renderUserLang();
-  try {
-    const res = await fetch('/messages/save-user-lang', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userPanelLang: userPanelLang })
-    });
-    const data = await res.json().catch(function(){ return {}; });
-    if (data && data.userPanelLang) {
-      userPanelLang = data.userPanelLang;
-      renderUserLang();
-    }
-  } catch (e) {}
 }
 </script>
 </body>
@@ -2659,7 +2441,7 @@ app.post('/messages/save-customs', checkAuth, async (req, res) => {
         .filter(c => c.scope !== 'creator_key' || c.tag);
     await safeSave();
     await saveActionLogInternal(req.session.userEmail, 'Update Custom Panel Messages', `${data.customPanelMessages.length} personal rules`);
-    res.json({ ok: true, customPanelMessages: data.customPanelMessages });
+    res.json({ ok: true });
 });
 
 app.post('/messages/save-user-lang', checkAuth, async (req, res) => {
@@ -3485,12 +3267,5 @@ app.get('/delete/:type/:id', checkAuth, async (req, res) => {
     await saveActionLogInternal(req.session.userEmail, "Remove Whitelist Entity", `Revoked access completely from ${type === 'creators' ? 'Creator' : 'Place'} -> Name/ID: ${targetName} (${id})`);
     res.sendStatus(200);
 });
-
-// Discord bot (separate file — set DISCORD_BOT_TOKEN to enable)
-try {
-    require('./discord-bot').start().catch(e => console.warn('Discord bot:', e.message || e));
-} catch (e) {
-    console.warn('Discord bot not loaded:', e.message || e);
-}
 
 app.listen(PORT, () => {});
