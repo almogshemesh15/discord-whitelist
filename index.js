@@ -745,45 +745,51 @@ async function saveActionLogInternal(userEmail, action, details) {
 
 function sleepMs(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// Background queue — never block HTTP (login was hanging on 429 retries)
+// Background Discord queue. Cloudflare 1015 = IP rate-limit on Render → long cooldown.
 let webhookChain = Promise.resolve();
 let webhookCooldownUntil = 0;
+let lastDiscordOk = true; // false after hard rate-limit
 
 function enqueueWebhook(payload, label) {
     webhookChain = webhookChain.then(async () => {
         const now = Date.now();
         if (now < webhookCooldownUntil) {
-            await sleepMs(webhookCooldownUntil - now);
+            console.warn('Discord ' + label + ' skipped (cooldown ' + Math.ceil((webhookCooldownUntil - now) / 1000) + 's)');
+            return false;
         }
-        for (let attempt = 1; attempt <= 3; attempt++) {
-            try {
-                const res = await axios.post(DISCORD_WEBHOOK_URL, payload, {
-                    timeout: 10000,
-                    headers: { 'Content-Type': 'application/json' },
-                    validateStatus: () => true
-                });
-                if (res.status === 204 || (res.status >= 200 && res.status < 300)) {
-                    console.log('Discord ' + label + ' OK');
-                    webhookCooldownUntil = Date.now() + 1500;
-                    return true;
-                }
-                if (res.status === 429) {
-                    const ra = (res.data && res.data.retry_after) != null ? Number(res.data.retry_after) : 8;
-                    const waitMs = Math.min(Math.ceil(ra * 1000) + 500, 30000);
-                    webhookCooldownUntil = Date.now() + waitMs;
-                    console.warn('Discord ' + label + ' 429 — cool down ' + waitMs + 'ms (try ' + attempt + '/3)');
-                    await sleepMs(waitMs);
-                    continue;
-                }
-                console.error('Discord ' + label + ' HTTP ' + res.status);
-                return false;
-            } catch (e) {
-                console.error('Discord ' + label + ' error:', e.code || e.message);
-                await sleepMs(2000);
+        try {
+            const res = await axios.post(DISCORD_WEBHOOK_URL, payload, {
+                timeout: 10000,
+                headers: { 'Content-Type': 'application/json' },
+                validateStatus: () => true
+            });
+            if (res.status === 204 || (res.status >= 200 && res.status < 300)) {
+                console.log('Discord ' + label + ' OK');
+                lastDiscordOk = true;
+                webhookCooldownUntil = Date.now() + 2000;
+                return true;
             }
+            // Cloudflare 1015 or Discord 429 — cool down hard, do NOT spam
+            if (res.status === 429) {
+                const isCf = !!(res.data && (res.data.cloudflare_error || res.data.error_code === 1015));
+                const ra = (res.data && res.data.retry_after) != null ? Number(res.data.retry_after) : 60;
+                const waitMs = isCf
+                    ? Math.max(5 * 60 * 1000, Math.ceil(ra * 1000)) // 5+ min for CF 1015
+                    : Math.min(Math.ceil(ra * 1000) + 1000, 60000);
+                webhookCooldownUntil = Date.now() + waitMs;
+                lastDiscordOk = false;
+                console.warn('Discord ' + label + ' rate-limited (CF/429). Cooldown ' + Math.ceil(waitMs / 1000) + 's — STOP hitting webhook');
+                return false;
+            }
+            console.error('Discord ' + label + ' HTTP ' + res.status);
+            lastDiscordOk = false;
+            return false;
+        } catch (e) {
+            console.error('Discord ' + label + ' error:', e.code || e.message);
+            lastDiscordOk = false;
+            webhookCooldownUntil = Date.now() + 60000;
+            return false;
         }
-        console.error('Discord ' + label + ' gave up');
-        return false;
     }).catch(function () {});
     return webhookChain;
 }
@@ -803,6 +809,12 @@ function sendDisconnectLogToDiscord(adminEmail, targetEmail) {
 }
 
 function send2FAToDiscord(email, code) {
+    // ALWAYS print to Render logs so you can log in when Discord is blocked
+    console.log('========== 2FA CODE ==========');
+    console.log('Email:', email);
+    console.log('Code:', code);
+    console.log('==============================');
+    if (Date.now() < webhookCooldownUntil) lastDiscordOk = false;
     enqueueWebhook({
         embeds: [{
             title: "New Login Attempt & 2FA Code",
@@ -1036,6 +1048,13 @@ app.get('/verify-2fa', (req, res) => {
     if (req.session.is2FAVerified) return res.redirect('/');
 
     const cooldown = Math.max(0, Math.ceil((req.session.twoFactorExpires - Date.now()) / 1000));
+    const isOwner = req.session.userEmail === OWNER_EMAIL;
+    // Emergency: Discord/Cloudflare rate-limit — show code on page for Owner only
+    const emergencyBlock = (isOwner && (!lastDiscordOk || Date.now() < webhookCooldownUntil))
+        ? '<p style="color:#fbbf24;font-size:13px;margin-bottom:12px;">Discord is rate-limited from Render (Cloudflare 1015).<br>Your code (Owner fallback): <b style="font-size:22px;letter-spacing:4px;color:#fff;">' + String(req.session.twoFactorCode || '') + '</b><br><span style="color:#94a3b8;">Also printed in Render logs.</span></p>'
+        : (isOwner
+            ? '<p style="color:#64748b;font-size:12px;">If Discord is silent, open Render logs and search for \"2FA CODE\".</p>'
+            : '');
 
     res.send(`
     <!DOCTYPE html>
@@ -1058,7 +1077,8 @@ app.get('/verify-2fa', (req, res) => {
     <body>
         <div class="verify-card">
             <h1>🔐 Two-Factor Authentication</h1>
-            <p>Enter the 6-digit verification code sent to Discord. Code expires in 30 seconds.</p>
+            <p>Enter the 6-digit verification code sent to Discord. Code expires in 90 seconds.</p>
+            ${emergencyBlock}
             <form action="/verify-2fa" method="POST" id="verify-form">
                 <input type="text" name="code" id="code-input" maxlength="6" required placeholder="000000" autocomplete="off" inputmode="numeric" pattern="[0-9]*">
                 <button type="submit">Verify & Access</button>
@@ -3329,17 +3349,28 @@ app.get('/delete/:type/:id', checkAuth, async (req, res) => {
 });
 
 
-// Open once after deploy: https://YOUR-APP.onrender.com/api/test-webhook
+// Test webhook — do not spam (Cloudflare 1015 blocks Render IP)
 app.get('/api/test-webhook', async (req, res) => {
+    if (Date.now() < webhookCooldownUntil) {
+        const sec = Math.ceil((webhookCooldownUntil - Date.now()) / 1000);
+        return res.type('text').send('Discord/Cloudflare cooldown active. Wait ' + sec + 's. Do NOT spam.\n');
+    }
     try {
         const r = await axios.post(DISCORD_WEBHOOK_URL, {
-            content: '🧪 Test from Render at ' + new Date().toISOString()
-        }, { timeout: 15000, validateStatus: () => true });
-        console.log('test-webhook status', r.status, r.data);
-        res.type('text').send(`Webhook test done. Discord HTTP ${r.status}\\nURL ends with: ...${DISCORD_WEBHOOK_URL.slice(-12)}\\n`);
+            content: 'Test from Render at ' + new Date().toISOString()
+        }, { timeout: 10000, validateStatus: () => true });
+        if (r.status === 429) {
+            const isCf = !!(r.data && (r.data.cloudflare_error || r.data.error_code === 1015));
+            const waitMs = isCf ? 5 * 60 * 1000 : 60000;
+            webhookCooldownUntil = Date.now() + waitMs;
+            lastDiscordOk = false;
+            return res.type('text').send('Rate limited (HTTP 429). Cooldown ' + Math.ceil(waitMs / 1000) + 's. Stop testing.\n');
+        }
+        lastDiscordOk = (r.status === 204 || (r.status >= 200 && r.status < 300));
+        webhookCooldownUntil = Date.now() + 5000;
+        return res.type('text').send('Webhook test done. Discord HTTP ' + r.status + '\n');
     } catch (e) {
-        console.error('test-webhook error', e.message);
-        res.status(500).type('text').send('Failed: ' + (e.message || e));
+        return res.status(500).type('text').send('Failed: ' + (e.message || e));
     }
 });
 
