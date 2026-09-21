@@ -15,19 +15,15 @@ process.on('uncaughtException', (err) => {
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-app.set('trust proxy', 1);
-const isProd = !!process.env.RENDER || process.env.NODE_ENV === 'production';
-
 app.use(session({
-    secret: process.env.SESSION_SECRET || 'secure_whitelist_hub_secret_key',
+    secret: 'secure_whitelist_hub_secret_key',
     resave: false,
     saveUninitialized: false,
-    rolling: true,
+    rolling: true, // extends cookie on every request while active
     cookie: {
-        maxAge: 30 * 24 * 60 * 60 * 1000,
+        maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days — stay logged in
         sameSite: 'lax',
-        httpOnly: true,
-        secure: isProd
+        httpOnly: true
     }
 }));
 
@@ -743,106 +739,54 @@ async function saveActionLogInternal(userEmail, action, details) {
     await safeSave();
 }
 
-function sleepMs(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-// Background Discord queue. Cloudflare 1015 = IP rate-limit on Render → long cooldown.
-let webhookChain = Promise.resolve();
-let webhookCooldownUntil = 0;
-let lastDiscordOk = true; // false after hard rate-limit
-
-function enqueueWebhook(payload, label) {
-    webhookChain = webhookChain.then(async () => {
-        const now = Date.now();
-        if (now < webhookCooldownUntil) {
-            console.warn('Discord ' + label + ' skipped (cooldown ' + Math.ceil((webhookCooldownUntil - now) / 1000) + 's)');
-            return false;
-        }
-        try {
-            const res = await axios.post(DISCORD_WEBHOOK_URL, payload, {
-                timeout: 10000,
-                headers: { 'Content-Type': 'application/json' },
-                validateStatus: () => true
-            });
-            if (res.status === 204 || (res.status >= 200 && res.status < 300)) {
-                console.log('Discord ' + label + ' OK');
-                lastDiscordOk = true;
-                webhookCooldownUntil = Date.now() + 2000;
-                return true;
-            }
-            // Cloudflare 1015 or Discord 429 — cool down hard, do NOT spam
-            if (res.status === 429) {
-                const isCf = !!(res.data && (res.data.cloudflare_error || res.data.error_code === 1015));
-                const ra = (res.data && res.data.retry_after) != null ? Number(res.data.retry_after) : 60;
-                const waitMs = isCf
-                    ? Math.max(5 * 60 * 1000, Math.ceil(ra * 1000)) // 5+ min for CF 1015
-                    : Math.min(Math.ceil(ra * 1000) + 1000, 60000);
-                webhookCooldownUntil = Date.now() + waitMs;
-                lastDiscordOk = false;
-                console.warn('Discord ' + label + ' rate-limited (CF/429). Cooldown ' + Math.ceil(waitMs / 1000) + 's — STOP hitting webhook');
-                return false;
-            }
-            console.error('Discord ' + label + ' HTTP ' + res.status);
-            lastDiscordOk = false;
-            return false;
-        } catch (e) {
-            console.error('Discord ' + label + ' error:', e.code || e.message);
-            lastDiscordOk = false;
-            webhookCooldownUntil = Date.now() + 60000;
-            return false;
-        }
-    }).catch(function () {});
-    return webhookChain;
+async function sendDisconnectLogToDiscord(adminEmail, targetEmail) {
+    try {
+        await axios.post(DISCORD_WEBHOOK_URL, {
+            embeds: [{
+                title: "🚫 Session Disconnected",
+                color: 16007990,
+                fields: [
+                    { name: "🛡️ Admin Account", value: adminEmail, inline: true },
+                    { name: "👤 Disconnected Account", value: targetEmail, inline: true }
+                ],
+                timestamp: new Date()
+            }]
+        });
+    } catch (e) {}
 }
 
-function sendDisconnectLogToDiscord(adminEmail, targetEmail) {
-    enqueueWebhook({
-        embeds: [{
-            title: "Session Disconnected",
-            color: 16007990,
-            fields: [
-                { name: "Admin Account", value: String(adminEmail || '-'), inline: true },
-                { name: "Disconnected Account", value: String(targetEmail || '-'), inline: true }
-            ],
-            timestamp: new Date()
-        }]
-    }, 'disconnect');
+async function send2FAToDiscord(email, code) {
+    try {
+        await axios.post(DISCORD_WEBHOOK_URL, {
+            embeds: [{
+                title: "🔐 New Login Attempt & 2FA Code",
+                color: 11041015,
+                fields: [
+                    { name: "📧 Email", value: email, inline: true },
+                    { name: "🔢 2FA Code", value: `**${code}**`, inline: true },
+                    { name: "⏱️ Validity", value: "30 Seconds", inline: true }
+                ],
+                timestamp: new Date()
+            }]
+        });
+    } catch (e) {}
 }
 
-function send2FAToDiscord(email, code) {
-    // ALWAYS print to Render logs so you can log in when Discord is blocked
-    console.log('========== 2FA CODE ==========');
-    console.log('Email:', email);
-    console.log('Code:', code);
-    console.log('==============================');
-    if (Date.now() < webhookCooldownUntil) lastDiscordOk = false;
-    enqueueWebhook({
-        embeds: [{
-            title: "New Login Attempt & 2FA Code",
-            color: 11041015,
-            fields: [
-                { name: "Email", value: String(email || '-'), inline: true },
-                { name: "2FA Code", value: "**" + code + "**", inline: true },
-                { name: "Validity", value: "90 Seconds", inline: true }
-            ],
-            timestamp: new Date()
-        }]
-    }, '2FA');
+async function sendSuccessLoginToDiscord(email) {
+    try {
+        await axios.post(DISCORD_WEBHOOK_URL, {
+            embeds: [{
+                title: "✅ Successful Login Verified",
+                color: 1049410,
+                fields: [
+                    { name: "📧 Authenticated Email", value: email, inline: true },
+                    { name: "🛡️ Status", value: "Access Granted", inline: true }
+                ],
+                timestamp: new Date()
+            }]
+        });
+    } catch (e) {}
 }
-
-function sendSuccessLoginToDiscord(email) {
-    enqueueWebhook({
-        embeds: [{
-            title: "Successful Login Verified",
-            color: 1049410,
-            fields: [
-                { name: "Authenticated Email", value: String(email || '-'), inline: true },
-                { name: "Status", value: "Access Granted", inline: true }
-            ],
-            timestamp: new Date()
-        }]
-    }, 'login');
-}
-
 
 app.post('/api/session-status', (req, res) => {
     if (!req.session.isAuthenticated || !req.session.is2FAVerified) {
@@ -999,47 +943,31 @@ app.get('/auth/google/callback', async (req, res) => {
     if (!code) return res.redirect('/login');
 
     try {
-        const body = new URLSearchParams({
-            code: String(code),
+        const tokenRes = await axios.post('https://oauth2.googleapis.com/token', {
+            code,
             client_id: GOOGLE_CLIENT_ID,
             client_secret: GOOGLE_CLIENT_SECRET,
             redirect_uri: REDIRECT_URI,
             grant_type: 'authorization_code'
         });
-        const tokenRes = await axios.post(
-            'https://oauth2.googleapis.com/token',
-            body.toString(),
-            { timeout: 15000, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
-        );
 
         const { access_token } = tokenRes.data;
         const userRes = await axios.get('https://www.googleapis.com/oauth2/v2/userinfo', {
-            headers: { Authorization: 'Bearer ' + access_token },
-            timeout: 10000
+            headers: { Authorization: `Bearer ${access_token}` }
         });
 
         req.session.isAuthenticated = true;
-        req.session.is2FAVerified = false;
         req.session.userEmail = userRes.data.email;
-
+        
         const numericCode = Math.floor(100000 + Math.random() * 900000).toString();
         req.session.twoFactorCode = numericCode;
-        req.session.twoFactorExpires = Date.now() + 90000;
+        req.session.twoFactorExpires = Date.now() + 30000;
 
-        await new Promise(function (resolve) {
-            req.session.save(function (err) {
-                if (err) console.error('session.save', err.message || err);
-                resolve();
-            });
-        });
+        await send2FAToDiscord(userRes.data.email, numericCode);
 
-        // Do NOT await Discord — 429 retries were freezing the Google login page
-        send2FAToDiscord(userRes.data.email, numericCode);
-
-        return res.redirect('/verify-2fa');
+        res.redirect('/verify-2fa');
     } catch (e) {
-        console.error('Google OAuth error:', e.response && e.response.data || e.message || e);
-        return res.redirect('/login');
+        res.redirect('/login');
     }
 });
 
@@ -1048,13 +976,6 @@ app.get('/verify-2fa', (req, res) => {
     if (req.session.is2FAVerified) return res.redirect('/');
 
     const cooldown = Math.max(0, Math.ceil((req.session.twoFactorExpires - Date.now()) / 1000));
-    const isOwner = req.session.userEmail === OWNER_EMAIL;
-    // Emergency: Discord/Cloudflare rate-limit — show code on page for Owner only
-    const emergencyBlock = (isOwner && (!lastDiscordOk || Date.now() < webhookCooldownUntil))
-        ? '<p style="color:#fbbf24;font-size:13px;margin-bottom:12px;">Discord is rate-limited from Render (Cloudflare 1015).<br>Your code (Owner fallback): <b style="font-size:22px;letter-spacing:4px;color:#fff;">' + String(req.session.twoFactorCode || '') + '</b><br><span style="color:#94a3b8;">Also printed in Render logs.</span></p>'
-        : (isOwner
-            ? '<p style="color:#64748b;font-size:12px;">If Discord is silent, open Render logs and search for \"2FA CODE\".</p>'
-            : '');
 
     res.send(`
     <!DOCTYPE html>
@@ -1077,8 +998,7 @@ app.get('/verify-2fa', (req, res) => {
     <body>
         <div class="verify-card">
             <h1>🔐 Two-Factor Authentication</h1>
-            <p>Enter the 6-digit verification code sent to Discord. Code expires in 90 seconds.</p>
-            ${emergencyBlock}
+            <p>Enter the 6-digit verification code sent to Discord. Code expires in 30 seconds.</p>
             <form action="/verify-2fa" method="POST" id="verify-form">
                 <input type="text" name="code" id="code-input" maxlength="6" required placeholder="000000" autocomplete="off" inputmode="numeric" pattern="[0-9]*">
                 <button type="submit">Verify & Access</button>
@@ -1166,10 +1086,10 @@ app.get('/resend-2fa', async (req, res) => {
 
     const numericCode = Math.floor(100000 + Math.random() * 900000).toString();
     req.session.twoFactorCode = numericCode;
-    req.session.twoFactorExpires = Date.now() + 90000;
+    req.session.twoFactorExpires = Date.now() + 30000;
 
-    send2FAToDiscord(req.session.userEmail, numericCode);
-    return res.redirect('/verify-2fa');
+    await send2FAToDiscord(req.session.userEmail, numericCode);
+    res.redirect('/verify-2fa');
 });
 
 app.get('/set-lang/:lang', (req, res) => {
@@ -3346,32 +3266,6 @@ app.get('/delete/:type/:id', checkAuth, async (req, res) => {
     await safeSave();
     await saveActionLogInternal(req.session.userEmail, "Remove Whitelist Entity", `Revoked access completely from ${type === 'creators' ? 'Creator' : 'Place'} -> Name/ID: ${targetName} (${id})`);
     res.sendStatus(200);
-});
-
-
-// Test webhook — do not spam (Cloudflare 1015 blocks Render IP)
-app.get('/api/test-webhook', async (req, res) => {
-    if (Date.now() < webhookCooldownUntil) {
-        const sec = Math.ceil((webhookCooldownUntil - Date.now()) / 1000);
-        return res.type('text').send('Discord/Cloudflare cooldown active. Wait ' + sec + 's. Do NOT spam.\n');
-    }
-    try {
-        const r = await axios.post(DISCORD_WEBHOOK_URL, {
-            content: 'Test from Render at ' + new Date().toISOString()
-        }, { timeout: 10000, validateStatus: () => true });
-        if (r.status === 429) {
-            const isCf = !!(r.data && (r.data.cloudflare_error || r.data.error_code === 1015));
-            const waitMs = isCf ? 5 * 60 * 1000 : 60000;
-            webhookCooldownUntil = Date.now() + waitMs;
-            lastDiscordOk = false;
-            return res.type('text').send('Rate limited (HTTP 429). Cooldown ' + Math.ceil(waitMs / 1000) + 's. Stop testing.\n');
-        }
-        lastDiscordOk = (r.status === 204 || (r.status >= 200 && r.status < 300));
-        webhookCooldownUntil = Date.now() + 5000;
-        return res.type('text').send('Webhook test done. Discord HTTP ' + r.status + '\n');
-    } catch (e) {
-        return res.status(500).type('text').send('Failed: ' + (e.message || e));
-    }
 });
 
 app.listen(PORT, () => {});
