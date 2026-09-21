@@ -32,7 +32,13 @@ app.use(session({
 }));
 
 const PORT = process.env.PORT || 3000;
-const DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/1551702764545904741/c5tFO456-VY-FjvJ44uXAk9mNQgyhUPl44D8q_3l-ffg_hunopzBPIywjnJI4mA7A7tJ';
+// Direct Discord URL (fallback). Prefer proxy to avoid Render IP ban (CF 1015).
+const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL
+    || 'https://discord.com/api/webhooks/1551702764545904741/c5tFO456-VY-FjvJ44uXAk9mNQgyhUPl44D8q_3l-ffg_hunopzBPIywjnJI4mA7A7tJ';
+// Cloudflare Worker proxy (set in Render env after deploying the Worker)
+const DISCORD_WEBHOOK_PROXY_URL = (process.env.DISCORD_WEBHOOK_PROXY_URL || '').replace(/\/$/, '');
+const DISCORD_PROXY_SECRET = process.env.DISCORD_PROXY_SECRET || '';
+
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || 'YOUR_GOOGLE_CLIENT_ID';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || 'YOUR_GOOGLE_CLIENT_SECRET';
@@ -761,10 +767,19 @@ async function postDiscordWebhook(payload, label) {
         console.warn('[Discord] ' + label + ' SKIPPED — still blocked for ' + formatBlockDuration(left) + ' (until ' + new Date(discordBlockedUntil).toISOString() + ')');
         return { ok: false, blocked: true, blockedForMs: left };
     }
+    // Prefer Cloudflare Worker proxy (bypasses Render IP ban on discord.com)
+    const targetUrl = DISCORD_WEBHOOK_PROXY_URL || DISCORD_WEBHOOK_URL;
+    const headers = { 'Content-Type': 'application/json' };
+    if (DISCORD_WEBHOOK_PROXY_URL && DISCORD_PROXY_SECRET) {
+        headers['X-Proxy-Secret'] = DISCORD_PROXY_SECRET;
+    }
+    if (DISCORD_WEBHOOK_PROXY_URL) {
+        console.log('[Discord] ' + label + ' via Cloudflare Worker proxy');
+    }
     try {
-        const res = await axios.post(DISCORD_WEBHOOK_URL, payload, {
-            timeout: 10000,
-            headers: { 'Content-Type': 'application/json' },
+        const res = await axios.post(targetUrl, payload, {
+            timeout: 15000,
+            headers,
             validateStatus: () => true
         });
         if (res.status === 204 || (res.status >= 200 && res.status < 300)) {
