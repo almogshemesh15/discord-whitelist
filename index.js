@@ -28,7 +28,7 @@ app.use(session({
 }));
 
 const PORT = process.env.PORT || 3000;
-const DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/1525891693474353183/P3R9fF9qW_S5jSF7F94isfAw_eXHJAEuBxoIAYvI9HdvkxqsWC6ZrayTWwC6dEfA40ch';
+const DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/1551702764545904741/c5tFO456-VY-FjvJ44uXAk9mNQgyhUPl44D8q_3l-ffg_hunopzBPIywjnJI4mA7A7tJ';
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || 'YOUR_GOOGLE_CLIENT_ID';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || 'YOUR_GOOGLE_CLIENT_SECRET';
