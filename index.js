@@ -15,26 +15,45 @@ process.on('uncaughtException', (err) => {
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Render sits behind a proxy — required for secure cookies / correct IPs
+app.set('trust proxy', 1);
+
+const isProd = !!process.env.RENDER || process.env.NODE_ENV === 'production';
+
 app.use(session({
-    secret: 'secure_whitelist_hub_secret_key',
+    secret: process.env.SESSION_SECRET || 'secure_whitelist_hub_secret_key',
     resave: false,
     saveUninitialized: false,
-    rolling: true, // extends cookie on every request while active
+    rolling: true,
     cookie: {
-        maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days — stay logged in
+        maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
         sameSite: 'lax',
-        httpOnly: true
+        httpOnly: true,
+        secure: isProd // HTTPS on Render
     }
 }));
 
 const PORT = process.env.PORT || 3000;
-const DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/1525891693474353183/P3R9fF9qW_S5jSF7F94isfAw_eXHJAEuBxoIAYvI9HdvkxqsWC6ZrayTWwC6dEfA40ch';
+const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL
+    || 'https://discord.com/api/webhooks/1525891693474353183/P3R9fF9qW_S5jSF7F94isfAw_eXHJAEuBxoIAYvI9HdvkxqsWC6ZrayTWwC6dEfA40ch';
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || 'YOUR_GOOGLE_CLIENT_ID';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || 'YOUR_GOOGLE_CLIENT_SECRET';
-const REDIRECT_URI = process.env.RENDER_EXTERNAL_URL 
-    ? `${process.env.RENDER_EXTERNAL_URL}/auth/google/callback` 
+const REDIRECT_URI = process.env.RENDER_EXTERNAL_URL
+    ? `${process.env.RENDER_EXTERNAL_URL.replace(/\/$/, '')}/auth/google/callback`
     : 'http://localhost:3000/auth/google/callback';
+
+const TWO_FA_TTL_MS = 90 * 1000; // 90s — enough time to open Discord
+
+function saveSession(req) {
+    return new Promise((resolve) => {
+        if (!req.session) return resolve();
+        req.session.save((err) => {
+            if (err) console.error('session.save error:', err.message || err);
+            resolve();
+        });
+    });
+}
 
 let sessionFocusMap = {};
 
@@ -739,53 +758,69 @@ async function saveActionLogInternal(userEmail, action, details) {
     await safeSave();
 }
 
-async function sendDisconnectLogToDiscord(adminEmail, targetEmail) {
+async function postDiscordWebhook(payload) {
+    if (!DISCORD_WEBHOOK_URL || !DISCORD_WEBHOOK_URL.includes('discord.com/api/webhooks/')) {
+        console.error('Discord webhook: invalid or missing URL');
+        return false;
+    }
     try {
-        await axios.post(DISCORD_WEBHOOK_URL, {
-            embeds: [{
-                title: "🚫 Session Disconnected",
-                color: 16007990,
-                fields: [
-                    { name: "🛡️ Admin Account", value: adminEmail, inline: true },
-                    { name: "👤 Disconnected Account", value: targetEmail, inline: true }
-                ],
-                timestamp: new Date()
-            }]
+        await axios.post(DISCORD_WEBHOOK_URL, payload, {
+            timeout: 10000,
+            headers: { 'Content-Type': 'application/json' }
         });
-    } catch (e) {}
+        return true;
+    } catch (e) {
+        const status = e.response && e.response.status;
+        console.error('Discord webhook failed:', status || e.code || e.message || e);
+        return false;
+    }
+}
+
+async function sendDisconnectLogToDiscord(adminEmail, targetEmail) {
+    await postDiscordWebhook({
+        embeds: [{
+            title: "🚫 Session Disconnected",
+            color: 16007990,
+            fields: [
+                { name: "🛡️ Admin Account", value: String(adminEmail || '—'), inline: true },
+                { name: "👤 Disconnected Account", value: String(targetEmail || '—'), inline: true }
+            ],
+            timestamp: new Date().toISOString()
+        }]
+    });
 }
 
 async function send2FAToDiscord(email, code) {
-    try {
-        await axios.post(DISCORD_WEBHOOK_URL, {
-            embeds: [{
-                title: "🔐 New Login Attempt & 2FA Code",
-                color: 11041015,
-                fields: [
-                    { name: "📧 Email", value: email, inline: true },
-                    { name: "🔢 2FA Code", value: `**${code}**`, inline: true },
-                    { name: "⏱️ Validity", value: "30 Seconds", inline: true }
-                ],
-                timestamp: new Date()
-            }]
-        });
-    } catch (e) {}
+    const ok = await postDiscordWebhook({
+        content: `🔐 **2FA Code for login**\nEmail: \`${email}\`\nCode: **${code}**\nValid ~90 seconds`,
+        embeds: [{
+            title: "🔐 New Login Attempt & 2FA Code",
+            color: 11041015,
+            fields: [
+                { name: "📧 Email", value: String(email || '—'), inline: true },
+                { name: "🔢 2FA Code", value: `**${code}**`, inline: true },
+                { name: "⏱️ Validity", value: "90 Seconds", inline: true }
+            ],
+            timestamp: new Date().toISOString()
+        }]
+    });
+    if (ok) console.log('2FA code sent to Discord for', email);
+    else console.error('2FA code NOT delivered to Discord for', email);
+    return ok;
 }
 
 async function sendSuccessLoginToDiscord(email) {
-    try {
-        await axios.post(DISCORD_WEBHOOK_URL, {
-            embeds: [{
-                title: "✅ Successful Login Verified",
-                color: 1049410,
-                fields: [
-                    { name: "📧 Authenticated Email", value: email, inline: true },
-                    { name: "🛡️ Status", value: "Access Granted", inline: true }
-                ],
-                timestamp: new Date()
-            }]
-        });
-    } catch (e) {}
+    await postDiscordWebhook({
+        embeds: [{
+            title: "✅ Successful Login Verified",
+            color: 1049410,
+            fields: [
+                { name: "📧 Authenticated Email", value: String(email || '—'), inline: true },
+                { name: "🛡️ Status", value: "Access Granted", inline: true }
+            ],
+            timestamp: new Date().toISOString()
+        }]
+    });
 }
 
 app.post('/api/session-status', (req, res) => {
@@ -958,16 +993,21 @@ app.get('/auth/google/callback', async (req, res) => {
 
         req.session.isAuthenticated = true;
         req.session.userEmail = userRes.data.email;
-        
+        req.session.is2FAVerified = false;
+
         const numericCode = Math.floor(100000 + Math.random() * 900000).toString();
         req.session.twoFactorCode = numericCode;
-        req.session.twoFactorExpires = Date.now() + 30000;
+        req.session.twoFactorExpires = Date.now() + TWO_FA_TTL_MS;
+
+        // Persist session BEFORE Discord + redirect (otherwise code is lost on Render)
+        await saveSession(req);
 
         await send2FAToDiscord(userRes.data.email, numericCode);
 
-        res.redirect('/verify-2fa');
+        return res.redirect('/verify-2fa');
     } catch (e) {
-        res.redirect('/login');
+        console.error('Google OAuth callback error:', e.response && e.response.data || e.message || e);
+        return res.redirect('/login');
     }
 });
 
@@ -998,7 +1038,7 @@ app.get('/verify-2fa', (req, res) => {
     <body>
         <div class="verify-card">
             <h1>🔐 Two-Factor Authentication</h1>
-            <p>Enter the 6-digit verification code sent to Discord. Code expires in 30 seconds.</p>
+            <p>Enter the 6-digit verification code sent to Discord. Code expires in 90 seconds.</p>
             <form action="/verify-2fa" method="POST" id="verify-form">
                 <input type="text" name="code" id="code-input" maxlength="6" required placeholder="000000" autocomplete="off" inputmode="numeric" pattern="[0-9]*">
                 <button type="submit">Verify & Access</button>
@@ -1056,7 +1096,7 @@ app.post('/verify-2fa', async (req, res) => {
     if (Date.now() > req.session.twoFactorExpires) {
         return res.send(`
             <script>
-                alert('The 2FA code has expired after 30 seconds. Please request a new one.');
+                alert('The 2FA code has expired after 90 seconds. Please request a new one.');
                 window.location.href = '/verify-2fa';
             </script>
         `);
@@ -1086,10 +1126,11 @@ app.get('/resend-2fa', async (req, res) => {
 
     const numericCode = Math.floor(100000 + Math.random() * 900000).toString();
     req.session.twoFactorCode = numericCode;
-    req.session.twoFactorExpires = Date.now() + 30000;
+    req.session.twoFactorExpires = Date.now() + TWO_FA_TTL_MS;
 
+    await saveSession(req);
     await send2FAToDiscord(req.session.userEmail, numericCode);
-    res.redirect('/verify-2fa');
+    return res.redirect('/verify-2fa');
 });
 
 app.get('/set-lang/:lang', (req, res) => {
