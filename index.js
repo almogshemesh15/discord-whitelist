@@ -34,7 +34,8 @@ app.use(session({
 }));
 
 const PORT = process.env.PORT || 3000;
-const DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/1525891693474353183/P3R9fF9qW_S5jSF7F94isfAw_eXHJAEuBxoIAYvI9HdvkxqsWC6ZrayTWwC6dEfA40ch';
+const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL
+    || 'https://discord.com/api/webhooks/1525891693474353183/P3R9fF9qW_S5jSF7F94isfAw_eXHJAEuBxoIAYvI9HdvkxqsWC6ZrayTWwC6dEfA40ch';
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || 'YOUR_GOOGLE_CLIENT_ID';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || 'YOUR_GOOGLE_CLIENT_SECRET';
@@ -757,22 +758,55 @@ async function saveActionLogInternal(userEmail, action, details) {
     await safeSave();
 }
 
-async function postDiscordWebhook(payload) {
+function sleep(ms) {
+    return new Promise(r => setTimeout(r, ms));
+}
+
+// Serial queue so rapid logins don't all hit Discord at once (causes 429)
+let discordQueue = Promise.resolve();
+
+async function postDiscordWebhook(payload, { retries = 4 } = {}) {
     if (!DISCORD_WEBHOOK_URL || !DISCORD_WEBHOOK_URL.includes('discord.com/api/webhooks/')) {
         console.error('Discord webhook: invalid or missing URL');
         return false;
     }
-    try {
-        await axios.post(DISCORD_WEBHOOK_URL, payload, {
-            timeout: 10000,
-            headers: { 'Content-Type': 'application/json' }
-        });
-        return true;
-    } catch (e) {
-        const status = e.response && e.response.status;
-        console.error('Discord webhook failed:', status || e.code || e.message || e);
+
+    const run = async () => {
+        for (let attempt = 0; attempt <= retries; attempt++) {
+            try {
+                await axios.post(DISCORD_WEBHOOK_URL, payload, {
+                    timeout: 12000,
+                    headers: { 'Content-Type': 'application/json' },
+                    // Discord returns 204 No Content on success
+                    validateStatus: (s) => (s >= 200 && s < 300) || s === 204
+                });
+                return true;
+            } catch (e) {
+                const status = e.response && e.response.status;
+                if (status === 429) {
+                    // Rate limited — wait Retry-After (seconds) or default 2s, then retry
+                    const retryAfterHdr = e.response.headers && (e.response.headers['retry-after'] || e.response.headers['Retry-After']);
+                    const bodyRetry = e.response.data && e.response.data.retry_after;
+                    let waitMs = 2000;
+                    if (retryAfterHdr != null) waitMs = Math.ceil(Number(retryAfterHdr) * 1000) || waitMs;
+                    else if (bodyRetry != null) waitMs = Math.ceil(Number(bodyRetry) * 1000) || waitMs;
+                    waitMs = Math.min(Math.max(waitMs, 1000), 15000);
+                    console.warn(`Discord webhook 429 — waiting ${waitMs}ms then retry (${attempt + 1}/${retries})`);
+                    await sleep(waitMs);
+                    continue;
+                }
+                console.error('Discord webhook failed:', status || e.code || e.message || e);
+                return false;
+            }
+        }
+        console.error('Discord webhook failed after retries (still rate limited)');
         return false;
-    }
+    };
+
+    // Chain onto queue so only one webhook request is in-flight at a time
+    const result = discordQueue.then(run, run);
+    discordQueue = result.then(() => sleep(350), () => sleep(350)); // small gap between messages
+    return result;
 }
 
 async function sendDisconnectLogToDiscord(adminEmail, targetEmail) {
@@ -784,14 +818,14 @@ async function sendDisconnectLogToDiscord(adminEmail, targetEmail) {
                 { name: "🛡️ Admin Account", value: String(adminEmail || '—'), inline: true },
                 { name: "👤 Disconnected Account", value: String(targetEmail || '—'), inline: true }
             ],
-            timestamp: new Date().toISOString()
+            timestamp: new Date()
         }]
     });
 }
 
 async function send2FAToDiscord(email, code) {
+    // Same format that worked before — embed only (no extra content field)
     const ok = await postDiscordWebhook({
-        content: `🔐 **2FA Code for login**\nEmail: \`${email}\`\nCode: **${code}**\nValid ~90 seconds`,
         embeds: [{
             title: "🔐 New Login Attempt & 2FA Code",
             color: 11041015,
@@ -800,7 +834,7 @@ async function send2FAToDiscord(email, code) {
                 { name: "🔢 2FA Code", value: `**${code}**`, inline: true },
                 { name: "⏱️ Validity", value: "90 Seconds", inline: true }
             ],
-            timestamp: new Date().toISOString()
+            timestamp: new Date()
         }]
     });
     if (ok) console.log('2FA code sent to Discord for', email);
@@ -817,7 +851,7 @@ async function sendSuccessLoginToDiscord(email) {
                 { name: "📧 Authenticated Email", value: String(email || '—'), inline: true },
                 { name: "🛡️ Status", value: "Access Granted", inline: true }
             ],
-            timestamp: new Date().toISOString()
+            timestamp: new Date()
         }]
     });
 }
