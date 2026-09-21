@@ -769,62 +769,88 @@ async function saveActionLogInternal(userEmail, action, details) {
     await safeSave();
 }
 
-// --- Discord WEBHOOK (channel notifications) — same as before the bot ---
-// NOT related to discord-bot.js (that uses DISCORD_BOT_TOKEN for slash commands)
-async function sendDisconnectLogToDiscord(adminEmail, targetEmail) {
-    try {
-        await axios.post(DISCORD_WEBHOOK_URL, {
-            embeds: [{
-                title: "🚫 Session Disconnected",
-                color: 16007990,
-                fields: [
-                    { name: "🛡️ Admin Account", value: adminEmail, inline: true },
-                    { name: "👤 Disconnected Account", value: targetEmail, inline: true }
-                ],
-                timestamp: new Date()
-            }]
-        });
-    } catch (e) {
-        console.error('Discord webhook (disconnect) failed:', e.response && e.response.status || e.message);
+// --- Discord WEBHOOK (channel notifications) — NOT related to discord-bot.js ---
+function sleepMs(ms) {
+    return new Promise(r => setTimeout(r, ms));
+}
+
+/** Post to Discord webhook; on 429 wait Retry-After and retry (up to maxAttempts) */
+async function postWebhookWithRetry(payload, label, maxAttempts = 6) {
+    let lastErr = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            await axios.post(DISCORD_WEBHOOK_URL, payload, {
+                timeout: 12000,
+                headers: { 'Content-Type': 'application/json' }
+            });
+            return true;
+        } catch (e) {
+            lastErr = e;
+            const status = e.response && e.response.status;
+            if (status === 429) {
+                const ra = e.response.headers && (e.response.headers['retry-after'] || e.response.headers['Retry-After']);
+                const bodyRa = e.response.data && e.response.data.retry_after;
+                let waitMs = 2500;
+                if (bodyRa != null) waitMs = Math.ceil(Number(bodyRa) * 1000) + 200;
+                else if (ra != null) waitMs = Math.ceil(Number(ra) * 1000) + 200;
+                waitMs = Math.min(Math.max(waitMs, 1500), 12000);
+                console.warn(`Discord webhook (${label}) 429 — wait ${waitMs}ms (try ${attempt}/${maxAttempts})`);
+                await sleepMs(waitMs);
+                continue;
+            }
+            console.error(`Discord webhook (${label}) failed:`, status || e.code || e.message);
+            return false;
+        }
     }
+    console.error(`Discord webhook (${label}) failed after retries:`, lastErr && lastErr.response && lastErr.response.status || lastErr && lastErr.message);
+    return false;
+}
+
+async function sendDisconnectLogToDiscord(adminEmail, targetEmail) {
+    await postWebhookWithRetry({
+        embeds: [{
+            title: "🚫 Session Disconnected",
+            color: 16007990,
+            fields: [
+                { name: "🛡️ Admin Account", value: adminEmail, inline: true },
+                { name: "👤 Disconnected Account", value: targetEmail, inline: true }
+            ],
+            timestamp: new Date()
+        }]
+    }, 'disconnect', 3);
 }
 
 async function send2FAToDiscord(email, code) {
-    try {
-        await axios.post(DISCORD_WEBHOOK_URL, {
-            embeds: [{
-                title: "🔐 New Login Attempt & 2FA Code",
-                color: 11041015,
-                fields: [
-                    { name: "📧 Email", value: email, inline: true },
-                    { name: "🔢 2FA Code", value: `**${code}**`, inline: true },
-                    { name: "⏱️ Validity", value: "90 Seconds", inline: true }
-                ],
-                timestamp: new Date()
-            }]
-        });
-        console.log('2FA webhook sent for', email);
-    } catch (e) {
-        console.error('Discord webhook (2FA) failed:', e.response && e.response.status || e.message);
-    }
+    const ok = await postWebhookWithRetry({
+        embeds: [{
+            title: "🔐 New Login Attempt & 2FA Code",
+            color: 11041015,
+            fields: [
+                { name: "📧 Email", value: email, inline: true },
+                { name: "🔢 2FA Code", value: `**${code}**`, inline: true },
+                { name: "⏱️ Validity", value: "90 Seconds", inline: true }
+            ],
+            timestamp: new Date()
+        }]
+    }, '2FA', 6);
+    if (ok) console.log('2FA webhook sent for', email);
+    else console.error('2FA webhook NOT delivered for', email);
+    return ok;
 }
 
 async function sendSuccessLoginToDiscord(email) {
-    try {
-        await axios.post(DISCORD_WEBHOOK_URL, {
-            embeds: [{
-                title: "✅ Successful Login Verified",
-                color: 1049410,
-                fields: [
-                    { name: "📧 Authenticated Email", value: email, inline: true },
-                    { name: "🛡️ Status", value: "Access Granted", inline: true }
-                ],
-                timestamp: new Date()
-            }]
-        });
-    } catch (e) {
-        console.error('Discord webhook (login) failed:', e.response && e.response.status || e.message);
-    }
+    // fire-and-forget style but still retry a bit — don't block login UX
+    postWebhookWithRetry({
+        embeds: [{
+            title: "✅ Successful Login Verified",
+            color: 1049410,
+            fields: [
+                { name: "📧 Authenticated Email", value: email, inline: true },
+                { name: "🛡️ Status", value: "Access Granted", inline: true }
+            ],
+            timestamp: new Date()
+        }]
+    }, 'login', 3).catch(() => {});
 }
 
 app.post('/api/session-status', (req, res) => {
