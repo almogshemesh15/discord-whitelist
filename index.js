@@ -15,15 +15,19 @@ process.on('uncaughtException', (err) => {
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+app.set('trust proxy', 1);
+const isProd = !!process.env.RENDER || process.env.NODE_ENV === 'production';
+
 app.use(session({
-    secret: 'secure_whitelist_hub_secret_key',
+    secret: process.env.SESSION_SECRET || 'secure_whitelist_hub_secret_key',
     resave: false,
     saveUninitialized: false,
-    rolling: true, // extends cookie on every request while active
+    rolling: true,
     cookie: {
-        maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days — stay logged in
+        maxAge: 30 * 24 * 60 * 60 * 1000,
         sameSite: 'lax',
-        httpOnly: true
+        httpOnly: true,
+        secure: isProd
     }
 }));
 
@@ -739,53 +743,119 @@ async function saveActionLogInternal(userEmail, action, details) {
     await safeSave();
 }
 
-async function sendDisconnectLogToDiscord(adminEmail, targetEmail) {
+let discordBlockedUntil = 0; // timestamp ms
+
+function formatBlockDuration(ms) {
+    if (ms <= 0) return '0s';
+    const s = Math.ceil(ms / 1000);
+    if (s < 60) return s + 's';
+    const m = Math.floor(s / 60);
+    const rs = s % 60;
+    return m + 'm ' + rs + 's';
+}
+
+async function postDiscordWebhook(payload, label) {
+    const now = Date.now();
+    if (now < discordBlockedUntil) {
+        const left = discordBlockedUntil - now;
+        console.warn('[Discord] ' + label + ' SKIPPED — still blocked for ' + formatBlockDuration(left) + ' (until ' + new Date(discordBlockedUntil).toISOString() + ')');
+        return { ok: false, blocked: true, blockedForMs: left };
+    }
     try {
-        await axios.post(DISCORD_WEBHOOK_URL, {
-            embeds: [{
-                title: "🚫 Session Disconnected",
-                color: 16007990,
-                fields: [
-                    { name: "🛡️ Admin Account", value: adminEmail, inline: true },
-                    { name: "👤 Disconnected Account", value: targetEmail, inline: true }
-                ],
-                timestamp: new Date()
-            }]
+        const res = await axios.post(DISCORD_WEBHOOK_URL, payload, {
+            timeout: 10000,
+            headers: { 'Content-Type': 'application/json' },
+            validateStatus: () => true
         });
-    } catch (e) {}
+        if (res.status === 204 || (res.status >= 200 && res.status < 300)) {
+            console.log('[Discord] ' + label + ' OK (HTTP ' + res.status + ')');
+            return { ok: true };
+        }
+        if (res.status === 429) {
+            const data = res.data || {};
+            const isCf = !!(data.cloudflare_error || data.error_code === 1015);
+            let retrySec = 30;
+            if (data.retry_after != null) retrySec = Number(data.retry_after);
+            else if (data.retry_after === 0) retrySec = 30;
+            // Cloudflare 1015 from Render often needs longer
+            if (isCf) retrySec = Math.max(retrySec, 300); // at least 5 min
+            const blockMs = Math.ceil(retrySec * 1000);
+            discordBlockedUntil = Date.now() + blockMs;
+            console.error('[Discord] ' + label + ' RATE LIMITED (HTTP 429)');
+            console.error('[Discord] Cloudflare/Discord block: ' + (isCf ? 'YES (error 1015)' : 'Discord webhook limit'));
+            console.error('[Discord] Blocked for: ' + formatBlockDuration(blockMs) + ' (retry_after=' + retrySec + 's)');
+            console.error('[Discord] Unblock at: ' + new Date(discordBlockedUntil).toISOString());
+            if (data.detail) console.error('[Discord] Detail:', String(data.detail).slice(0, 200));
+            return { ok: false, status: 429, blockedForMs: blockMs, isCf: isCf };
+        }
+        console.error('[Discord] ' + label + ' failed HTTP ' + res.status, typeof res.data === 'string' ? res.data.slice(0, 150) : res.data);
+        return { ok: false, status: res.status };
+    } catch (e) {
+        console.error('[Discord] ' + label + ' network error:', e.code || e.message || e);
+        return { ok: false, error: e.message || String(e) };
+    }
+}
+
+async function sendDisconnectLogToDiscord(adminEmail, targetEmail) {
+    await postDiscordWebhook({
+        embeds: [{
+            title: "Session Disconnected",
+            color: 16007990,
+            fields: [
+                { name: "Admin Account", value: String(adminEmail || '-'), inline: true },
+                { name: "Disconnected Account", value: String(targetEmail || '-'), inline: true }
+            ],
+            timestamp: new Date()
+        }]
+    }, 'disconnect');
 }
 
 async function send2FAToDiscord(email, code) {
-    try {
-        await axios.post(DISCORD_WEBHOOK_URL, {
-            embeds: [{
-                title: "🔐 New Login Attempt & 2FA Code",
-                color: 11041015,
-                fields: [
-                    { name: "📧 Email", value: email, inline: true },
-                    { name: "🔢 2FA Code", value: `**${code}**`, inline: true },
-                    { name: "⏱️ Validity", value: "30 Seconds", inline: true }
-                ],
-                timestamp: new Date()
-            }]
-        });
-    } catch (e) {}
+    // Always log 2FA code so you can log in from Render logs when Discord is blocked
+    console.log('========== 2FA CODE ==========');
+    console.log('Email:', email);
+    console.log('Code :', code);
+    console.log('Time :', new Date().toISOString());
+    if (Date.now() < discordBlockedUntil) {
+        console.warn('[Discord] Currently blocked for another ' + formatBlockDuration(discordBlockedUntil - Date.now()));
+    }
+    console.log('==============================');
+
+    const result = await postDiscordWebhook({
+        embeds: [{
+            title: "New Login Attempt & 2FA Code",
+            color: 11041015,
+            fields: [
+                { name: "Email", value: String(email || '-'), inline: true },
+                { name: "2FA Code", value: '**' + code + '**', inline: true },
+                { name: "Validity", value: "90 Seconds", inline: true }
+            ],
+            timestamp: new Date()
+        }]
+    }, '2FA');
+
+    if (result.ok) {
+        console.log('[Discord] 2FA delivered to channel');
+    } else if (result.blockedForMs) {
+        console.error('[Discord] 2FA NOT delivered — use the Code above from logs. Block: ' + formatBlockDuration(result.blockedForMs));
+    } else {
+        console.error('[Discord] 2FA NOT delivered — use the Code above from logs. Error:', result.status || result.error || 'unknown');
+    }
+    return result;
 }
 
 async function sendSuccessLoginToDiscord(email) {
-    try {
-        await axios.post(DISCORD_WEBHOOK_URL, {
-            embeds: [{
-                title: "✅ Successful Login Verified",
-                color: 1049410,
-                fields: [
-                    { name: "📧 Authenticated Email", value: email, inline: true },
-                    { name: "🛡️ Status", value: "Access Granted", inline: true }
-                ],
-                timestamp: new Date()
-            }]
-        });
-    } catch (e) {}
+    await postDiscordWebhook({
+        embeds: [{
+            title: "Successful Login Verified",
+            color: 1049410,
+            fields: [
+                { name: "Authenticated Email", value: String(email || '-'), inline: true },
+                { name: "Status", value: "Access Granted", inline: true }
+            ],
+            timestamp: new Date()
+        }]
+    }, 'login');
 }
 
 app.post('/api/session-status', (req, res) => {
@@ -943,31 +1013,47 @@ app.get('/auth/google/callback', async (req, res) => {
     if (!code) return res.redirect('/login');
 
     try {
-        const tokenRes = await axios.post('https://oauth2.googleapis.com/token', {
-            code,
+        const body = new URLSearchParams({
+            code: String(code),
             client_id: GOOGLE_CLIENT_ID,
             client_secret: GOOGLE_CLIENT_SECRET,
             redirect_uri: REDIRECT_URI,
             grant_type: 'authorization_code'
         });
+        const tokenRes = await axios.post(
+            'https://oauth2.googleapis.com/token',
+            body.toString(),
+            { timeout: 15000, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+        );
 
         const { access_token } = tokenRes.data;
         const userRes = await axios.get('https://www.googleapis.com/oauth2/v2/userinfo', {
-            headers: { Authorization: `Bearer ${access_token}` }
+            headers: { Authorization: 'Bearer ' + access_token },
+            timeout: 10000
         });
 
         req.session.isAuthenticated = true;
+        req.session.is2FAVerified = false;
         req.session.userEmail = userRes.data.email;
-        
+
         const numericCode = Math.floor(100000 + Math.random() * 900000).toString();
         req.session.twoFactorCode = numericCode;
-        req.session.twoFactorExpires = Date.now() + 30000;
+        req.session.twoFactorExpires = Date.now() + 90000;
 
+        await new Promise(function (resolve) {
+            req.session.save(function (err) {
+                if (err) console.error('[Session] save error:', err.message || err);
+                resolve();
+            });
+        });
+
+        // Log code + Discord result (may be rate-limited) then redirect
         await send2FAToDiscord(userRes.data.email, numericCode);
 
-        res.redirect('/verify-2fa');
+        return res.redirect('/verify-2fa');
     } catch (e) {
-        res.redirect('/login');
+        console.error('[Google OAuth] error:', e.response && e.response.data || e.message || e);
+        return res.redirect('/login');
     }
 });
 
@@ -1086,10 +1172,10 @@ app.get('/resend-2fa', async (req, res) => {
 
     const numericCode = Math.floor(100000 + Math.random() * 900000).toString();
     req.session.twoFactorCode = numericCode;
-    req.session.twoFactorExpires = Date.now() + 30000;
+    req.session.twoFactorExpires = Date.now() + 90000;
 
     await send2FAToDiscord(req.session.userEmail, numericCode);
-    res.redirect('/verify-2fa');
+    return res.redirect('/verify-2fa');
 });
 
 app.get('/set-lang/:lang', (req, res) => {
