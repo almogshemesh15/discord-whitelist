@@ -67,6 +67,41 @@ let botRuntime = {
     version: null
 };
 
+const DEFAULT_BOT_COMMANDS = [
+    { id: 'wl-status', name: 'wl-status', description: 'Site + bot status', enabled: true, roleIds: [] },
+    { id: 'wl-pending', name: 'wl-pending', description: 'List pending place requests', enabled: true, roleIds: [] },
+    { id: 'wl-approve', name: 'wl-approve', description: 'Approve a pending place', enabled: true, roleIds: [] },
+    { id: 'wl-reject', name: 'wl-reject', description: 'Reject pending place', enabled: true, roleIds: [] },
+    { id: 'wl-keys', name: 'wl-keys', description: 'List system keys', enabled: true, roleIds: [] },
+    { id: 'wl-freeze-key', name: 'wl-freeze-key', description: 'Toggle freeze on a system key', enabled: true, roleIds: [] },
+    { id: 'wl-maintenance', name: 'wl-maintenance', description: 'Turn maintenance on/off', enabled: true, roleIds: [] },
+    { id: 'wl-stats', name: 'wl-stats', description: 'Usage stats from the site', enabled: true, roleIds: [] }
+];
+
+function ensureBotConfig(data) {
+    if (!data.botConfig || typeof data.botConfig !== 'object') {
+        data.botConfig = { enabled: true, commands: [], updatedAt: Date.now() };
+    }
+    if (typeof data.botConfig.enabled !== 'boolean') data.botConfig.enabled = true;
+    if (!Array.isArray(data.botConfig.commands)) data.botConfig.commands = [];
+    const byId = {};
+    data.botConfig.commands.forEach(c => { if (c && c.id) byId[c.id] = c; });
+    const merged = DEFAULT_BOT_COMMANDS.map(def => {
+        const cur = byId[def.id] || {};
+        let name = (cur.name != null ? String(cur.name) : def.name).toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 32);
+        if (!name) name = def.name;
+        return {
+            id: def.id,
+            name,
+            description: (cur.description != null ? String(cur.description) : def.description).slice(0, 100),
+            enabled: cur.enabled !== false,
+            roleIds: Array.isArray(cur.roleIds) ? cur.roleIds.map(String).filter(Boolean) : []
+        };
+    });
+    data.botConfig.commands = merged;
+    return data.botConfig;
+}
+
 function checkBotAuth(req, res, next) {
     if (!BOT_API_SECRET) {
         return res.status(503).json({ error: 'BOT_API_SECRET not configured on server' });
@@ -81,6 +116,8 @@ function checkBotAuth(req, res, next) {
 function getBotDashboardStatus() {
     const ONLINE_MS = 90 * 1000;
     const online = !!(botRuntime.lastSeen && (Date.now() - botRuntime.lastSeen) < ONLINE_MS);
+    const data = db.getData();
+    const cfg = ensureBotConfig(data);
     return {
         online,
         lastSeen: botRuntime.lastSeen,
@@ -91,7 +128,10 @@ function getBotDashboardStatus() {
         error: botRuntime.error,
         startedAt: botRuntime.startedAt,
         version: botRuntime.version,
-        secretConfigured: !!BOT_API_SECRET
+        secretConfigured: !!BOT_API_SECRET,
+        botEnabled: !!cfg.enabled,
+        commands: cfg.commands,
+        configUpdatedAt: cfg.updatedAt || null
     };
 }
 
@@ -1534,6 +1574,7 @@ app.get('/', checkAuth, (req, res) => {
                     </span>
                     <span style="font-size:12px;color:#94a3b8;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${req.session.userEmail}">${req.session.userEmail}</span>
                     ${isOwner ? `<button type="button" id="maint-btn" class="hdr-btn ${maintenanceOn ? 'btn-maint-on' : 'btn-maint-off'}" onclick="toggleMaintenance()">${maintenanceOn ? '🛠️ ' + tr('maintenanceOn') : '🛠️ ' + tr('maintenance')}</button>` : ''}
+                    <a href="/bot" class="btn-obfuscate-page" style="background:#6366f1;border-color:#4f46e5;">🤖 Bot</a>
                     <a href="/messages" class="btn-obfuscate-page" style="background:#f59e0b;border-color:#d97706;">💬 ${tr('messages')}</a>
                     <a href="/obfuscate" class="btn-obfuscate-page">🔒 ${tr('obfuscate')}</a>
                     <a href="/force-save" class="btn-save-db">💾 ${tr('save')}</a>
@@ -1555,46 +1596,27 @@ app.get('/', checkAuth, (req, res) => {
                     </div>
                     <div id="stats-by-key" style="margin-top:12px;font-size:12px;color:#94a3b8;max-height:120px;overflow-y:auto;"></div>
                 </div>
-                <div class="card" style="grid-column: span 2;" id="bot-status-card">
+                                <div class="card" style="grid-column: span 2;">
                     <div class="card-header">
                         <h3>🤖 Discord Bot</h3>
-                        <button type="button" class="btn-refresh" style="width:auto;" onclick="refreshBotStatus()">Refresh</button>
+                        <a href="/bot" class="btn-refresh" style="width:auto;text-decoration:none;">Open Bot Panel →</a>
                     </div>
-                    <div id="bot-status-body" style="font-size:13px;color:#94a3b8;line-height:1.6;">
-                        Loading bot status…
-                    </div>
-                    <p style="font-size:11px;color:#64748b;margin:10px 0 0 0;">
-                        Bot runs on your Mac and heartbeats this server. Online = heartbeat &lt; 90s ago.
-                    </p>
+                    <div id="bot-status-body" style="font-size:13px;color:#94a3b8;">Loading…</div>
+                    <script>
+                    (async function(){
+                        try {
+                            const r = await fetch('/api/bot/status');
+                            const s = await r.json();
+                            const el = document.getElementById('bot-status-body');
+                            if (!el) return;
+                            const on = s.online ? '<span style="color:#10b981;">● ONLINE</span>' : '<span style="color:#f43f5e;">● OFFLINE</span>';
+                            const en = s.botEnabled === false ? ' · <span style="color:#fbbf24;">DISABLED</span>' : ' · Enabled';
+                            el.innerHTML = on + en + (s.tag ? (' · ' + s.tag) : '');
+                        } catch(e) {}
+                    })();
+                    </script>
                 </div>
-                <script>
-                async function refreshBotStatus() {
-                    const el = document.getElementById('bot-status-body');
-                    if (!el) return;
-                    try {
-                        const r = await fetch('/api/bot/status');
-                        const s = await r.json();
-                        if (!s.secretConfigured) {
-                            el.innerHTML = '<span style="color:#fbbf24;">Set BOT_API_SECRET on Render to enable bot link.</span>';
-                            return;
-                        }
-                        const badge = s.online
-                            ? '<span style="color:#10b981;font-weight:bold;">● ONLINE</span>'
-                            : '<span style="color:#f43f5e;font-weight:bold;">● OFFLINE</span>';
-                        const ago = s.lastSeenAgoSec != null ? (s.lastSeenAgoSec + 's ago') : 'never';
-                        el.innerHTML = badge
-                            + '<br>Bot: <b style="color:#e2e8f0;">' + (s.tag || '—') + '</b>'
-                            + ' · Guilds: ' + (s.guilds != null ? s.guilds : '—')
-                            + ' · Ping: ' + (s.pingMs != null ? (s.pingMs + 'ms') : '—')
-                            + '<br>Last heartbeat: ' + ago
-                            + (s.error ? ('<br><span style="color:#f87171;">Error: ' + String(s.error) + '</span>') : '');
-                    } catch (e) {
-                        el.textContent = 'Failed to load bot status';
-                    }
-                }
-                refreshBotStatus();
-                setInterval(refreshBotStatus, 15000);
-                </script>
+
 
                 <div id="sessions-container" class="card" style="grid-column: span 2; display:none;">
                     <div class="card-header">
@@ -3449,6 +3471,147 @@ app.get('/api/bot/status', checkAuth, (req, res) => {
     res.json(getBotDashboardStatus());
 });
 
+/** Config for Mac bot (secret). Includes enabled + commands + roles */
+app.get('/api/bot/config', checkBotAuth, (req, res) => {
+    const data = db.getData();
+    const cfg = ensureBotConfig(data);
+    res.json({
+        enabled: !!cfg.enabled,
+        commands: cfg.commands,
+        updatedAt: cfg.updatedAt || null,
+        status: getBotDashboardStatus()
+    });
+});
+
+app.post('/api/bot/config', checkAuth, async (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
+    const data = db.getData();
+    const cfg = ensureBotConfig(data);
+    const body = req.body || {};
+    if (typeof body.enabled === 'boolean') cfg.enabled = body.enabled;
+    if (Array.isArray(body.commands)) {
+        const byId = {};
+        body.commands.forEach(c => { if (c && c.id) byId[c.id] = c; });
+        cfg.commands = DEFAULT_BOT_COMMANDS.map(def => {
+            const cur = byId[def.id] || {};
+            let name = (cur.name != null ? String(cur.name) : def.name).toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 32);
+            if (!name) name = def.name;
+            let roleIds = [];
+            if (typeof cur.roleIds === 'string') {
+                roleIds = cur.roleIds.split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
+            } else if (Array.isArray(cur.roleIds)) {
+                roleIds = cur.roleIds.map(String).filter(Boolean);
+            }
+            return {
+                id: def.id,
+                name,
+                description: (cur.description != null ? String(cur.description) : def.description).slice(0, 100),
+                enabled: cur.enabled !== false && cur.enabled !== 'false',
+                roleIds
+            };
+        });
+    }
+    cfg.updatedAt = Date.now();
+    data.botConfig = cfg;
+    await safeSave();
+    res.json({ ok: true, config: cfg });
+});
+
+app.get('/bot', checkAuth, (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) {
+        return res.status(403).send('Owner only');
+    }
+    const st = getBotDashboardStatus();
+    const cfg = ensureBotConfig(db.getData());
+    const rows = cfg.commands.map(c => {
+        return `<tr data-id="${c.id}">
+            <td><code>${c.id}</code></td>
+            <td><label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" class="cmd-enabled" ${c.enabled ? 'checked' : ''}/> On</label></td>
+            <td><input class="cmd-name" value="${String(c.name).replace(/"/g, '&quot;')}" style="margin:0;" maxlength="32"/></td>
+            <td><input class="cmd-desc" value="${String(c.description).replace(/"/g, '&quot;')}" style="margin:0;" maxlength="100"/></td>
+            <td><input class="cmd-roles" value="${(c.roleIds || []).join(', ')}" placeholder="role id, role id" style="margin:0;" title="Discord role IDs, comma-separated. Empty = bot owners only (DISCORD_OWNER_IDS)"/></td>
+        </tr>`;
+    }).join('');
+    res.send(`<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><title>Discord Bot Panel</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#0b0f19;color:#f1f5f9;margin:0;padding:24px;}
+.wrap{max-width:1100px;margin:0 auto;}
+a{color:#38bdf8;}
+.card{background:#111827;border:1px solid #1e293b;border-radius:10px;padding:20px;margin-bottom:16px;}
+h1{margin:0 0 8px;color:#a5b4fc;font-size:22px;}
+table{width:100%;border-collapse:collapse;font-size:13px;}
+th,td{padding:8px;border-bottom:1px solid #1e293b;text-align:left;vertical-align:middle;}
+th{color:#94a3b8;background:#1f2937;}
+input[type=text], input:not([type]) {width:100%;padding:8px;background:#1f2937;border:1px solid #374151;border-radius:6px;color:#fff;box-sizing:border-box;}
+button{background:#4f46e5;color:#fff;border:none;padding:10px 16px;border-radius:6px;font-weight:bold;cursor:pointer;}
+button.secondary{background:#374151;}
+.badge-on{color:#10b981;font-weight:bold;}
+.badge-off{color:#f43f5e;font-weight:bold;}
+.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;}
+.hint{font-size:12px;color:#64748b;margin-top:8px;line-height:1.5;}
+</style></head><body><div class="wrap">
+<div class="row" style="justify-content:space-between;margin-bottom:16px;">
+  <h1>🤖 Discord Bot Panel</h1>
+  <a href="/">← Dashboard</a>
+</div>
+<div class="card">
+  <div class="row">
+    <div id="live">Loading status…</div>
+    <label style="margin-left:auto;display:flex;align-items:center;gap:8px;font-weight:bold;">
+      <input type="checkbox" id="bot-enabled" ${cfg.enabled ? 'checked' : ''}/> Bot active
+    </label>
+    <button type="button" onclick="saveAll()">Save settings</button>
+  </div>
+  <p class="hint">When <b>Bot active</b> is off, the Mac process can still be online but all slash commands are rejected. Role IDs: Discord → Server Settings → Roles → right-click role → Copy Role ID (Developer Mode on).</p>
+</div>
+<div class="card">
+  <h3 style="margin-top:0;">Commands</h3>
+  <table>
+    <thead><tr><th>ID</th><th>Enabled</th><th>Slash name</th><th>Description</th><th>Allowed role IDs</th></tr></thead>
+    <tbody id="cmd-body">${rows}</tbody>
+  </table>
+  <p class="hint">Slash <b>name</b>: lowercase a-z, 0-9, _ and - only (Discord rules). After renaming, the Mac bot re-registers commands on next config poll (~30s). Empty roles = only users in DISCORD_OWNER_IDS on the Mac.</p>
+  <p id="save-msg" style="color:#10b981;display:none;">Saved.</p>
+</div>
+<script>
+async function refreshLive(){
+  try{
+    const r = await fetch('/api/bot/status');
+    const s = await r.json();
+    const el = document.getElementById('live');
+    const on = s.online ? '<span class="badge-on">● ONLINE</span>' : '<span class="badge-off">● OFFLINE</span>';
+    el.innerHTML = on + (s.tag ? (' · ' + s.tag) : '') + (s.pingMs != null ? (' · ' + s.pingMs + 'ms') : '') +
+      (s.lastSeenAgoSec != null ? (' · heartbeat ' + s.lastSeenAgoSec + 's ago') : '');
+  }catch(e){}
+}
+async function saveAll(){
+  const commands = [...document.querySelectorAll('#cmd-body tr')].map(tr => ({
+    id: tr.getAttribute('data-id'),
+    enabled: tr.querySelector('.cmd-enabled').checked,
+    name: tr.querySelector('.cmd-name').value.trim(),
+    description: tr.querySelector('.cmd-desc').value.trim(),
+    roleIds: tr.querySelector('.cmd-roles').value
+  }));
+  const body = {
+    enabled: document.getElementById('bot-enabled').checked,
+    commands
+  };
+  const r = await fetch('/api/bot/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  const msg = document.getElementById('save-msg');
+  if (r.ok) { msg.style.display = 'block'; setTimeout(() => msg.style.display = 'none', 2000); }
+  else alert('Save failed');
+}
+refreshLive();
+setInterval(refreshLive, 10000);
+</script>
+</div></body></html>`);
+});
+
 app.post('/api/bot/heartbeat', checkBotAuth, (req, res) => {
     const b = req.body || {};
     botRuntime.lastSeen = Date.now();
@@ -3458,7 +3621,16 @@ app.post('/api/bot/heartbeat', checkBotAuth, (req, res) => {
     if (b.error != null) botRuntime.error = b.error ? String(b.error) : null;
     if (b.startedAt != null) botRuntime.startedAt = b.startedAt;
     if (b.version != null) botRuntime.version = String(b.version);
-    res.json({ ok: true, serverTime: Date.now(), status: getBotDashboardStatus() });
+    const data = db.getData();
+    const cfg = ensureBotConfig(data);
+    res.json({
+        ok: true,
+        serverTime: Date.now(),
+        enabled: !!cfg.enabled,
+        configUpdatedAt: cfg.updatedAt || null,
+        commands: cfg.commands,
+        status: getBotDashboardStatus()
+    });
 });
 
 app.get('/api/bot/pending', checkBotAuth, (req, res) => {
