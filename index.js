@@ -54,6 +54,47 @@ function parseLocalTime(inputString) {
 }
 
 const OWNER_EMAIL = 'almogshemesh11@gmail.com';
+const BOT_API_SECRET = process.env.BOT_API_SECRET || '';
+
+/** Live status from Mac bot heartbeats (in-memory on Render) */
+let botRuntime = {
+    lastSeen: null,
+    tag: null,
+    guilds: 0,
+    pingMs: null,
+    error: null,
+    startedAt: null,
+    version: null
+};
+
+function checkBotAuth(req, res, next) {
+    if (!BOT_API_SECRET) {
+        return res.status(503).json({ error: 'BOT_API_SECRET not configured on server' });
+    }
+    const secret = req.headers['x-bot-secret'] || (req.body && req.body.secret) || req.query.secret;
+    if (!secret || secret !== BOT_API_SECRET) {
+        return res.status(401).json({ error: 'unauthorized' });
+    }
+    next();
+}
+
+function getBotDashboardStatus() {
+    const ONLINE_MS = 90 * 1000;
+    const online = !!(botRuntime.lastSeen && (Date.now() - botRuntime.lastSeen) < ONLINE_MS);
+    return {
+        online,
+        lastSeen: botRuntime.lastSeen,
+        lastSeenAgoSec: botRuntime.lastSeen ? Math.round((Date.now() - botRuntime.lastSeen) / 1000) : null,
+        tag: botRuntime.tag,
+        guilds: botRuntime.guilds,
+        pingMs: botRuntime.pingMs,
+        error: botRuntime.error,
+        startedAt: botRuntime.startedAt,
+        version: botRuntime.version,
+        secretConfigured: !!BOT_API_SECRET
+    };
+}
+
 
 const TRANSLATIONS = {
     en: {
@@ -1514,6 +1555,47 @@ app.get('/', checkAuth, (req, res) => {
                     </div>
                     <div id="stats-by-key" style="margin-top:12px;font-size:12px;color:#94a3b8;max-height:120px;overflow-y:auto;"></div>
                 </div>
+                <div class="card" style="grid-column: span 2;" id="bot-status-card">
+                    <div class="card-header">
+                        <h3>🤖 Discord Bot</h3>
+                        <button type="button" class="btn-refresh" style="width:auto;" onclick="refreshBotStatus()">Refresh</button>
+                    </div>
+                    <div id="bot-status-body" style="font-size:13px;color:#94a3b8;line-height:1.6;">
+                        Loading bot status…
+                    </div>
+                    <p style="font-size:11px;color:#64748b;margin:10px 0 0 0;">
+                        Bot runs on your Mac and heartbeats this server. Online = heartbeat &lt; 90s ago.
+                    </p>
+                </div>
+                <script>
+                async function refreshBotStatus() {
+                    const el = document.getElementById('bot-status-body');
+                    if (!el) return;
+                    try {
+                        const r = await fetch('/api/bot/status');
+                        const s = await r.json();
+                        if (!s.secretConfigured) {
+                            el.innerHTML = '<span style="color:#fbbf24;">Set BOT_API_SECRET on Render to enable bot link.</span>';
+                            return;
+                        }
+                        const badge = s.online
+                            ? '<span style="color:#10b981;font-weight:bold;">● ONLINE</span>'
+                            : '<span style="color:#f43f5e;font-weight:bold;">● OFFLINE</span>';
+                        const ago = s.lastSeenAgoSec != null ? (s.lastSeenAgoSec + 's ago') : 'never';
+                        el.innerHTML = badge
+                            + '<br>Bot: <b style="color:#e2e8f0;">' + (s.tag || '—') + '</b>'
+                            + ' · Guilds: ' + (s.guilds != null ? s.guilds : '—')
+                            + ' · Ping: ' + (s.pingMs != null ? (s.pingMs + 'ms') : '—')
+                            + '<br>Last heartbeat: ' + ago
+                            + (s.error ? ('<br><span style="color:#f87171;">Error: ' + String(s.error) + '</span>') : '');
+                    } catch (e) {
+                        el.textContent = 'Failed to load bot status';
+                    }
+                }
+                refreshBotStatus();
+                setInterval(refreshBotStatus, 15000);
+                </script>
+
                 <div id="sessions-container" class="card" style="grid-column: span 2; display:none;">
                     <div class="card-header">
                         <h3>👥 ${tr('activeUsers')}</h3>
@@ -3360,5 +3442,107 @@ app.get('/delete/:type/:id', checkAuth, async (req, res) => {
     await saveActionLogInternal(req.session.userEmail, "Remove Whitelist Entity", `Revoked access completely from ${type === 'creators' ? 'Creator' : 'Place'} -> Name/ID: ${targetName} (${id})`);
     res.sendStatus(200);
 });
+
+
+// ========== Discord bot bridge (Mac bot → this server) ==========
+app.get('/api/bot/status', checkAuth, (req, res) => {
+    res.json(getBotDashboardStatus());
+});
+
+app.post('/api/bot/heartbeat', checkBotAuth, (req, res) => {
+    const b = req.body || {};
+    botRuntime.lastSeen = Date.now();
+    if (b.tag != null) botRuntime.tag = String(b.tag);
+    if (b.guilds != null) botRuntime.guilds = Number(b.guilds) || 0;
+    if (b.pingMs != null) botRuntime.pingMs = Number(b.pingMs);
+    if (b.error != null) botRuntime.error = b.error ? String(b.error) : null;
+    if (b.startedAt != null) botRuntime.startedAt = b.startedAt;
+    if (b.version != null) botRuntime.version = String(b.version);
+    res.json({ ok: true, serverTime: Date.now(), status: getBotDashboardStatus() });
+});
+
+app.get('/api/bot/pending', checkBotAuth, (req, res) => {
+    const data = db.getData();
+    res.json({ pending: data.pendingPlaces || [] });
+});
+
+app.get('/api/bot/keys', checkBotAuth, (req, res) => {
+    const data = db.getData();
+    res.json({ keys: data.keys || [] });
+});
+
+app.get('/api/bot/stats', checkBotAuth, (req, res) => {
+    const data = db.getData();
+    res.json({ stats: data.stats || {}, maintenanceMode: !!data.maintenanceMode });
+});
+
+app.post('/api/bot/approve', checkBotAuth, async (req, res) => {
+    const data = db.getData();
+    const placeId = Number(req.body.placeId);
+    const key = req.body.key;
+    if (!placeId) return res.status(400).json({ error: 'placeId required' });
+    let pending = (data.pendingPlaces || []).find(p => p.id === placeId && (!key || p.key === key));
+    if (!pending && key) {
+        pending = { id: placeId, key, name: req.body.name || ('Place ' + placeId), creatorId: req.body.creatorId, creatorName: req.body.creatorName };
+    }
+    if (!pending) return res.status(404).json({ error: 'not in pending' });
+    const licenseKey = key || pending.key;
+    data.whitelist.places = data.whitelist.places || [];
+    let place = data.whitelist.places.find(p => p.id === placeId);
+    if (!place) {
+        place = {
+            id: placeId,
+            name: pending.name || ('Place ' + placeId),
+            keys: [],
+            creatorId: pending.creatorId,
+            creatorName: pending.creatorName
+        };
+        data.whitelist.places.push(place);
+    }
+    place.keys = place.keys || [];
+    if (licenseKey && !place.keys.some(k => k.key === licenseKey)) {
+        place.keys.push({ key: licenseKey, expiresAt: null });
+    }
+    data.pendingPlaces = (data.pendingPlaces || []).filter(p => !(p.id === placeId && (!key || p.key === key)));
+    await safeSave();
+    res.json({ ok: true, placeId, key: licenseKey });
+});
+
+app.post('/api/bot/reject', checkBotAuth, async (req, res) => {
+    const data = db.getData();
+    const placeId = Number(req.body.placeId);
+    const key = req.body.key;
+    if (!placeId) return res.status(400).json({ error: 'placeId required' });
+    const before = (data.pendingPlaces || []).length;
+    data.pendingPlaces = (data.pendingPlaces || []).filter(p => {
+        if (p.id !== placeId) return true;
+        if (key && p.key !== key) return true;
+        return false;
+    });
+    await safeSave();
+    res.json({ ok: true, removed: before - data.pendingPlaces.length });
+});
+
+app.post('/api/bot/maintenance', checkBotAuth, async (req, res) => {
+    const data = db.getData();
+    const state = String(req.body.state || '').toLowerCase();
+    if (state !== 'on' && state !== 'off') return res.status(400).json({ error: 'state on|off' });
+    data.maintenanceMode = state === 'on';
+    await safeSave();
+    res.json({ ok: true, maintenanceMode: data.maintenanceMode });
+});
+
+app.post('/api/bot/freeze-key', checkBotAuth, async (req, res) => {
+    const data = db.getData();
+    const key = req.body.key;
+    if (!key) return res.status(400).json({ error: 'key required' });
+    const keyObj = (data.keys || []).find(k => k.key === key);
+    if (!keyObj) return res.status(404).json({ error: 'key not found' });
+    if (typeof req.body.frozen === 'boolean') keyObj.frozen = req.body.frozen;
+    else keyObj.frozen = !keyObj.frozen;
+    await safeSave();
+    res.json({ ok: true, key, frozen: !!keyObj.frozen });
+});
+
 
 app.listen(PORT, () => {});
