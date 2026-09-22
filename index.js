@@ -2679,14 +2679,6 @@ app.post('/obfuscate', checkAuth, async (req, res) => {
                     surfaceGui.Face = Enum.NormalId.Front
                     surfaceGui.Parent = Panel
                 end
-                -- Bring SurfaceGui to front among other SurfaceGuis on this part
-                local maxDisplay = 0
-                for _, child in pairs(Panel:GetChildren()) do
-                    if child:IsA("SurfaceGui") and typeof(child.DisplayOrder) == "number" and child.DisplayOrder > maxDisplay then
-                        maxDisplay = child.DisplayOrder
-                    end
-                end
-                surfaceGui.DisplayOrder = math.max(maxDisplay + 1, 2147483647)
                 surfaceGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
                 -- clear previous error UI
                 for _, child in pairs(surfaceGui:GetChildren()) do
