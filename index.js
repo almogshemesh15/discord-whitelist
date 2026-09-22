@@ -79,6 +79,35 @@ const DEFAULT_BOT_COMMANDS = [
     { id: 'wl-link', name: 'link', description: 'Post Roblox link panel with code entry', enabled: true, roleIds: ['ALL'] }
 ];
 
+
+function ensureLinkStores(data) {
+    if (!Array.isArray(data.discordLinks)) data.discordLinks = [];
+    if (!data.pendingLinkCodes || typeof data.pendingLinkCodes !== 'object') data.pendingLinkCodes = {};
+}
+
+/** 8-char unique code, never collides with active pending or recent */
+function generateUniqueLinkCode(data) {
+    ensureLinkStores(data);
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no I/O/0/1
+    for (let attempt = 0; attempt < 50; attempt++) {
+        let code = '';
+        for (let i = 0; i < 8; i++) code += alphabet[Math.floor(Math.random() * alphabet.length)];
+        const pending = data.pendingLinkCodes[code];
+        if (pending && pending.expiresAt > Date.now()) continue;
+        return code;
+    }
+    // fallback ultra-unique
+    return ('X' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)).toUpperCase().slice(0, 10);
+}
+
+function purgeExpiredLinkCodes(data) {
+    ensureLinkStores(data);
+    const now = Date.now();
+    for (const [code, row] of Object.entries(data.pendingLinkCodes)) {
+        if (!row || !row.expiresAt || row.expiresAt <= now) delete data.pendingLinkCodes[code];
+    }
+}
+
 function normalizeRoleIds(raw) {
     let list = [];
     if (typeof raw === 'string') {
@@ -1592,6 +1621,7 @@ app.get('/', checkAuth, (req, res) => {
                     <span style="font-size:12px;color:#94a3b8;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${req.session.userEmail}">${req.session.userEmail}</span>
                     ${isOwner ? `<button type="button" id="maint-btn" class="hdr-btn ${maintenanceOn ? 'btn-maint-on' : 'btn-maint-off'}" onclick="toggleMaintenance()">${maintenanceOn ? '🛠️ ' + tr('maintenanceOn') : '🛠️ ' + tr('maintenance')}</button>` : ''}
                     <a href="/bot" class="btn-obfuscate-page" style="background:#6366f1;border-color:#4f46e5;">🤖 Bot</a>
+                    <a href="/users" class="btn-obfuscate-page" style="background:#14b8a6;border-color:#0d9488;">👤 Users</a>
                     <a href="/messages" class="btn-obfuscate-page" style="background:#f59e0b;border-color:#d97706;">💬 ${tr('messages')}</a>
                     <a href="/obfuscate" class="btn-obfuscate-page">🔒 ${tr('obfuscate')}</a>
                     <a href="/force-save" class="btn-save-db">💾 ${tr('save')}</a>
@@ -3735,6 +3765,161 @@ app.post('/api/bot/freeze-key', checkBotAuth, async (req, res) => {
     else keyObj.frozen = !keyObj.frozen;
     await safeSave();
     res.json({ ok: true, key, frozen: !!keyObj.frozen });
+});
+
+
+
+// ========== Discord ↔ Roblox link ==========
+app.post('/api/bot/link/create', checkBotAuth, async (req, res) => {
+    const data = db.getData();
+    ensureLinkStores(data);
+    purgeExpiredLinkCodes(data);
+    const robloxId = String(req.body.robloxId || '').trim();
+    const robloxName = String(req.body.robloxName || '').trim() || null;
+    if (!robloxId || !/^\d+$/.test(robloxId)) {
+        return res.status(400).json({ error: 'robloxId required' });
+    }
+    // Already linked?
+    const existing = data.discordLinks.find(l => String(l.robloxId) === robloxId);
+    if (existing) {
+        return res.json({
+            ok: true,
+            alreadyLinked: true,
+            discordId: existing.discordId,
+            discordTag: existing.discordTag,
+            robloxId: existing.robloxId,
+            robloxName: existing.robloxName
+        });
+    }
+    // Reuse active code for same roblox player (prevent spam codes)
+    for (const [code, row] of Object.entries(data.pendingLinkCodes)) {
+        if (row && String(row.robloxId) === robloxId && row.expiresAt > Date.now()) {
+            return res.json({ ok: true, code, expiresAt: row.expiresAt, robloxId, robloxName: row.robloxName });
+        }
+    }
+    const code = generateUniqueLinkCode(data);
+    const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
+    data.pendingLinkCodes[code] = { robloxId, robloxName, createdAt: Date.now(), expiresAt };
+    await safeSave();
+    res.json({ ok: true, code, expiresAt, robloxId, robloxName });
+});
+
+app.post('/api/bot/link/claim', checkBotAuth, async (req, res) => {
+    const data = db.getData();
+    ensureLinkStores(data);
+    purgeExpiredLinkCodes(data);
+    const code = String(req.body.code || '').trim().toUpperCase();
+    const discordId = String(req.body.discordId || '').trim();
+    const discordTag = String(req.body.discordTag || req.body.discordName || '').trim() || null;
+    if (!code || !discordId) return res.status(400).json({ error: 'code and discordId required' });
+
+    const pending = data.pendingLinkCodes[code];
+    if (!pending) return res.status(404).json({ error: 'Invalid or expired code' });
+    if (pending.expiresAt <= Date.now()) {
+        delete data.pendingLinkCodes[code];
+        await safeSave();
+        return res.status(404).json({ error: 'Code expired' });
+    }
+
+    // Discord already linked to someone else?
+    const byDiscord = data.discordLinks.find(l => String(l.discordId) === discordId);
+    if (byDiscord && String(byDiscord.robloxId) !== String(pending.robloxId)) {
+        return res.status(409).json({ error: 'This Discord is already linked to another Roblox account' });
+    }
+    const byRoblox = data.discordLinks.find(l => String(l.robloxId) === String(pending.robloxId));
+    if (byRoblox && String(byRoblox.discordId) !== discordId) {
+        return res.status(409).json({ error: 'This Roblox account is already linked to another Discord' });
+    }
+
+    delete data.pendingLinkCodes[code];
+    if (byDiscord) {
+        byDiscord.robloxId = String(pending.robloxId);
+        byDiscord.robloxName = pending.robloxName || byDiscord.robloxName;
+        byDiscord.discordTag = discordTag || byDiscord.discordTag;
+        byDiscord.linkedAt = Date.now();
+    } else if (byRoblox) {
+        byRoblox.discordId = discordId;
+        byRoblox.discordTag = discordTag;
+        byRoblox.linkedAt = Date.now();
+    } else {
+        data.discordLinks.push({
+            discordId,
+            discordTag,
+            robloxId: String(pending.robloxId),
+            robloxName: pending.robloxName,
+            linkedAt: Date.now()
+        });
+    }
+    await safeSave();
+    const row = data.discordLinks.find(l => String(l.discordId) === discordId);
+    res.json({ ok: true, ...row });
+});
+
+app.get('/api/bot/links', checkBotAuth, (req, res) => {
+    const data = db.getData();
+    ensureLinkStores(data);
+    res.json({ links: data.discordLinks || [] });
+});
+
+app.get('/users', checkAuth, (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).send('Owner only');
+    const data = db.getData();
+    ensureLinkStores(data);
+    const rows = (data.discordLinks || []).slice().sort((a, b) => (b.linkedAt || 0) - (a.linkedAt || 0)).map(l => {
+        const when = l.linkedAt ? new Date(l.linkedAt).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' }) : '—';
+        return `<tr>
+          <td><code>${l.discordTag || '—'}</code></td>
+          <td><code>${l.discordId || '—'}</code></td>
+          <td><code>${l.robloxName || '—'}</code></td>
+          <td><code>${l.robloxId || '—'}</code></td>
+          <td>${when}</td>
+          <td><button type="button" onclick="unlinkUser('${l.discordId}')" style="background:#f43f5e;width:auto;padding:6px 10px;">Unlink</button></td>
+        </tr>`;
+    }).join('') || '<tr><td colspan="6" style="color:#64748b;text-align:center;">No linked users yet</td></tr>';
+    res.send(`<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Linked Users</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#0b0f19;color:#f1f5f9;margin:0;padding:24px;}
+.wrap{max-width:1100px;margin:0 auto;}
+a{color:#38bdf8;}
+.card{background:#111827;border:1px solid #1e293b;border-radius:10px;padding:20px;}
+table{width:100%;border-collapse:collapse;font-size:13px;}
+th,td{padding:10px;border-bottom:1px solid #1e293b;text-align:left;}
+th{color:#94a3b8;background:#1f2937;}
+button{cursor:pointer;border:none;border-radius:6px;color:#fff;font-weight:bold;}
+</style></head><body><div class="wrap">
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+  <h1 style="margin:0;color:#a5b4fc;">Linked Users</h1>
+  <div><a href="/bot">Bot panel</a> · <a href="/">Dashboard</a></div>
+</div>
+<div class="card">
+  <p style="color:#94a3b8;font-size:13px;">Discord accounts linked via /link + Roblox code. Codes are unique and expire in 10 minutes.</p>
+  <table>
+    <thead><tr><th>Discord</th><th>Discord ID</th><th>Roblox</th><th>Roblox ID</th><th>Linked at</th><th></th></tr></thead>
+    <tbody id="body">${rows}</tbody>
+  </table>
+</div>
+<script>
+async function unlinkUser(discordId){
+  if(!confirm('Unlink this user?')) return;
+  const r = await fetch('/api/users/unlink', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ discordId })
+  });
+  if(r.ok) location.reload(); else alert('Failed');
+}
+</script>
+</div></body></html>`);
+});
+
+app.post('/api/users/unlink', checkAuth, async (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) return res.sendStatus(403);
+    const data = db.getData();
+    ensureLinkStores(data);
+    const discordId = String(req.body.discordId || '');
+    data.discordLinks = data.discordLinks.filter(l => String(l.discordId) !== discordId);
+    await safeSave();
+    res.json({ ok: true });
 });
 
 
