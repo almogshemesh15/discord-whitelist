@@ -75,14 +75,30 @@ const DEFAULT_BOT_COMMANDS = [
     { id: 'wl-keys', name: 'wl-keys', description: 'List system keys', enabled: true, roleIds: [] },
     { id: 'wl-freeze-key', name: 'wl-freeze-key', description: 'Toggle freeze on a system key', enabled: true, roleIds: [] },
     { id: 'wl-maintenance', name: 'wl-maintenance', description: 'Turn maintenance on/off', enabled: true, roleIds: [] },
-    { id: 'wl-stats', name: 'wl-stats', description: 'Usage stats from the site', enabled: true, roleIds: [] }
+    { id: 'wl-stats', name: 'wl-stats', description: 'Usage stats from the site', enabled: true, roleIds: [] },
+    { id: 'wl-link', name: 'link', description: 'Post Roblox link panel with code entry', enabled: true, roleIds: ['ALL'] }
 ];
+
+function normalizeRoleIds(raw) {
+    let list = [];
+    if (typeof raw === 'string') {
+        list = raw.split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
+    } else if (Array.isArray(raw)) {
+        list = raw.map(String).map(s => s.trim()).filter(Boolean);
+    }
+    const upper = list.map(s => s.toUpperCase());
+    if (upper.includes('ALL') || upper.includes('@EVERYONE') || upper.includes('EVERYONE')) {
+        return ['ALL'];
+    }
+    return list;
+}
 
 function ensureBotConfig(data) {
     if (!data.botConfig || typeof data.botConfig !== 'object') {
-        data.botConfig = { enabled: true, commands: [], updatedAt: Date.now() };
+        data.botConfig = { enabled: true, commands: [], robloxGameUrl: '', updatedAt: Date.now() };
     }
     if (typeof data.botConfig.enabled !== 'boolean') data.botConfig.enabled = true;
+    if (typeof data.botConfig.robloxGameUrl !== 'string') data.botConfig.robloxGameUrl = data.botConfig.robloxGameUrl || '';
     if (!Array.isArray(data.botConfig.commands)) data.botConfig.commands = [];
     const byId = {};
     data.botConfig.commands.forEach(c => { if (c && c.id) byId[c.id] = c; });
@@ -90,12 +106,13 @@ function ensureBotConfig(data) {
         const cur = byId[def.id] || {};
         let name = (cur.name != null ? String(cur.name) : def.name).toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 32);
         if (!name) name = def.name;
+        const roleIds = normalizeRoleIds(cur.roleIds != null ? cur.roleIds : def.roleIds);
         return {
             id: def.id,
             name,
             description: (cur.description != null ? String(cur.description) : def.description).slice(0, 100),
             enabled: cur.enabled !== false,
-            roleIds: Array.isArray(cur.roleIds) ? cur.roleIds.map(String).filter(Boolean) : []
+            roleIds
         };
     });
     data.botConfig.commands = merged;
@@ -3478,6 +3495,7 @@ app.get('/api/bot/config', checkBotAuth, (req, res) => {
     res.json({
         enabled: !!cfg.enabled,
         commands: cfg.commands,
+        robloxGameUrl: cfg.robloxGameUrl || '',
         updatedAt: cfg.updatedAt || null,
         status: getBotDashboardStatus()
     });
@@ -3489,6 +3507,9 @@ app.post('/api/bot/config', checkAuth, async (req, res) => {
     const cfg = ensureBotConfig(data);
     const body = req.body || {};
     if (typeof body.enabled === 'boolean') cfg.enabled = body.enabled;
+    if (body.robloxGameUrl != null) {
+        cfg.robloxGameUrl = String(body.robloxGameUrl).trim().slice(0, 300);
+    }
     if (Array.isArray(body.commands)) {
         const byId = {};
         body.commands.forEach(c => { if (c && c.id) byId[c.id] = c; });
@@ -3496,18 +3517,12 @@ app.post('/api/bot/config', checkAuth, async (req, res) => {
             const cur = byId[def.id] || {};
             let name = (cur.name != null ? String(cur.name) : def.name).toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 32);
             if (!name) name = def.name;
-            let roleIds = [];
-            if (typeof cur.roleIds === 'string') {
-                roleIds = cur.roleIds.split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
-            } else if (Array.isArray(cur.roleIds)) {
-                roleIds = cur.roleIds.map(String).filter(Boolean);
-            }
             return {
                 id: def.id,
                 name,
                 description: (cur.description != null ? String(cur.description) : def.description).slice(0, 100),
                 enabled: cur.enabled !== false && cur.enabled !== 'false',
-                roleIds
+                roleIds: normalizeRoleIds(cur.roleIds)
             };
         });
     }
@@ -3529,7 +3544,7 @@ app.get('/bot', checkAuth, (req, res) => {
             <td><label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" class="cmd-enabled" ${c.enabled ? 'checked' : ''}/> On</label></td>
             <td><input class="cmd-name" value="${String(c.name).replace(/"/g, '&quot;')}" style="margin:0;" maxlength="32"/></td>
             <td><input class="cmd-desc" value="${String(c.description).replace(/"/g, '&quot;')}" style="margin:0;" maxlength="100"/></td>
-            <td><input class="cmd-roles" value="${(c.roleIds || []).join(', ')}" placeholder="role id, role id" style="margin:0;" title="Discord role IDs, comma-separated. Empty = bot owners only (DISCORD_OWNER_IDS)"/></td>
+            <td><input class="cmd-roles" value="${(c.roleIds || []).join(', ')}" placeholder="ALL or role id, role id" style="margin:0;" title="ALL = everyone. Empty = owners only. Or Discord role IDs."/></td>
         </tr>`;
     }).join('');
     res.send(`<!DOCTYPE html>
@@ -3563,7 +3578,11 @@ button.secondary{background:#374151;}
     </label>
     <button type="button" onclick="saveAll()">Save settings</button>
   </div>
-  <p class="hint">When <b>Bot active</b> is off, the Mac process can still be online but all slash commands are rejected. Role IDs: Discord → Server Settings → Roles → right-click role → Copy Role ID (Developer Mode on).</p>
+  <p class="hint">When <b>Bot active</b> is off, slash commands are rejected. Roles: type <b>ALL</b> for everyone, empty = owners only, or Discord role IDs. Restricted commands are hidden from others (bot auto-syncs every server it is in).</p>
+  <div style="margin-top:14px;">
+    <label style="font-size:13px;color:#94a3b8;">Roblox game URL (for /link button)</label>
+    <input id="roblox-url" type="text" value="${(cfg.robloxGameUrl || '').replace(/"/g, '&quot;')}" placeholder="https://www.roblox.com/games/..." style="margin-top:6px;"/>
+  </div>
 </div>
 <div class="card">
   <h3 style="margin-top:0;">Commands</h3>
@@ -3595,6 +3614,7 @@ async function saveAll(){
   }));
   const body = {
     enabled: document.getElementById('bot-enabled').checked,
+    robloxGameUrl: (document.getElementById('roblox-url') || {}).value || '',
     commands
   };
   const r = await fetch('/api/bot/config', {
@@ -3629,6 +3649,7 @@ app.post('/api/bot/heartbeat', checkBotAuth, (req, res) => {
         enabled: !!cfg.enabled,
         configUpdatedAt: cfg.updatedAt || null,
         commands: cfg.commands,
+        robloxGameUrl: cfg.robloxGameUrl || '',
         status: getBotDashboardStatus()
     });
 });
