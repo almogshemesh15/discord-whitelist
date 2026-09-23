@@ -3811,6 +3811,41 @@ app.post('/api/bot/link/create', checkBotAuth, async (req, res) => {
     res.json({ ok: true, code, expiresAt, robloxId, robloxName });
 });
 
+
+app.post('/api/bot/link/transfer-code', checkBotAuth, async (req, res) => {
+    const data = db.getData();
+    ensureLinkStores(data);
+    purgeExpiredLinkCodes(data);
+    const discordId = String(req.body.discordId || '').trim();
+    if (!discordId) return res.status(400).json({ error: 'discordId required' });
+    const row = data.discordLinks.find(l => String(l.discordId) === discordId);
+    if (!row) return res.status(404).json({ error: 'Not linked' });
+    // Invalidate other pending transfer codes for this roblox
+    for (const [c, r] of Object.entries(data.pendingLinkCodes)) {
+        if (r && String(r.robloxId) === String(row.robloxId) && r.transfer) {
+            delete data.pendingLinkCodes[c];
+        }
+    }
+    const code = generateUniqueLinkCode(data);
+    const expiresAt = Date.now() + 15 * 60 * 1000;
+    data.pendingLinkCodes[code] = {
+        robloxId: String(row.robloxId),
+        robloxName: row.robloxName || null,
+        createdAt: Date.now(),
+        expiresAt,
+        transfer: true,
+        fromDiscordId: discordId
+    };
+    await safeSave();
+    res.json({
+        ok: true,
+        code,
+        expiresAt,
+        robloxId: row.robloxId,
+        robloxName: row.robloxName
+    });
+});
+
 app.get('/api/bot/link/status', checkBotAuth, async (req, res) => {
     const data = db.getData();
     ensureLinkStores(data);
@@ -3834,28 +3869,9 @@ app.post('/api/bot/link/claim', checkBotAuth, async (req, res) => {
     const code = String(req.body.code || '').trim().toUpperCase();
     const discordId = String(req.body.discordId || '').trim();
     const discordTag = String(req.body.discordTag || req.body.discordName || '').trim() || null;
+    const switchRoblox = !!(req.body.switch || req.body.forceSwitch || req.body.switchRoblox);
+    const switchDiscord = !!(req.body.switchDiscord);
     if (!code || !discordId) return res.status(400).json({ error: 'code and discordId required' });
-
-    const switchMode = !!(req.body.switch || req.body.forceSwitch);
-    // Already linked with this discord?
-    const already = data.discordLinks.find(l => String(l.discordId) === discordId);
-    if (already && !switchMode) {
-        if (discordTag && already.discordTag !== discordTag) {
-            already.discordTag = discordTag;
-            await safeSave();
-        }
-        return res.status(409).json({
-            error: 'Already verified',
-            alreadyLinked: true,
-            robloxId: already.robloxId,
-            robloxName: already.robloxName,
-            discordTag: already.discordTag
-        });
-    }
-    if (already && switchMode) {
-        // Remove current link so we can bind a new Roblox account
-        data.discordLinks = data.discordLinks.filter(l => String(l.discordId) !== discordId);
-    }
 
     const pending = data.pendingLinkCodes[code];
     if (!pending) return res.status(404).json({ error: 'Invalid or expired code' });
@@ -3865,22 +3881,95 @@ app.post('/api/bot/link/claim', checkBotAuth, async (req, res) => {
         return res.status(404).json({ error: 'Code expired' });
     }
 
-    const byRoblox = data.discordLinks.find(l => String(l.robloxId) === String(pending.robloxId));
+    const robloxId = String(pending.robloxId);
+    const byDiscord = data.discordLinks.find(l => String(l.discordId) === discordId);
+    const byRoblox = data.discordLinks.find(l => String(l.robloxId) === robloxId);
+
+    // Plain /link: block if this Discord already linked (unless switching Roblox)
+    if (byDiscord && !switchRoblox && !switchDiscord) {
+        if (discordTag && byDiscord.discordTag !== discordTag) {
+            byDiscord.discordTag = discordTag;
+            await safeSave();
+        }
+        return res.status(409).json({
+            error: 'Already verified',
+            alreadyLinked: true,
+            robloxId: byDiscord.robloxId,
+            robloxName: byDiscord.robloxName,
+            discordTag: byDiscord.discordTag
+        });
+    }
+
+    // Switch Discord: new Discord + code from existing Roblox → move link, keep all extra data
+    if (switchDiscord) {
+        if (!byRoblox) {
+            // Roblox never linked — just create
+            if (byDiscord) {
+                data.discordLinks = data.discordLinks.filter(l => String(l.discordId) !== discordId);
+            }
+            data.discordLinks.push({
+                discordId,
+                discordTag,
+                robloxId,
+                robloxName: pending.robloxName,
+                linkedAt: Date.now()
+            });
+        } else {
+            // Preserve purchases / future fields on the Roblox row
+            if (byDiscord && byDiscord !== byRoblox) {
+                data.discordLinks = data.discordLinks.filter(l => String(l.discordId) !== discordId);
+            }
+            byRoblox.discordId = discordId;
+            byRoblox.discordTag = discordTag;
+            byRoblox.robloxName = pending.robloxName || byRoblox.robloxName;
+            byRoblox.linkedAt = Date.now();
+        }
+        delete data.pendingLinkCodes[code];
+        await safeSave();
+        const row = data.discordLinks.find(l => String(l.discordId) === discordId);
+        return res.json({ ok: true, switchedDiscord: true, ...row });
+    }
+
+    // Switch Roblox: same Discord, different Roblox code
+    if (switchRoblox && byDiscord) {
+        // If target Roblox already owned by someone else — block
+        if (byRoblox && String(byRoblox.discordId) !== discordId) {
+            return res.status(409).json({ error: 'This Roblox account is already linked to another Discord' });
+        }
+        // Keep extra data from the Discord row, change Roblox ids
+        byDiscord.robloxId = robloxId;
+        byDiscord.robloxName = pending.robloxName || byDiscord.robloxName;
+        byDiscord.discordTag = discordTag || byDiscord.discordTag;
+        byDiscord.linkedAt = Date.now();
+        // If a separate row existed for this roblox (shouldn't), merge nothing destructive
+        if (byRoblox && byRoblox !== byDiscord) {
+            data.discordLinks = data.discordLinks.filter(l => l !== byRoblox);
+        }
+        delete data.pendingLinkCodes[code];
+        await safeSave();
+        return res.json({ ok: true, switchedRoblox: true, ...byDiscord });
+    }
+
+    // Normal link
     if (byRoblox && String(byRoblox.discordId) !== discordId) {
         return res.status(409).json({ error: 'This Roblox account is already linked to another Discord' });
     }
-
     delete data.pendingLinkCodes[code];
     if (byRoblox) {
         byRoblox.discordId = discordId;
         byRoblox.discordTag = discordTag;
         byRoblox.robloxName = pending.robloxName || byRoblox.robloxName;
         byRoblox.linkedAt = Date.now();
+    } else if (byDiscord) {
+        byDiscord.robloxId = robloxId;
+        byDiscord.robloxName = pending.robloxName || byDiscord.robloxName;
+        byDiscord.discordTag = discordTag || byDiscord.discordTag;
+        byDiscord.linkedAt = Date.now();
     } else {
         data.discordLinks.push({
             discordId,
             discordTag,
-            robloxId: String(pending.robloxId),
+            robloxId,
             robloxName: pending.robloxName,
             linkedAt: Date.now()
         });
