@@ -1554,8 +1554,8 @@ app.get('/', checkAuth, (req, res) => {
             .lang-switch a { padding: 4px 8px; border-radius: 4px; font-size: 11px; text-decoration: none; color: #94a3b8; border: 1px solid #374151; background: #1f2937; }
             .lang-switch a.active { background: #0284c7; color: white; border-color: #0284c7; }
             .container { max-width: 1200px; margin: 0 auto; }
-            .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 15px; margin-bottom: 25px; flex-wrap: wrap; gap: 12px; }
-            .header-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; }
+            .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 15px; margin-bottom: 25px; flex-wrap: nowrap; gap: 12px; }
+            .header-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; margin-left: auto; flex-shrink: 0; }
             .header-actions a, .header-actions button.hdr-btn { white-space: nowrap; flex-shrink: 0; }
             h1 { font-size: 22px; color: #38bdf8; margin: 0; white-space: nowrap; }
             .maint-banner { background: #7f1d1d; border: 1px solid #ef4444; color: #fecaca; padding: 10px 16px; border-radius: 8px; margin-bottom: 16px; font-weight: bold; text-align: center; display: none; }
@@ -3953,13 +3953,40 @@ function filterUsers(){
     tr.style.display = !q || tr.getAttribute('data-search').includes(q) ? '' : 'none';
   });
 }
+function renderRows(links){
+  const body = document.getElementById('body');
+  if(!links || !links.length){
+    body.innerHTML = '<tr class="empty"><td colspan="6" style="color:#64748b;text-align:center;">No linked users yet</td></tr>';
+    return;
+  }
+  body.innerHTML = links.map(l => {
+    const when = l.linkedAt ? new Date(l.linkedAt).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' }) : '—';
+    const blob = [l.discordTag, l.discordId, l.robloxName, l.robloxId].join(' ').toLowerCase();
+    return '<tr data-search="'+blob.replace(/"/g,'')+'">' +
+      '<td><code>'+(l.discordTag||'—')+'</code></td>' +
+      '<td><code>'+(l.discordId||'—')+'</code></td>' +
+      '<td><code>'+(l.robloxName||'—')+'</code></td>' +
+      '<td><code>'+(l.robloxId||'—')+'</code></td>' +
+      '<td>'+when+'</td>' +
+      '<td><button type="button" onclick="unlinkUser(\''+l.discordId+'\')" style="background:#f43f5e;width:auto;padding:6px 10px;">Unlink</button></td>' +
+    '</tr>';
+  }).join('');
+  filterUsers();
+}
+async function refreshUsers(){
+  try{
+    const r = await fetch('/api/users/list');
+    const j = await r.json();
+    if(r.ok) renderRows(j.links || []);
+  }catch(e){}
+}
 async function unlinkUser(discordId){
   if(!confirm('Unlink this user?')) return;
   const r = await fetch('/api/users/unlink', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ discordId })
   });
-  if(r.ok) location.reload(); else alert('Failed');
+  if(r.ok) refreshUsers(); else alert('Failed');
 }
 async function addManual(){
   const body = {
@@ -3974,10 +4001,26 @@ async function addManual(){
   });
   const j = await r.json().catch(() => ({}));
   if(!r.ok){ alert(j.error || 'Failed'); return; }
-  location.reload();
+  document.getElementById('m-discord-id').value = '';
+  document.getElementById('m-discord-tag').value = '';
+  document.getElementById('m-roblox-id').value = '';
+  document.getElementById('m-roblox-name').value = '';
+  const msg = document.getElementById('add-msg');
+  if(msg){ msg.style.display = 'block'; setTimeout(() => msg.style.display = 'none', 1500); }
+  refreshUsers();
 }
+refreshUsers();
+setInterval(refreshUsers, 5000);
 </script>
 </div></body></html>`);
+});
+
+app.get('/api/users/list', checkAuth, (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
+    const data = db.getData();
+    ensureLinkStores(data);
+    const links = (data.discordLinks || []).slice().sort((a, b) => (b.linkedAt || 0) - (a.linkedAt || 0));
+    res.json({ links });
 });
 
 app.post('/api/users/unlink', checkAuth, async (req, res) => {
