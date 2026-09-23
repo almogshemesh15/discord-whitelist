@@ -3779,9 +3779,13 @@ app.post('/api/bot/link/create', checkBotAuth, async (req, res) => {
     if (!robloxId || !/^\d+$/.test(robloxId)) {
         return res.status(400).json({ error: 'robloxId required' });
     }
-    // Already linked?
     const existing = data.discordLinks.find(l => String(l.robloxId) === robloxId);
     if (existing) {
+        // Keep Roblox username up to date
+        if (robloxName && existing.robloxName !== robloxName) {
+            existing.robloxName = robloxName;
+            await safeSave();
+        }
         return res.json({
             ok: true,
             alreadyLinked: true,
@@ -3791,17 +3795,34 @@ app.post('/api/bot/link/create', checkBotAuth, async (req, res) => {
             robloxName: existing.robloxName
         });
     }
-    // Reuse active code for same roblox player (prevent spam codes)
     for (const [code, row] of Object.entries(data.pendingLinkCodes)) {
         if (row && String(row.robloxId) === robloxId && row.expiresAt > Date.now()) {
+            if (robloxName) row.robloxName = robloxName;
+            await safeSave();
             return res.json({ ok: true, code, expiresAt: row.expiresAt, robloxId, robloxName: row.robloxName });
         }
     }
     const code = generateUniqueLinkCode(data);
-    const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
+    const expiresAt = Date.now() + 10 * 60 * 1000;
     data.pendingLinkCodes[code] = { robloxId, robloxName, createdAt: Date.now(), expiresAt };
     await safeSave();
     res.json({ ok: true, code, expiresAt, robloxId, robloxName });
+});
+
+app.get('/api/bot/link/status', checkBotAuth, async (req, res) => {
+    const data = db.getData();
+    ensureLinkStores(data);
+    const discordId = String(req.query.discordId || req.body && req.body.discordId || '').trim();
+    if (!discordId) return res.status(400).json({ error: 'discordId required' });
+    const row = data.discordLinks.find(l => String(l.discordId) === discordId);
+    if (!row) return res.json({ linked: false });
+    // optional live name refresh from client
+    const tag = String(req.query.discordTag || '').trim();
+    if (tag && row.discordTag !== tag) {
+        row.discordTag = tag;
+        await safeSave();
+    }
+    res.json({ linked: true, ...row });
 });
 
 app.post('/api/bot/link/claim', checkBotAuth, async (req, res) => {
@@ -3813,6 +3834,22 @@ app.post('/api/bot/link/claim', checkBotAuth, async (req, res) => {
     const discordTag = String(req.body.discordTag || req.body.discordName || '').trim() || null;
     if (!code || !discordId) return res.status(400).json({ error: 'code and discordId required' });
 
+    // Already linked with this discord?
+    const already = data.discordLinks.find(l => String(l.discordId) === discordId);
+    if (already) {
+        if (discordTag && already.discordTag !== discordTag) {
+            already.discordTag = discordTag;
+            await safeSave();
+        }
+        return res.status(409).json({
+            error: 'Already verified',
+            alreadyLinked: true,
+            robloxId: already.robloxId,
+            robloxName: already.robloxName,
+            discordTag: already.discordTag
+        });
+    }
+
     const pending = data.pendingLinkCodes[code];
     if (!pending) return res.status(404).json({ error: 'Invalid or expired code' });
     if (pending.expiresAt <= Date.now()) {
@@ -3821,25 +3858,16 @@ app.post('/api/bot/link/claim', checkBotAuth, async (req, res) => {
         return res.status(404).json({ error: 'Code expired' });
     }
 
-    // Discord already linked to someone else?
-    const byDiscord = data.discordLinks.find(l => String(l.discordId) === discordId);
-    if (byDiscord && String(byDiscord.robloxId) !== String(pending.robloxId)) {
-        return res.status(409).json({ error: 'This Discord is already linked to another Roblox account' });
-    }
     const byRoblox = data.discordLinks.find(l => String(l.robloxId) === String(pending.robloxId));
     if (byRoblox && String(byRoblox.discordId) !== discordId) {
         return res.status(409).json({ error: 'This Roblox account is already linked to another Discord' });
     }
 
     delete data.pendingLinkCodes[code];
-    if (byDiscord) {
-        byDiscord.robloxId = String(pending.robloxId);
-        byDiscord.robloxName = pending.robloxName || byDiscord.robloxName;
-        byDiscord.discordTag = discordTag || byDiscord.discordTag;
-        byDiscord.linkedAt = Date.now();
-    } else if (byRoblox) {
+    if (byRoblox) {
         byRoblox.discordId = discordId;
         byRoblox.discordTag = discordTag;
+        byRoblox.robloxName = pending.robloxName || byRoblox.robloxName;
         byRoblox.linkedAt = Date.now();
     } else {
         data.discordLinks.push({
@@ -3867,7 +3895,8 @@ app.get('/users', checkAuth, (req, res) => {
     ensureLinkStores(data);
     const rows = (data.discordLinks || []).slice().sort((a, b) => (b.linkedAt || 0) - (a.linkedAt || 0)).map(l => {
         const when = l.linkedAt ? new Date(l.linkedAt).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' }) : '—';
-        return `<tr>
+        const blob = [l.discordTag, l.discordId, l.robloxName, l.robloxId].join(' ').toLowerCase();
+        return `<tr data-search="${blob.replace(/"/g, '')}">
           <td><code>${l.discordTag || '—'}</code></td>
           <td><code>${l.discordId || '—'}</code></td>
           <td><code>${l.robloxName || '—'}</code></td>
@@ -3875,31 +3904,55 @@ app.get('/users', checkAuth, (req, res) => {
           <td>${when}</td>
           <td><button type="button" onclick="unlinkUser('${l.discordId}')" style="background:#f43f5e;width:auto;padding:6px 10px;">Unlink</button></td>
         </tr>`;
-    }).join('') || '<tr><td colspan="6" style="color:#64748b;text-align:center;">No linked users yet</td></tr>';
+    }).join('') || '<tr class="empty"><td colspan="6" style="color:#64748b;text-align:center;">No linked users yet</td></tr>';
     res.send(`<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>Linked Users</title>
 <style>
 body{font-family:system-ui,sans-serif;background:#0b0f19;color:#f1f5f9;margin:0;padding:24px;}
 .wrap{max-width:1100px;margin:0 auto;}
 a{color:#38bdf8;}
-.card{background:#111827;border:1px solid #1e293b;border-radius:10px;padding:20px;}
+.card{background:#111827;border:1px solid #1e293b;border-radius:10px;padding:20px;margin-bottom:16px;}
 table{width:100%;border-collapse:collapse;font-size:13px;}
 th,td{padding:10px;border-bottom:1px solid #1e293b;text-align:left;}
 th{color:#94a3b8;background:#1f2937;}
 button{cursor:pointer;border:none;border-radius:6px;color:#fff;font-weight:bold;}
+input,select{width:100%;padding:10px;margin-bottom:10px;background:#1f2937;border:1px solid #374151;border-radius:6px;color:#fff;box-sizing:border-box;}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+label{font-size:12px;color:#94a3b8;display:block;margin-bottom:4px;}
 </style></head><body><div class="wrap">
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
   <h1 style="margin:0;color:#a5b4fc;">Linked Users</h1>
   <div><a href="/bot">Bot panel</a> · <a href="/">Dashboard</a></div>
 </div>
 <div class="card">
-  <p style="color:#94a3b8;font-size:13px;">Discord accounts linked via /link + Roblox code. Codes are unique and expire in 10 minutes.</p>
+  <label>Search</label>
+  <input id="search" type="text" placeholder="Discord / Roblox name or ID..." oninput="filterUsers()"/>
+</div>
+<div class="card">
+  <h3 style="margin-top:0;">Add user manually</h3>
+  <div class="grid">
+    <div><label>Discord ID</label><input id="m-discord-id" placeholder="1234567890"/></div>
+    <div><label>Discord username/tag</label><input id="m-discord-tag" placeholder="name or name#0000"/></div>
+    <div><label>Roblox ID</label><input id="m-roblox-id" placeholder="123456789"/></div>
+    <div><label>Roblox username</label><input id="m-roblox-name" placeholder="Optional"/></div>
+  </div>
+  <button type="button" style="background:#10b981;padding:10px 16px;" onclick="addManual()">Add linked user</button>
+  <p id="add-msg" style="color:#10b981;display:none;margin-top:8px;">Saved.</p>
+</div>
+<div class="card">
+  <p style="color:#94a3b8;font-size:13px;">Linked via /link + Roblox code, or manually. Usernames update when they rejoin the game or use the bot.</p>
   <table>
     <thead><tr><th>Discord</th><th>Discord ID</th><th>Roblox</th><th>Roblox ID</th><th>Linked at</th><th></th></tr></thead>
     <tbody id="body">${rows}</tbody>
   </table>
 </div>
 <script>
+function filterUsers(){
+  const q = (document.getElementById('search').value || '').toLowerCase().trim();
+  document.querySelectorAll('#body tr[data-search]').forEach(tr => {
+    tr.style.display = !q || tr.getAttribute('data-search').includes(q) ? '' : 'none';
+  });
+}
 async function unlinkUser(discordId){
   if(!confirm('Unlink this user?')) return;
   const r = await fetch('/api/users/unlink', {
@@ -3907,6 +3960,21 @@ async function unlinkUser(discordId){
     body: JSON.stringify({ discordId })
   });
   if(r.ok) location.reload(); else alert('Failed');
+}
+async function addManual(){
+  const body = {
+    discordId: document.getElementById('m-discord-id').value.trim(),
+    discordTag: document.getElementById('m-discord-tag').value.trim(),
+    robloxId: document.getElementById('m-roblox-id').value.trim(),
+    robloxName: document.getElementById('m-roblox-name').value.trim()
+  };
+  const r = await fetch('/api/users/manual', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body)
+  });
+  const j = await r.json().catch(() => ({}));
+  if(!r.ok){ alert(j.error || 'Failed'); return; }
+  location.reload();
 }
 </script>
 </div></body></html>`);
@@ -3918,6 +3986,49 @@ app.post('/api/users/unlink', checkAuth, async (req, res) => {
     ensureLinkStores(data);
     const discordId = String(req.body.discordId || '');
     data.discordLinks = data.discordLinks.filter(l => String(l.discordId) !== discordId);
+    await safeSave();
+    res.json({ ok: true });
+});
+
+app.post('/api/users/manual', checkAuth, async (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
+    const data = db.getData();
+    ensureLinkStores(data);
+    const discordId = String(req.body.discordId || '').trim();
+    const robloxId = String(req.body.robloxId || '').trim();
+    const discordTag = String(req.body.discordTag || '').trim() || null;
+    let robloxName = String(req.body.robloxName || '').trim() || null;
+    if (!discordId || !/^\d+$/.test(discordId)) return res.status(400).json({ error: 'Valid Discord ID required' });
+    if (!robloxId || !/^\d+$/.test(robloxId)) return res.status(400).json({ error: 'Valid Roblox ID required' });
+
+    // Resolve Roblox name if missing
+    if (!robloxName) {
+        try {
+            const u = await axios.get('https://users.roblox.com/v1/users/' + robloxId, { timeout: 8000 });
+            if (u.data && u.data.name) robloxName = u.data.name;
+        } catch (_) {}
+    }
+
+    const byD = data.discordLinks.find(l => String(l.discordId) === discordId);
+    const byR = data.discordLinks.find(l => String(l.robloxId) === robloxId);
+    if (byD && byR && byD !== byR) {
+        return res.status(409).json({ error: 'Discord and Roblox are linked to different rows — unlink first' });
+    }
+    if (byD) {
+        byD.robloxId = robloxId;
+        byD.robloxName = robloxName || byD.robloxName;
+        byD.discordTag = discordTag || byD.discordTag;
+        byD.linkedAt = Date.now();
+    } else if (byR) {
+        byR.discordId = discordId;
+        byR.discordTag = discordTag || byR.discordTag;
+        byR.robloxName = robloxName || byR.robloxName;
+        byR.linkedAt = Date.now();
+    } else {
+        data.discordLinks.push({
+            discordId, discordTag, robloxId, robloxName, linkedAt: Date.now()
+        });
+    }
     await safeSave();
     res.json({ ok: true });
 });
