@@ -76,7 +76,8 @@ const DEFAULT_BOT_COMMANDS = [
     { id: 'wl-freeze-key', name: 'wl-freeze-key', description: 'Toggle freeze on a system key', enabled: true, roleIds: [] },
     { id: 'wl-maintenance', name: 'wl-maintenance', description: 'Turn maintenance on/off', enabled: true, roleIds: [] },
     { id: 'wl-stats', name: 'wl-stats', description: 'Usage stats from the site', enabled: true, roleIds: [] },
-    { id: 'wl-link', name: 'link', description: 'Post Roblox link panel with code entry', enabled: true, roleIds: ['ALL'] }
+    { id: 'wl-link', name: 'link', description: 'Post Roblox link panel with code entry', enabled: true, roleIds: ['ALL'] },
+    { id: 'wl-switchaccount', name: 'switchaccount', description: 'Switch linked Roblox account', enabled: true, roleIds: ['ALL'] }
 ];
 
 
@@ -1554,10 +1555,11 @@ app.get('/', checkAuth, (req, res) => {
             .lang-switch a { padding: 4px 8px; border-radius: 4px; font-size: 11px; text-decoration: none; color: #94a3b8; border: 1px solid #374151; background: #1f2937; }
             .lang-switch a.active { background: #0284c7; color: white; border-color: #0284c7; }
             .container { max-width: 1200px; margin: 0 auto; }
-            .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 15px; margin-bottom: 25px; flex-wrap: nowrap; gap: 12px; }
-            .header-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; margin-left: auto; flex-shrink: 0; }
+            .header { display: flex; flex-direction: row; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 15px; margin-bottom: 25px; gap: 16px; width: 100%; box-sizing: border-box; }
+            .header-left { flex: 1 1 auto; min-width: 0; }
+            .header-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; margin-left: auto; flex: 0 0 auto; max-width: min(78%, 900px); }
             .header-actions a, .header-actions button.hdr-btn { white-space: nowrap; flex-shrink: 0; }
-            h1 { font-size: 22px; color: #38bdf8; margin: 0; white-space: nowrap; }
+            h1 { font-size: 22px; color: #38bdf8; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
             .maint-banner { background: #7f1d1d; border: 1px solid #ef4444; color: #fecaca; padding: 10px 16px; border-radius: 8px; margin-bottom: 16px; font-weight: bold; text-align: center; display: none; }
             .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
             .stat-box { background: #1f2937; border: 1px solid #374151; border-radius: 8px; padding: 12px; text-align: center; }
@@ -1612,7 +1614,7 @@ app.get('/', checkAuth, (req, res) => {
     <body>
         <div class="container">
             <div class="header">
-                <h1>🛡️ ${tr('hub')}</h1>
+                <div class="header-left"><h1>🛡️ ${tr('hub')}</h1></div>
                 <div class="header-actions">
                     <span class="lang-switch" title="${tr('lang')}">
                         <a href="/set-lang/en" class="${lang === 'en' ? 'active' : ''}">EN</a>
@@ -3834,9 +3836,10 @@ app.post('/api/bot/link/claim', checkBotAuth, async (req, res) => {
     const discordTag = String(req.body.discordTag || req.body.discordName || '').trim() || null;
     if (!code || !discordId) return res.status(400).json({ error: 'code and discordId required' });
 
+    const switchMode = !!(req.body.switch || req.body.forceSwitch);
     // Already linked with this discord?
     const already = data.discordLinks.find(l => String(l.discordId) === discordId);
-    if (already) {
+    if (already && !switchMode) {
         if (discordTag && already.discordTag !== discordTag) {
             already.discordTag = discordTag;
             await safeSave();
@@ -3848,6 +3851,10 @@ app.post('/api/bot/link/claim', checkBotAuth, async (req, res) => {
             robloxName: already.robloxName,
             discordTag: already.discordTag
         });
+    }
+    if (already && switchMode) {
+        // Remove current link so we can bind a new Roblox account
+        data.discordLinks = data.discordLinks.filter(l => String(l.discordId) !== discordId);
     }
 
     const pending = data.pendingLinkCodes[code];
@@ -3902,7 +3909,7 @@ app.get('/users', checkAuth, (req, res) => {
           <td><code>${l.robloxName || '—'}</code></td>
           <td><code>${l.robloxId || '—'}</code></td>
           <td>${when}</td>
-          <td><button type="button" onclick="unlinkUser('${l.discordId}')" style="background:#f43f5e;width:auto;padding:6px 10px;">Unlink</button></td>
+          <td><button type="button" class="btn-unlink" data-discord-id="${l.discordId}" style="background:#f43f5e;width:auto;padding:6px 10px;">Unlink</button></td>
         </tr>`;
     }).join('') || '<tr class="empty"><td colspan="6" style="color:#64748b;text-align:center;">No linked users yet</td></tr>';
     res.send(`<!DOCTYPE html>
@@ -3961,14 +3968,15 @@ function renderRows(links){
   }
   body.innerHTML = links.map(l => {
     const when = l.linkedAt ? new Date(l.linkedAt).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' }) : '—';
-    const blob = [l.discordTag, l.discordId, l.robloxName, l.robloxId].join(' ').toLowerCase();
-    return '<tr data-search="'+blob.replace(/"/g,'')+'">' +
+    const blob = [l.discordTag, l.discordId, l.robloxName, l.robloxId].join(' ').toLowerCase().replace(/"/g,'');
+    const id = String(l.discordId || '').replace(/"/g, '');
+    return '<tr data-search="'+blob+'">' +
       '<td><code>'+(l.discordTag||'—')+'</code></td>' +
-      '<td><code>'+(l.discordId||'—')+'</code></td>' +
+      '<td><code>'+id+'</code></td>' +
       '<td><code>'+(l.robloxName||'—')+'</code></td>' +
       '<td><code>'+(l.robloxId||'—')+'</code></td>' +
       '<td>'+when+'</td>' +
-      '<td><button type="button" onclick="unlinkUser(\''+l.discordId+'\')" style="background:#f43f5e;width:auto;padding:6px 10px;">Unlink</button></td>' +
+      '<td><button type="button" class="btn-unlink" data-discord-id="'+id+'" style="background:#f43f5e;width:auto;padding:6px 10px;">Unlink</button></td>' +
     '</tr>';
   }).join('');
   filterUsers();
@@ -3981,13 +3989,26 @@ async function refreshUsers(){
   }catch(e){}
 }
 async function unlinkUser(discordId){
+  if(!discordId){ alert('Missing Discord ID'); return; }
   if(!confirm('Unlink this user?')) return;
-  const r = await fetch('/api/users/unlink', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ discordId })
-  });
-  if(r.ok) refreshUsers(); else alert('Failed');
+  try{
+    const r = await fetch('/api/users/unlink', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ discordId: String(discordId) })
+    });
+    if(r.ok) refreshUsers();
+    else {
+      const j = await r.json().catch(() => ({}));
+      alert(j.error || ('Failed ('+r.status+')'));
+    }
+  }catch(e){ alert('Network error'); }
 }
+document.getElementById('body').addEventListener('click', function(ev){
+  const btn = ev.target.closest('.btn-unlink');
+  if(!btn) return;
+  ev.preventDefault();
+  unlinkUser(btn.getAttribute('data-discord-id'));
+});
 async function addManual(){
   const body = {
     discordId: document.getElementById('m-discord-id').value.trim(),
@@ -4024,13 +4045,15 @@ app.get('/api/users/list', checkAuth, (req, res) => {
 });
 
 app.post('/api/users/unlink', checkAuth, async (req, res) => {
-    if (req.session.userEmail !== OWNER_EMAIL) return res.sendStatus(403);
+    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
     const data = db.getData();
     ensureLinkStores(data);
-    const discordId = String(req.body.discordId || '');
-    data.discordLinks = data.discordLinks.filter(l => String(l.discordId) !== discordId);
+    const discordId = String(req.body.discordId || '').trim();
+    if (!discordId) return res.status(400).json({ error: 'discordId required' });
+    const before = (data.discordLinks || []).length;
+    data.discordLinks = (data.discordLinks || []).filter(l => String(l.discordId) !== discordId);
     await safeSave();
-    res.json({ ok: true });
+    res.json({ ok: true, removed: before - data.discordLinks.length });
 });
 
 app.post('/api/users/manual', checkAuth, async (req, res) => {
