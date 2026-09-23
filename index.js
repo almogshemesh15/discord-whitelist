@@ -68,19 +68,21 @@ let botRuntime = {
 };
 
 const DEFAULT_BOT_COMMANDS = [
-    { id: 'wl-status', name: 'wl-status', description: 'Site + bot status', enabled: true, roleIds: [] },
-    { id: 'wl-pending', name: 'wl-pending', description: 'List pending place requests', enabled: true, roleIds: [] },
-    { id: 'wl-approve', name: 'wl-approve', description: 'Approve a pending place', enabled: true, roleIds: [] },
-    { id: 'wl-reject', name: 'wl-reject', description: 'Reject pending place', enabled: true, roleIds: [] },
-    { id: 'wl-keys', name: 'wl-keys', description: 'List system keys', enabled: true, roleIds: [] },
-    { id: 'wl-freeze-key', name: 'wl-freeze-key', description: 'Toggle freeze on a system key', enabled: true, roleIds: [] },
-    { id: 'wl-maintenance', name: 'wl-maintenance', description: 'Turn maintenance on/off', enabled: true, roleIds: [] },
-    { id: 'wl-stats', name: 'wl-stats', description: 'Usage stats from the site', enabled: true, roleIds: [] },
-    { id: 'wl-link', name: 'link', description: 'Post Roblox link panel with code entry', enabled: true, roleIds: ['ALL'] },
-    { id: 'wl-switchaccount', name: 'switchaccount', description: 'Switch linked Roblox account', enabled: true, roleIds: ['ALL'] }
+    { id: 'wl-link', name: 'link', description: 'Link Discord to Roblox with an in-game code', enabled: true, roleIds: ['ALL'] },
+    { id: 'wl-switchaccount', name: 'switchaccount', description: 'Switch linked Roblox or Discord account', enabled: true, roleIds: ['ALL'] },
+    { id: 'wl-profile', name: 'profile', description: 'View linked Roblox profile and hub products', enabled: true, roleIds: ['ALL'] }
 ];
 
 
+function ensureHubStores(data) {
+    if (!Array.isArray(data.hubProducts)) data.hubProducts = [];
+    if (!Array.isArray(data.hubOwnerships)) data.hubOwnerships = [];
+}
+function newHubId() {
+    try { return require('crypto').randomBytes(8).toString('hex'); } catch (_) {
+        return 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    }
+}
 function ensureLinkStores(data) {
     if (!Array.isArray(data.discordLinks)) data.discordLinks = [];
     if (!data.pendingLinkCodes || typeof data.pendingLinkCodes !== 'object') data.pendingLinkCodes = {};
@@ -1624,6 +1626,7 @@ app.get('/', checkAuth, (req, res) => {
                     ${isOwner ? `<button type="button" id="maint-btn" class="hdr-btn ${maintenanceOn ? 'btn-maint-on' : 'btn-maint-off'}" onclick="toggleMaintenance()">${maintenanceOn ? '🛠️ ' + tr('maintenanceOn') : '🛠️ ' + tr('maintenance')}</button>` : ''}
                     <a href="/bot" class="btn-obfuscate-page" style="background:#6366f1;border-color:#4f46e5;">🤖 Bot</a>
                     <a href="/users" class="btn-obfuscate-page" style="background:#14b8a6;border-color:#0d9488;">👤 Users</a>
+                    <a href="/hub" class="btn-obfuscate-page" style="background:#ec4899;border-color:#db2777;">🛒 Hub</a>
                     <a href="/messages" class="btn-obfuscate-page" style="background:#f59e0b;border-color:#d97706;">💬 ${tr('messages')}</a>
                     <a href="/obfuscate" class="btn-obfuscate-page">🔒 ${tr('obfuscate')}</a>
                     <a href="/force-save" class="btn-save-db">💾 ${tr('save')}</a>
@@ -4186,6 +4189,275 @@ app.post('/api/users/manual', checkAuth, async (req, res) => {
     }
     await safeSave();
     res.json({ ok: true });
+});
+
+
+
+// ========== Hub products (Developer Products store) ==========
+app.get('/hub', checkAuth, (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).send('Owner only');
+    const data = db.getData();
+    ensureHubStores(data);
+    const keyOpts = (data.keys || []).map(k => `<option value="${k.key}">${k.key}</option>`).join('');
+    const rows = (data.hubProducts || []).map(p => {
+        const keys = (p.keyNames || []).join(', ');
+        const stock = p.stock == null ? '∞' : p.stock;
+        const av = p.available !== false ? 'Yes' : 'No';
+        const img = p.imageUrl ? `<img src="${p.imageUrl}" style="width:48px;height:48px;object-fit:cover;border-radius:6px;"/>` : '—';
+        return `<tr>
+          <td><code>${p.id}</code></td>
+          <td>${img}</td>
+          <td><b>${p.name || ''}</b><div style="color:#94a3b8;font-size:12px;">${(p.description||'').slice(0,80)}</div></td>
+          <td><code>${p.developerProductId || ''}</code></td>
+          <td style="font-size:12px;">${keys || '—'}</td>
+          <td>${stock}</td>
+          <td>${av}</td>
+          <td>
+            <button type="button" onclick='editProduct(${JSON.stringify(p).replace(/'/g,"&#39;")})' style="width:auto;padding:6px 10px;background:#0284c7;">Edit</button>
+            <button type="button" onclick="deleteProduct('${p.id}')" style="width:auto;padding:6px 10px;background:#f43f5e;">Del</button>
+          </td>
+        </tr>`;
+    }).join('') || '<tr><td colspan="8" style="color:#64748b;text-align:center;">No products yet</td></tr>';
+    res.send(`<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Hub Products</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#0b0f19;color:#f1f5f9;margin:0;padding:24px;}
+.wrap{max-width:1200px;margin:0 auto;} a{color:#38bdf8;}
+.card{background:#111827;border:1px solid #1e293b;border-radius:10px;padding:20px;margin-bottom:16px;}
+table{width:100%;border-collapse:collapse;font-size:13px;} th,td{padding:10px;border-bottom:1px solid #1e293b;text-align:left;vertical-align:top;}
+th{color:#94a3b8;background:#1f2937;} input,select,textarea{width:100%;padding:10px;margin-bottom:10px;background:#1f2937;border:1px solid #374151;border-radius:6px;color:#fff;box-sizing:border-box;}
+button{cursor:pointer;border:none;border-radius:6px;color:#fff;font-weight:bold;}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;} label{font-size:12px;color:#94a3b8;}
+</style></head><body><div class="wrap">
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+  <h1 style="margin:0;color:#f472b6;">🛒 Hub Products</h1>
+  <div><a href="/users">Users</a> · <a href="/">Dashboard</a></div>
+</div>
+<div class="card">
+  <h3 style="margin-top:0;" id="form-title">Add product</h3>
+  <input type="hidden" id="p-id"/>
+  <div class="grid">
+    <div><label>Name</label><input id="p-name" placeholder="Product name"/></div>
+    <div><label>Developer Product ID</label><input id="p-dev" placeholder="Roblox developer product id"/></div>
+    <div><label>Stock (empty = unlimited)</label><input id="p-stock" type="number" placeholder="unlimited"/></div>
+    <div><label>Available</label><select id="p-available"><option value="1">Yes</option><option value="0">No</option></select></div>
+  </div>
+  <label>Description</label>
+  <textarea id="p-desc" rows="2" placeholder="Shown in the Hub"></textarea>
+  <label>Image URL</label>
+  <input id="p-image" placeholder="https://..."/>
+  <label>Keys granted (Ctrl/Cmd multi-select)</label>
+  <select id="p-keys" multiple size="6" style="height:120px;">${keyOpts}</select>
+  <div style="margin-top:12px;display:flex;gap:8px;">
+    <button type="button" style="background:#10b981;padding:10px 16px;" onclick="saveProduct()">Save product</button>
+    <button type="button" style="background:#374151;padding:10px 16px;" onclick="resetForm()">Clear</button>
+  </div>
+  <p style="font-size:12px;color:#64748b;">Stable internal ID is generated automatically — renaming the product will not break ownership.</p>
+</div>
+<div class="card">
+  <table>
+    <thead><tr><th>ID</th><th>Img</th><th>Name</th><th>Dev Product</th><th>Keys</th><th>Stock</th><th>On</th><th></th></tr></thead>
+    <tbody id="tbody">${rows}</tbody>
+  </table>
+</div>
+<script>
+function selectedKeys(){ return [...document.getElementById('p-keys').selectedOptions].map(o=>o.value); }
+function resetForm(){
+  document.getElementById('form-title').textContent='Add product';
+  document.getElementById('p-id').value='';
+  document.getElementById('p-name').value='';
+  document.getElementById('p-dev').value='';
+  document.getElementById('p-stock').value='';
+  document.getElementById('p-available').value='1';
+  document.getElementById('p-desc').value='';
+  document.getElementById('p-image').value='';
+  [...document.getElementById('p-keys').options].forEach(o=>o.selected=false);
+}
+function editProduct(p){
+  document.getElementById('form-title').textContent='Edit product';
+  document.getElementById('p-id').value=p.id||'';
+  document.getElementById('p-name').value=p.name||'';
+  document.getElementById('p-dev').value=p.developerProductId||'';
+  document.getElementById('p-stock').value=p.stock==null?'':p.stock;
+  document.getElementById('p-available').value=p.available===false?'0':'1';
+  document.getElementById('p-desc').value=p.description||'';
+  document.getElementById('p-image').value=p.imageUrl||'';
+  const keys=p.keyNames||[];
+  [...document.getElementById('p-keys').options].forEach(o=>o.selected=keys.includes(o.value));
+  window.scrollTo(0,0);
+}
+async function saveProduct(){
+  const body={
+    id: document.getElementById('p-id').value.trim()||undefined,
+    name: document.getElementById('p-name').value.trim(),
+    developerProductId: document.getElementById('p-dev').value.trim(),
+    stock: document.getElementById('p-stock').value,
+    available: document.getElementById('p-available').value==='1',
+    description: document.getElementById('p-desc').value,
+    imageUrl: document.getElementById('p-image').value.trim(),
+    keyNames: selectedKeys()
+  };
+  const r=await fetch('/api/hub/products',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok){ alert(j.error||'Failed'); return; }
+  location.reload();
+}
+async function deleteProduct(id){
+  if(!confirm('Delete product '+id+'?')) return;
+  const r=await fetch('/api/hub/products/'+encodeURIComponent(id),{method:'DELETE'});
+  if(r.ok) location.reload(); else alert('Failed');
+}
+</script>
+</div></body></html>`);
+});
+
+app.post('/api/hub/products', checkAuth, async (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
+    const data = db.getData();
+    ensureHubStores(data);
+    const b = req.body || {};
+    const name = String(b.name || '').trim();
+    const developerProductId = String(b.developerProductId || '').trim();
+    if (!name) return res.status(400).json({ error: 'name required' });
+    if (!developerProductId) return res.status(400).json({ error: 'developerProductId required' });
+    let stock = b.stock;
+    if (stock === '' || stock == null) stock = null;
+    else stock = Number(stock);
+    if (stock != null && (isNaN(stock) || stock < 0)) return res.status(400).json({ error: 'invalid stock' });
+    const keyNames = Array.isArray(b.keyNames) ? b.keyNames.map(String) : [];
+    let id = b.id ? String(b.id) : null;
+    let row = id ? data.hubProducts.find(p => p.id === id) : null;
+    if (row) {
+        row.name = name;
+        row.description = String(b.description || '');
+        row.imageUrl = String(b.imageUrl || '');
+        row.developerProductId = developerProductId;
+        row.keyNames = keyNames;
+        row.stock = stock;
+        row.available = b.available !== false;
+        row.updatedAt = Date.now();
+    } else {
+        id = newHubId();
+        data.hubProducts.push({
+            id, name,
+            description: String(b.description || ''),
+            imageUrl: String(b.imageUrl || ''),
+            developerProductId,
+            keyNames, stock,
+            available: b.available !== false,
+            createdAt: Date.now(),
+            updatedAt: Date.now()
+        });
+    }
+    await safeSave();
+    res.json({ ok: true, id });
+});
+
+app.delete('/api/hub/products/:id', checkAuth, async (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
+    const data = db.getData();
+    ensureHubStores(data);
+    const id = req.params.id;
+    data.hubProducts = data.hubProducts.filter(p => p.id !== id);
+    data.hubOwnerships = (data.hubOwnerships || []).filter(o => o.productId !== id);
+    await safeSave();
+    res.json({ ok: true });
+});
+
+/** Catalog for Hub game (public to bot secret) */
+app.get('/api/hub/catalog', checkBotAuth, (req, res) => {
+    const data = db.getData();
+    ensureHubStores(data);
+    const list = (data.hubProducts || []).filter(p => p.available !== false).map(p => ({
+        id: p.id,
+        name: p.name,
+        description: p.description,
+        imageUrl: p.imageUrl,
+        developerProductId: p.developerProductId,
+        stock: p.stock,
+        available: p.available !== false
+    }));
+    res.json({ products: list });
+});
+
+/** Process Developer Product purchase from Hub place */
+app.post('/api/hub/purchase', checkBotAuth, async (req, res) => {
+    const data = db.getData();
+    ensureHubStores(data);
+    const robloxId = String(req.body.robloxId || '').trim();
+    const robloxName = String(req.body.robloxName || '').trim() || null;
+    const developerProductId = String(req.body.developerProductId || '').trim();
+    const purchaseId = String(req.body.purchaseId || '').trim() || null;
+    if (!robloxId || !developerProductId) {
+        return res.status(400).json({ error: 'robloxId and developerProductId required' });
+    }
+    const product = data.hubProducts.find(p => String(p.developerProductId) === developerProductId);
+    if (!product) return res.status(404).json({ error: 'Unknown developer product' });
+    if (product.available === false) return res.status(403).json({ error: 'Product not available' });
+    if (product.stock != null && product.stock <= 0) return res.status(403).json({ error: 'Out of stock' });
+
+    if (purchaseId && data.hubOwnerships.some(o => o.purchaseId && o.purchaseId === purchaseId)) {
+        return res.json({ ok: true, duplicate: true, productId: product.id });
+    }
+
+    if (product.stock != null) product.stock = Number(product.stock) - 1;
+
+    const ownId = newHubId();
+    data.hubOwnerships.push({
+        id: ownId,
+        productId: product.id,
+        robloxId,
+        robloxName,
+        purchaseId,
+        purchasedAt: Date.now()
+    });
+
+    // Grant license keys to this Roblox user as creator whitelist
+    const keyNames = product.keyNames || [];
+    if (keyNames.length) {
+        let creator = data.whitelist.creators.find(c => String(c.id) === String(robloxId));
+        if (!creator) {
+            creator = { id: Number(robloxId) || robloxId, name: robloxName || String(robloxId), keys: [], groups: null };
+            data.whitelist.creators.push(creator);
+        }
+        if (!Array.isArray(creator.keys)) creator.keys = [];
+        if (robloxName) creator.name = robloxName;
+        for (const kn of keyNames) {
+            if (!creator.keys.some(k => k.key === kn)) {
+                creator.keys.push({ key: kn, expiresAt: null });
+            }
+        }
+    }
+    await safeSave();
+    res.json({ ok: true, productId: product.id, ownershipId: ownId, keysGranted: keyNames });
+});
+
+app.get('/api/bot/profile', checkBotAuth, (req, res) => {
+    const data = db.getData();
+    ensureLinkStores(data);
+    ensureHubStores(data);
+    const discordId = String(req.query.discordId || '').trim();
+    if (!discordId) return res.status(400).json({ error: 'discordId required' });
+    const link = (data.discordLinks || []).find(l => String(l.discordId) === discordId);
+    if (!link) return res.json({ linked: false, discordId });
+    const owns = (data.hubOwnerships || []).filter(o => String(o.robloxId) === String(link.robloxId));
+    const products = owns.map(o => {
+        const p = (data.hubProducts || []).find(x => x.id === o.productId);
+        return {
+            ownershipId: o.id,
+            productId: o.productId,
+            name: p ? p.name : o.productId,
+            purchasedAt: o.purchasedAt
+        };
+    });
+    res.json({
+        linked: true,
+        discordId: link.discordId,
+        discordTag: link.discordTag,
+        robloxId: link.robloxId,
+        robloxName: link.robloxName,
+        products
+    });
 });
 
 
