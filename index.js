@@ -4532,6 +4532,7 @@ function clearForm(){
 }
 
 function editProduct(p){
+  if (!p) return;
   $('formTitle').textContent = 'Edit: ' + (p.name || '');
   $('pId').value = p.id || '';
   $('pName').value = p.name || '';
@@ -4544,15 +4545,20 @@ function editProduct(p){
   $('pSale').value = p.onSale ? '1' : '0';
   $('pTest').value = p.testPlaceId || '';
   $('pRoles').value = (p.discordRoleIds || []).join(', ');
-  $('pDelivery').value = p.deliveryMode || 'files';
-  $('pLinks').value = (p.links || []).join('\\n');
+  const inc = Array.isArray(p.deliveryIncludes) && p.deliveryIncludes.length
+    ? p.deliveryIncludes
+    : ['files', 'links', 'text'];
+  if ($('incFiles')) $('incFiles').checked = inc.indexOf('files') >= 0;
+  if ($('incLinks')) $('incLinks').checked = inc.indexOf('links') >= 0;
+  if ($('incText')) $('incText').checked = inc.indexOf('text') >= 0;
+  if ($('pText')) $('pText').value = p.deliveryText != null ? String(p.deliveryText) : '';
+  if (typeof renderLinksEditor === 'function') renderLinksEditor(Array.isArray(p.links) ? p.links : []);
   const keys = p.keyNames || [];
   Array.from($('pKeys').options).forEach(o => { o.selected = keys.indexOf(o.value) >= 0; });
   pendingFiles = [];
-  $('pFiles').value = '';
-  const m = $('pDelivery').value;
-  $('linksBox').style.display = m === 'links' ? 'block' : 'none';
-  $('fileSection').style.display = m === 'files' ? 'block' : 'none';
+  pendingNames = {};
+  if ($('pFiles')) $('pFiles').value = '';
+  if ($('pendingFileNames')) $('pendingFileNames').innerHTML = '';
   renderExistingFiles(p);
   document.querySelector('.tabs button[data-t="products"]').click();
   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -4664,9 +4670,11 @@ function renderProducts(){
       '<button type="button" class="btn danger" data-del="' + p.id + '">Delete</button></div>';
   }).join('');
   box.querySelectorAll('[data-edit]').forEach(btn => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
+      await refreshState(false);
       const p = PRODUCTS.find(x => x.id === btn.getAttribute('data-edit'));
       if (p) editProduct(p);
+      else alert('Product not found');
     });
   });
   box.querySelectorAll('[data-del]').forEach(btn => {
@@ -4755,15 +4763,32 @@ async function refreshState(forceRender){
 }
 
 $('pFiles').addEventListener('change', () => {
-  pendingFiles = Array.from($('pFiles').files || []);
-  pendingNames = {};
+  const added = Array.from($('pFiles').files || []);
+  for (const f of added) {
+    const exists = pendingFiles.some(x => x.name === f.name && x.size === f.size && x.lastModified === f.lastModified);
+    if (!exists) pendingFiles.push(f);
+  }
+  $('pFiles').value = '';
+  renderPendingFiles();
+});
+function renderPendingFiles(){
   const box = $('pendingFileNames');
+  if (!box) return;
   if (!pendingFiles.length) { box.innerHTML = ''; return; }
   box.innerHTML = pendingFiles.map((f, i) =>
-    '<div style="margin:4px 0">File: <code>' + f.name + '</code> → display name: ' +
-    '<input data-pidx="' + i + '" value="' + f.name.replace(/"/g,'&quot;') + '" style="max-width:200px"/></div>'
+    '<div style="margin:4px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+    '<code>' + f.name + '</code> → ' +
+    '<input data-pidx="' + i + '" value="' + String(f.name).replace(/"/g,'&quot;') + '" style="max-width:200px" placeholder="display name"/>' +
+    '<button type="button" class="btn danger" data-rm-pending="' + i + '">×</button></div>'
   ).join('');
-});
+  box.querySelectorAll('[data-rm-pending]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const i = Number(btn.getAttribute('data-rm-pending'));
+      pendingFiles.splice(i, 1);
+      renderPendingFiles();
+    });
+  });
+}
 
 $('btnAddLink').addEventListener('click', () => {
   const cur = collectLinks();
@@ -5338,7 +5363,10 @@ app.get('/api/bot/hub-catalog', checkBotAuth, (req, res) => {
     ensureHubStores(data);
     ensureBotConfig(data);
     const cfg = data.botConfig;
-    const list = (data.hubProducts || []).filter(p => p.available !== false).map(p => {
+    const all = req.query.all === '1' || req.query.all === 'true';
+    const list = (data.hubProducts || [])
+        .filter(p => all || p.available !== false)
+        .map(p => {
         const stock = p.stock;
         const soldOut = stock != null && Number(stock) <= 0;
         return {
@@ -5347,6 +5375,7 @@ app.get('/api/bot/hub-catalog', checkBotAuth, (req, res) => {
             description: p.description || '',
             stock: stock == null ? null : Number(stock),
             soldOut,
+            available: p.available !== false,
             isFree: !p.developerProductId || String(p.developerProductId) === '0',
             developerProductId: p.developerProductId
         };
