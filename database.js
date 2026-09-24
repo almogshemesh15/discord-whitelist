@@ -30,7 +30,8 @@ function defaultData() {
         discordLinks: [],
         pendingLinkCodes: {},
         hubProducts: [],
-        hubOwnerships: []
+        hubOwnerships: [],
+        pendingBotJobs: []
     };
 }
 
@@ -57,6 +58,7 @@ function ensureStructure(obj) {
     if (!obj.pendingLinkCodes || typeof obj.pendingLinkCodes !== 'object') obj.pendingLinkCodes = {};
     if (!Array.isArray(obj.hubProducts)) obj.hubProducts = [];
     if (!Array.isArray(obj.hubOwnerships)) obj.hubOwnerships = [];
+    if (!Array.isArray(obj.pendingBotJobs)) obj.pendingBotJobs = [];
     return true;
 }
 
