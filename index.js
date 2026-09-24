@@ -72,7 +72,8 @@ const DEFAULT_BOT_COMMANDS = [
     { id: 'wl-switchaccount', name: 'switchaccount', description: 'Switch linked Roblox or Discord account', enabled: true, roleIds: ['ALL'] },
     { id: 'wl-profile', name: 'profile', description: 'View linked Roblox profile and hub products', enabled: true, roleIds: ['ALL'] },
     { id: 'wl-hub', name: 'hub', description: 'Show Hub store products and game link', enabled: true, roleIds: ['ALL'] },
-    { id: 'wl-retrieve', name: 'retrieve', description: 'DM your files for a product you own', enabled: true, roleIds: ['ALL'] }
+    { id: 'wl-retrieve', name: 'retrieve', description: 'DM your product delivery (files/links/text)', enabled: true, roleIds: ['ALL'] },
+    { id: 'wl-sendproduct', name: 'sendproduct', description: 'DM product delivery to another Discord user', enabled: true, roleIds: [] }
 ];
 
 
@@ -170,12 +171,31 @@ function notifyProductRevoked(data, product, robloxId) {
         managedRoleIds: allHubRoleIds(data)
     });
 }
+function normalizeLinks(links) {
+    if (!Array.isArray(links)) return [];
+    return links.map((item, i) => {
+        if (typeof item === 'string') {
+            const url = item.trim();
+            if (!url) return null;
+            return { id: 'l' + i, name: url, url };
+        }
+        const url = String(item.url || item.href || '').trim();
+        if (!url) return null;
+        return {
+            id: item.id || ('l' + i),
+            name: String(item.name || item.label || url).slice(0, 120),
+            url
+        };
+    }).filter(Boolean).slice(0, 20);
+}
 function notifyProductGranted(data, product, robloxId, robloxName, base) {
     ensureLinkStores(data);
     const link = (data.discordLinks || []).find(l => String(l.robloxId) === String(robloxId));
     const roles = rolesForRoblox(data, robloxId);
-    const mode = String(product.deliveryMode || 'files').toLowerCase();
     const baseUrl = base || publicBaseUrl();
+    const includes = Array.isArray(product.deliveryIncludes) && product.deliveryIncludes.length
+        ? product.deliveryIncludes.map(String)
+        : ['files', 'links', 'text'];
     if (link && link.discordId) {
         const payload = {
             discordId: String(link.discordId),
@@ -185,15 +205,11 @@ function notifyProductGranted(data, product, robloxId, robloxName, base) {
             productName: product.name,
             roleIds: roles,
             managedRoleIds: allHubRoleIds(data),
-            deliveryMode: mode,
-            files: [],
-            links: [],
-            testPlaceId: product.testPlaceId || null
+            deliveryIncludes: includes,
+            files: includes.includes('files') ? fileMetaList(product, baseUrl) : [],
+            links: includes.includes('links') ? normalizeLinks(product.links) : [],
+            deliveryText: includes.includes('text') ? String(product.deliveryText || '') : ''
         };
-        if (mode === 'files') payload.files = fileMetaList(product, baseUrl);
-        else if (mode === 'links') payload.links = Array.isArray(product.links) ? product.links.slice() : [];
-        else if (mode === 'text') payload.testPlaceId = product.testPlaceId || null;
-        // mode none: roles only
         enqueueBotJob(data, 'product_granted', payload);
     } else {
         enqueueBotJob(data, 'product_granted_pending_link', {
@@ -4396,27 +4412,28 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
     </div>
     <label>Description</label><textarea id="pDesc" rows="2"></textarea>
     <label>Discord role IDs (comma-separated)</label><input id="pRoles"/>
-    <label>Delivery on purchase</label>
-    <select id="pDelivery">
-      <option value="files">Files (upload below)</option>
-      <option value="links">Links (URLs below)</option>
-      <option value="text">Text (message below)</option>
-      <option value="none">None (roles/keys only)</option>
-    </select>
-    <div id="linksBox" style="display:none">
-      <label>Links (one URL per line)</label>
-      <textarea id="pLinks" rows="3" placeholder="https://..."></textarea>
+    <label>Delivery includes (combine any)</label>
+    <div style="display:flex;gap:16px;flex-wrap:wrap;margin:8px 0">
+      <label style="display:flex;gap:6px;align-items:center;color:#e2e8f0"><input type="checkbox" id="incFiles" checked/> Files</label>
+      <label style="display:flex;gap:6px;align-items:center;color:#e2e8f0"><input type="checkbox" id="incLinks" checked/> Links</label>
+      <label style="display:flex;gap:6px;align-items:center;color:#e2e8f0"><input type="checkbox" id="incText" checked/> Text</label>
     </div>
-    <div id="textBox" style="display:none">
-      <label>Text sent in Discord DM on purchase</label>
-      <textarea id="pText" rows="4" placeholder="Thanks for buying..."></textarea>
+    <div id="textBox">
+      <label>Text (DM message)</label>
+      <textarea id="pText" rows="3" placeholder="Thanks for buying..."></textarea>
+    </div>
+    <div id="linksBox" style="margin-top:8px">
+      <label>Links (name + URL)</label>
+      <div id="linksEditor"></div>
+      <button type="button" class="btn sec" id="btnAddLink">+ Add link</button>
     </div>
     <label>Keys (Ctrl multi-select)</label>
     <select id="pKeys" multiple size="5"></select>
     <div id="fileSection" style="margin-top:12px;padding:12px;border:1px dashed #334155;border-radius:10px">
       <h4 style="margin:0 0 6px">📎 Files</h4>
-      <p class="muted" id="fileHint">You can select files now (create or edit). They upload right after Save.</p>
+      <p class="muted">Optional display name per file. Existing files can be renamed.</p>
       <input type="file" id="pFiles" multiple/>
+      <div id="pendingFileNames" class="muted" style="margin-top:8px"></div>
       <div id="fileList" class="muted" style="margin-top:8px"></div>
     </div>
     <div>
@@ -4464,7 +4481,8 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
 let PRODUCTS = [];
 let OWNERSHIPS = [];
 let KEYS = [];
-let pendingFiles = []; // FileList staging for create/edit
+let pendingFiles = [];
+let pendingNames = {};
 
 function $(id){ return document.getElementById(id); }
 
@@ -4476,13 +4494,6 @@ document.querySelectorAll('.tabs button').forEach(btn => {
     const panel = $('panel-' + btn.getAttribute('data-t'));
     if (panel) panel.classList.add('on');
   });
-});
-
-$('pDelivery').addEventListener('change', () => {
-  const m = $('pDelivery').value;
-  $('linksBox').style.display = m === 'links' ? 'block' : 'none';
-  $('textBox').style.display = m === 'text' ? 'block' : 'none';
-  $('fileSection').style.display = m === 'files' ? 'block' : 'none';
 });
 
 $('gType').addEventListener('change', () => {
@@ -4508,16 +4519,16 @@ function selectedKeys(){ return Array.from($('pKeys').selectedOptions).map(o => 
 function clearForm(){
   $('formTitle').textContent = 'Create product';
   $('pId').value = '';
-  ['pName','pDev','pStock','pDesc','pImg','pDisc','pTest','pRoles','pLinks','pText'].forEach(id => $(id).value = '');
-  $('pAvail').value = '1'; $('pSale').value = '0'; $('pDelivery').value = 'files';
+  ['pName','pDev','pStock','pDesc','pImg','pDisc','pTest','pRoles','pText'].forEach(id => $(id).value = '');
+  $('pAvail').value = '1'; $('pSale').value = '0';
+  $('incFiles').checked = true; $('incLinks').checked = true; $('incText').checked = true;
   Array.from($('pKeys').options).forEach(o => o.selected = false);
   pendingFiles = [];
+  pendingNames = {};
   $('pFiles').value = '';
   $('fileList').textContent = '';
-  $('fileHint').textContent = 'You can select files now (create or edit). They upload right after Save.';
-  $('linksBox').style.display = 'none';
-  $('textBox').style.display = 'none';
-  $('fileSection').style.display = 'block';
+  $('pendingFileNames').innerHTML = '';
+  renderLinksEditor([]);
 }
 
 function editProduct(p){
@@ -4551,36 +4562,92 @@ function renderExistingFiles(p){
   const files = p.files || [];
   if (!files.length) { $('fileList').textContent = 'No files on server yet.'; return; }
   $('fileList').innerHTML = files.map(f =>
-    '<div>' + f.name + ' (' + Math.round((f.size||0)/1024) + ' KB) ' +
+    '<div style="display:flex;gap:8px;align-items:center;margin:6px 0;flex-wrap:wrap">' +
+    '<input data-rename="' + f.id + '" value="' + String(f.name||'').replace(/"/g,'&quot;') + '" style="max-width:220px"/>' +
+    '<span class="muted">(' + Math.round((f.size||0)/1024) + ' KB)</span>' +
+    '<button type="button" class="btn sec" data-save-name="' + f.id + '">Rename</button>' +
     '<button type="button" class="btn danger" data-fid="' + f.id + '">Delete</button></div>'
   ).join('');
-  $('fileList').querySelectorAll('button[data-fid]').forEach(btn => {
+  $('fileList').querySelectorAll('[data-fid]').forEach(btn => {
     btn.addEventListener('click', async () => {
       const id = $('pId').value;
       await fetch('/api/hub/products/' + encodeURIComponent(id) + '/files/' + encodeURIComponent(btn.getAttribute('data-fid')), { method: 'DELETE' });
       await refreshState(true);
       const p2 = PRODUCTS.find(x => x.id === id);
-      if (p2) renderExistingFiles(p2);
+      if (p2) { renderExistingFiles(p2); if ($('pId').value === p2.id) editProduct(p2); }
+    });
+  });
+  $('fileList').querySelectorAll('[data-save-name]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = $('pId').value;
+      const fid = btn.getAttribute('data-save-name');
+      const inp = $('fileList').querySelector('input[data-rename="' + fid + '"]');
+      const name = (inp && inp.value || '').trim();
+      if (!name) return;
+      await fetch('/api/hub/products/' + encodeURIComponent(id) + '/files/' + encodeURIComponent(fid) + '/rename', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name })
+      });
+      await refreshState(true);
     });
   });
 }
 
+function renderLinksEditor(links){
+  const box = $('linksEditor');
+  const list = (links && links.length) ? links : [{ name: '', url: '' }];
+  box.innerHTML = list.map((l, i) =>
+    '<div class="row" style="margin-bottom:6px" data-link-row>' +
+    '<div><input placeholder="Display name" data-lname value="' + String(l.name||'').replace(/"/g,'&quot;') + '"/></div>' +
+    '<div style="display:flex;gap:6px"><input placeholder="https://..." data-lurl value="' + String(l.url||'').replace(/"/g,'&quot;') + '"/>' +
+    '<button type="button" class="btn danger" data-rm-link>×</button></div></div>'
+  ).join('');
+  box.querySelectorAll('[data-rm-link]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      btn.closest('[data-link-row]').remove();
+      if (!box.querySelector('[data-link-row]')) renderLinksEditor([]);
+    });
+  });
+}
+function collectLinks(){
+  return Array.from(document.querySelectorAll('#linksEditor [data-link-row]')).map(row => ({
+    name: (row.querySelector('[data-lname]') || {}).value || '',
+    url: (row.querySelector('[data-lurl]') || {}).value || ''
+  })).filter(l => (l.url || '').trim());
+}
+function collectIncludes(){
+  const a = [];
+  if ($('incFiles').checked) a.push('files');
+  if ($('incLinks').checked) a.push('links');
+  if ($('incText').checked) a.push('text');
+  return a;
+}
+
 async function uploadPending(productId){
   if (!pendingFiles.length) return;
-  for (const file of pendingFiles) {
+  for (let i = 0; i < pendingFiles.length; i++) {
+    const file = pendingFiles[i];
+    const inp = document.querySelector('#pendingFileNames input[data-pidx="' + i + '"]');
+    const displayName = (inp && inp.value.trim()) || file.name;
     const buf = await file.arrayBuffer();
     const bytes = new Uint8Array(buf);
     let s = '';
-    for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+    for (let j = 0; j < bytes.length; j++) s += String.fromCharCode(bytes[j]);
     const b64 = btoa(s);
     const r = await fetch('/api/hub/products/' + encodeURIComponent(productId) + '/files', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: file.name, mime: file.type || 'application/octet-stream', contentBase64: b64 })
+      body: JSON.stringify({
+        originalName: file.name,
+        displayName,
+        name: displayName,
+        mime: file.type || 'application/octet-stream',
+        contentBase64: b64
+      })
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || 'Upload failed');
   }
   pendingFiles = [];
+  pendingNames = {};
 }
 
 function renderProducts(){
@@ -4590,7 +4657,7 @@ function renderProducts(){
     const stock = p.stock == null ? '∞' : p.stock;
     return '<div class="pc"><b>' + (p.name || '') + '</b> <code>' + p.id + '</code>' +
       '<div class="muted">Dev: ' + (p.developerProductId||'') + ' · Stock: ' + stock +
-      ' · Delivery: ' + (p.deliveryMode||'files') +
+      ' · Delivery: ' + ((p.deliveryIncludes||[]).join('+')||'none') +
       ' · Keys: ' + ((p.keyNames||[]).join(', ')||'—') +
       ' · Files: ' + ((p.files||[]).length) + '</div>' +
       '<button type="button" class="btn sec" data-edit="' + p.id + '">Edit</button>' +
@@ -4689,9 +4756,19 @@ async function refreshState(forceRender){
 
 $('pFiles').addEventListener('change', () => {
   pendingFiles = Array.from($('pFiles').files || []);
-  $('fileList').textContent = pendingFiles.length
-    ? pendingFiles.map(f => f.name).join(', ') + ' (will upload on Save)'
-    : '';
+  pendingNames = {};
+  const box = $('pendingFileNames');
+  if (!pendingFiles.length) { box.innerHTML = ''; return; }
+  box.innerHTML = pendingFiles.map((f, i) =>
+    '<div style="margin:4px 0">File: <code>' + f.name + '</code> → display name: ' +
+    '<input data-pidx="' + i + '" value="' + f.name.replace(/"/g,'&quot;') + '" style="max-width:200px"/></div>'
+  ).join('');
+});
+
+$('btnAddLink').addEventListener('click', () => {
+  const cur = collectLinks();
+  cur.push({ name: '', url: '' });
+  renderLinksEditor(cur);
 });
 
 $('btnClear').addEventListener('click', clearForm);
@@ -4709,8 +4786,8 @@ $('btnSave').addEventListener('click', async () => {
     discountPercent: $('pDisc').value,
     onSale: $('pSale').value === '1',
     testPlaceId: $('pTest').value.trim(),
-    deliveryMode: $('pDelivery').value,
-    links: $('pLinks').value,
+    deliveryIncludes: collectIncludes(),
+    links: collectLinks(),
     deliveryText: $('pText').value
   };
   const r = await fetch('/api/hub/products', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -4740,6 +4817,7 @@ $('btnGrant').addEventListener('click', async () => {
 });
 $('ownerSearch').addEventListener('input', renderOwners);
 
+renderLinksEditor([]);
 refreshState(true);
 setInterval(() => refreshState(false), 5000);
 </script>
@@ -4792,14 +4870,14 @@ app.post('/api/hub/products', checkAuth, async (req, res) => {
         row.discordRoleIds = Array.isArray(b.discordRoleIds)
             ? b.discordRoleIds.map(String).map(s => s.trim()).filter(Boolean)
             : String(b.discordRoleIds || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
-        let dm = String(b.deliveryMode || row.deliveryMode || 'files').toLowerCase();
-        if (!['files','links','text','none'].includes(dm)) dm = 'files';
-        row.deliveryMode = dm;
-        if (Array.isArray(b.links)) {
-            row.links = b.links.map(String).map(s => s.trim()).filter(Boolean).slice(0, 20);
-        } else if (typeof b.links === 'string') {
-            row.links = b.links.split(/\n+/).map(s => s.trim()).filter(Boolean).slice(0, 20);
-        }
+        let includes = b.deliveryIncludes;
+        if (typeof includes === 'string') includes = includes.split(/[\s,]+/);
+        if (!Array.isArray(includes) || !includes.length) includes = ['files', 'links', 'text'];
+        includes = includes.map(String).map(s => s.toLowerCase()).filter(x => ['files','links','text'].includes(x));
+        if (b.deliveryNone === true || b.deliveryNone === '1') includes = [];
+        row.deliveryIncludes = includes;
+        row.deliveryMode = includes.length ? includes.join('+') : 'none';
+        if (b.links != null) row.links = normalizeLinks(typeof b.links === 'string' ? b.links.split(/\n+/).map(s => ({ url: s })) : b.links);
         if (b.deliveryText != null) row.deliveryText = String(b.deliveryText).slice(0, 4000);
         row.updatedAt = Date.now();
         syncHubKeysForProduct(data, row, oldKeys);
@@ -4821,11 +4899,16 @@ app.post('/api/hub/products', checkAuth, async (req, res) => {
             discordRoleIds: Array.isArray(b.discordRoleIds)
                 ? b.discordRoleIds.map(String).map(s => s.trim()).filter(Boolean)
                 : String(b.discordRoleIds || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean),
-            deliveryMode: ['files','links','text','none'].includes(String(b.deliveryMode||'').toLowerCase())
-                ? String(b.deliveryMode).toLowerCase() : 'files',
-            links: Array.isArray(b.links)
-                ? b.links.map(String).map(s => s.trim()).filter(Boolean).slice(0, 20)
-                : String(b.links || '').split(/\n+/).map(s => s.trim()).filter(Boolean).slice(0, 20),
+            deliveryIncludes: (function(){
+                let includes = b.deliveryIncludes;
+                if (typeof includes === 'string') includes = includes.split(/[\s,]+/);
+                if (!Array.isArray(includes)) includes = ['files','links','text'];
+                includes = includes.map(String).map(s => s.toLowerCase()).filter(x => ['files','links','text'].includes(x));
+                if (b.deliveryNone === true || b.deliveryNone === '1') includes = [];
+                return includes;
+            })(),
+            deliveryMode: 'mixed',
+            links: normalizeLinks(Array.isArray(b.links) ? b.links : String(b.links||'').split(/\n+/).map(s => ({ url: s }))),
             deliveryText: String(b.deliveryText || '').slice(0, 4000),
             files: [],
             createdAt: Date.now(),
@@ -5127,8 +5210,9 @@ app.get('/api/hub/state', checkAuth, (req, res) => {
         onSale: !!p.onSale,
         testPlaceId: p.testPlaceId || '',
         discordRoleIds: p.discordRoleIds || [],
-        deliveryMode: p.deliveryMode || 'files',
-        links: p.links || [],
+        deliveryMode: p.deliveryMode || 'mixed',
+        deliveryIncludes: Array.isArray(p.deliveryIncludes) ? p.deliveryIncludes : ['files','links','text'],
+        links: normalizeLinks(p.links || []),
         deliveryText: p.deliveryText || '',
         files: (p.files || []).map(f => ({ id: f.id, name: f.name, size: f.size || 0, token: f.token }))
     }));
@@ -5168,7 +5252,8 @@ app.post('/api/hub/products/:id/files', checkAuth, async (req, res) => {
     const product = data.hubProducts.find(p => p.id === req.params.id);
     if (!product) return res.status(404).json({ error: 'product not found' });
     if (!Array.isArray(product.files)) product.files = [];
-    const name = String(req.body.name || 'file').slice(0, 120);
+    const originalName = String(req.body.originalName || req.body.name || 'file').slice(0, 120);
+    const name = String(req.body.displayName || req.body.name || originalName).slice(0, 120) || originalName;
     const mime = String(req.body.mime || 'application/octet-stream').slice(0, 80);
     const contentBase64 = String(req.body.contentBase64 || '');
     if (!contentBase64) return res.status(400).json({ error: 'contentBase64 required' });
@@ -5178,6 +5263,7 @@ app.post('/api/hub/products/:id/files', checkAuth, async (req, res) => {
     const file = {
         id: newHubId(),
         name,
+        originalName,
         mime,
         size,
         token: newHubId() + newHubId(),
@@ -5198,6 +5284,21 @@ app.delete('/api/hub/products/:id/files/:fileId', checkAuth, async (req, res) =>
     product.files = (product.files || []).filter(f => f.id !== req.params.fileId);
     await safeSave();
     res.json({ ok: true });
+});
+
+app.post('/api/hub/products/:id/files/:fileId/rename', checkAuth, async (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
+    const data = db.getData();
+    ensureHubStores(data);
+    const product = data.hubProducts.find(p => p.id === req.params.id);
+    if (!product) return res.status(404).json({ error: 'product not found' });
+    const file = (product.files || []).find(f => f.id === req.params.fileId);
+    if (!file) return res.status(404).json({ error: 'file not found' });
+    const name = String(req.body.name || '').trim().slice(0, 120);
+    if (!name) return res.status(400).json({ error: 'name required' });
+    file.name = name;
+    await safeSave();
+    res.json({ ok: true, name });
 });
 
 app.get('/api/bot/jobs', checkBotAuth, (req, res) => {
@@ -5254,6 +5355,35 @@ app.get('/api/bot/hub-catalog', checkBotAuth, (req, res) => {
         products: list,
         robloxGameUrl: cfg.robloxGameUrl || '',
         showPrices: cfg.hubShowPrices !== false
+    });
+});
+
+app.get('/api/bot/retrieve-for', checkBotAuth, (req, res) => {
+    const data = db.getData();
+    ensureHubStores(data);
+    ensureLinkStores(data);
+    const targetDiscordId = String(req.query.targetDiscordId || '').trim();
+    const productName = String(req.query.product || '').trim().toLowerCase();
+    if (!targetDiscordId || !productName) return res.status(400).json({ error: 'targetDiscordId and product required' });
+    const link = (data.discordLinks || []).find(l => String(l.discordId) === targetDiscordId);
+    if (!link) return res.status(404).json({ error: 'Target Discord is not linked' });
+    const product = (data.hubProducts || []).find(p => String(p.name || '').toLowerCase() === productName)
+        || (data.hubProducts || []).find(p => String(p.name || '').toLowerCase().includes(productName));
+    if (!product) return res.status(404).json({ error: 'Product not found' });
+    const owns = (data.hubOwnerships || []).some(o => o.productId === product.id && String(o.robloxId) === String(link.robloxId));
+    if (!owns) return res.status(403).json({ error: 'Target does not own this product' });
+    const base = publicBaseUrl(req);
+    const includes = Array.isArray(product.deliveryIncludes) && product.deliveryIncludes.length
+        ? product.deliveryIncludes : ['files', 'links', 'text'];
+    res.json({
+        productName: product.name,
+        targetDiscordId,
+        robloxName: link.robloxName,
+        robloxId: link.robloxId,
+        deliveryIncludes: includes,
+        files: includes.includes('files') ? fileMetaList(product, base) : [],
+        links: includes.includes('links') ? normalizeLinks(product.links) : [],
+        deliveryText: includes.includes('text') ? String(product.deliveryText || '') : ''
     });
 });
 
