@@ -70,7 +70,9 @@ let botRuntime = {
 const DEFAULT_BOT_COMMANDS = [
     { id: 'wl-link', name: 'link', description: 'Link Discord to Roblox with an in-game code', enabled: true, roleIds: ['ALL'] },
     { id: 'wl-switchaccount', name: 'switchaccount', description: 'Switch linked Roblox or Discord account', enabled: true, roleIds: ['ALL'] },
-    { id: 'wl-profile', name: 'profile', description: 'View linked Roblox profile and hub products', enabled: true, roleIds: ['ALL'] }
+    { id: 'wl-profile', name: 'profile', description: 'View linked Roblox profile and hub products', enabled: true, roleIds: ['ALL'] },
+    { id: 'wl-hub', name: 'hub', description: 'Show Hub store products and game link', enabled: true, roleIds: ['ALL'] },
+    { id: 'wl-retrieve', name: 'retrieve', description: 'DM your files for a product you own', enabled: true, roleIds: ['ALL'] }
 ];
 
 
@@ -104,7 +106,93 @@ function syncHubKeysForProduct(data, product, oldKeys) {
 function ensureHubStores(data) {
     if (!Array.isArray(data.hubProducts)) data.hubProducts = [];
     if (!Array.isArray(data.hubOwnerships)) data.hubOwnerships = [];
+    if (!Array.isArray(data.pendingBotJobs)) data.pendingBotJobs = [];
 }
+function publicBaseUrl(req) {
+    const env = process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || '';
+    if (env) return env.replace(/\/$/, '');
+    if (req && req.headers && req.headers.host) {
+        const proto = (req.headers['x-forwarded-proto'] || 'https').split(',')[0].trim();
+        return proto + '://' + req.headers.host;
+    }
+    return 'https://discord-whitelist-ow56.onrender.com';
+}
+function enqueueBotJob(data, type, payload) {
+    ensureHubStores(data);
+    const job = {
+        id: newHubId(),
+        type: String(type),
+        payload: payload || {},
+        createdAt: Date.now(),
+        tries: 0
+    };
+    data.pendingBotJobs.push(job);
+    return job;
+}
+function rolesForRoblox(data, robloxId) {
+    const set = new Set();
+    for (const o of (data.hubOwnerships || [])) {
+        if (String(o.robloxId) !== String(robloxId)) continue;
+        const p = (data.hubProducts || []).find(x => x.id === o.productId);
+        if (!p) continue;
+        for (const r of (p.discordRoleIds || [])) {
+            if (r && String(r).toUpperCase() !== 'ALL') set.add(String(r));
+        }
+    }
+    return [...set];
+}
+function fileMetaList(product, base) {
+    return (product.files || []).map(f => ({
+        id: f.id,
+        name: f.name,
+        size: f.size || 0,
+        url: base + '/api/hub/files/' + f.token
+    }));
+}
+
+function allHubRoleIds(data) {
+    const set = new Set();
+    for (const p of (data.hubProducts || [])) {
+        for (const r of (p.discordRoleIds || [])) {
+            if (r && String(r).toUpperCase() !== 'ALL') set.add(String(r));
+        }
+    }
+    return [...set];
+}
+function notifyProductRevoked(data, product, robloxId) {
+    ensureLinkStores(data);
+    const link = (data.discordLinks || []).find(l => String(l.robloxId) === String(robloxId));
+    if (!link || !link.discordId) return;
+    enqueueBotJob(data, 'roles_sync', {
+        discordId: String(link.discordId),
+        robloxId: String(robloxId),
+        roleIds: rolesForRoblox(data, robloxId),
+        managedRoleIds: allHubRoleIds(data)
+    });
+}
+function notifyProductGranted(data, product, robloxId, robloxName, base) {
+    ensureLinkStores(data);
+    const link = (data.discordLinks || []).find(l => String(l.robloxId) === String(robloxId));
+    const roles = rolesForRoblox(data, robloxId);
+    if (link && link.discordId) {
+        enqueueBotJob(data, 'product_granted', {
+            discordId: String(link.discordId),
+            robloxId: String(robloxId),
+            robloxName: robloxName || null,
+            productId: product.id,
+            productName: product.name,
+            roleIds: roles,
+            managedRoleIds: allHubRoleIds(data),
+            files: fileMetaList(product, base || publicBaseUrl())
+        });
+    } else {
+        enqueueBotJob(data, 'product_granted_pending_link', {
+            robloxId: String(robloxId),
+            productId: product.id
+        });
+    }
+}
+
 function newHubId() {
     try { return require('crypto').randomBytes(8).toString('hex'); } catch (_) {
         return 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -154,10 +242,11 @@ function normalizeRoleIds(raw) {
 
 function ensureBotConfig(data) {
     if (!data.botConfig || typeof data.botConfig !== 'object') {
-        data.botConfig = { enabled: true, commands: [], robloxGameUrl: '', updatedAt: Date.now() };
+        data.botConfig = { enabled: true, commands: [], robloxGameUrl: '', hubShowPrices: true, updatedAt: Date.now() };
     }
     if (typeof data.botConfig.enabled !== 'boolean') data.botConfig.enabled = true;
     if (typeof data.botConfig.robloxGameUrl !== 'string') data.botConfig.robloxGameUrl = data.botConfig.robloxGameUrl || '';
+    if (typeof data.botConfig.hubShowPrices !== 'boolean') data.botConfig.hubShowPrices = true;
     if (!Array.isArray(data.botConfig.commands)) data.botConfig.commands = [];
     const byId = {};
     data.botConfig.commands.forEach(c => { if (c && c.id) byId[c.id] = c; });
@@ -3559,6 +3648,7 @@ app.get('/api/bot/config', checkBotAuth, (req, res) => {
         enabled: !!cfg.enabled,
         commands: cfg.commands,
         robloxGameUrl: cfg.robloxGameUrl || '',
+        hubShowPrices: cfg.hubShowPrices !== false,
         updatedAt: cfg.updatedAt || null,
         status: getBotDashboardStatus()
     });
@@ -3572,6 +3662,9 @@ app.post('/api/bot/config', checkAuth, async (req, res) => {
     if (typeof body.enabled === 'boolean') cfg.enabled = body.enabled;
     if (body.robloxGameUrl != null) {
         cfg.robloxGameUrl = String(body.robloxGameUrl).trim().slice(0, 300);
+    }
+    if (body.hubShowPrices != null) {
+        cfg.hubShowPrices = body.hubShowPrices === true || body.hubShowPrices === '1' || body.hubShowPrices === 1;
     }
     if (Array.isArray(body.commands)) {
         const byId = {};
@@ -3645,6 +3738,10 @@ button.secondary{background:#374151;}
   <div style="margin-top:14px;">
     <label style="font-size:13px;color:#94a3b8;">Roblox game URL (for /link button)</label>
     <input id="roblox-url" type="text" value="${(cfg.robloxGameUrl || '').replace(/"/g, '&quot;')}" placeholder="https://www.roblox.com/games/..." style="margin-top:6px;"/>
+    <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;">
+      <input type="checkbox" id="hub-show-prices" ${cfg.hubShowPrices !== false ? 'checked' : ''}/>
+      /hub command shows product prices
+    </label>
   </div>
 </div>
 <div class="card">
@@ -3678,6 +3775,7 @@ async function saveAll(){
   const body = {
     enabled: document.getElementById('bot-enabled').checked,
     robloxGameUrl: (document.getElementById('roblox-url') || {}).value || '',
+    hubShowPrices: !!(document.getElementById('hub-show-prices') || {}).checked,
     commands
   };
   const r = await fetch('/api/bot/config', {
@@ -4380,12 +4478,19 @@ th{color:var(--muted)}code{font-size:12px;color:#a5b4fc}
       <div><label>Image rbxassetid</label><input id="p-image" placeholder="rbxassetid://123"/></div>
     </div>
     <label>Description</label><textarea id="p-desc" rows="2"></textarea>
+    <label>Discord role IDs (comma-separated)</label><input id="p-roles" placeholder="123456789, 987654321"/>
     <label>Keys granted</label><select id="p-keys" multiple size="5">${keyOpts}</select>
     <div style="display:flex;gap:8px;margin-top:8px">
       <button type="button" class="btn" onclick="saveProduct()">Save</button>
       <button type="button" class="btn soft" onclick="resetForm()">Clear</button>
     </div>
-    <p class="hint">Changing keys updates all current owners. Image must be rbxassetid for in-game UI.</p>
+    <p class="hint">Changing keys/roles updates all current owners. Image: rbxassetid for in-game. After save, use file upload below (edit product first).</p>
+    <div id="file-box" style="display:none;margin-top:16px;padding-top:14px;border-top:1px solid #1e293b">
+      <h4 style="margin:0 0 8px">Product files (DM download links)</h4>
+      <input type="file" id="p-file" multiple/>
+      <button type="button" class="btn soft" style="margin-top:8px" onclick="uploadFiles()">Upload selected files</button>
+      <div id="file-list" class="hint" style="margin-top:10px"></div>
+    </div>
   </div>
   <div class="card"><h3>All products</h3>${productCards}</div>
 </div>
@@ -4451,10 +4556,39 @@ function editProduct(p){
   document.getElementById('p-discount').value=p.discountPercent==null?'':p.discountPercent;
   document.getElementById('p-onsale').value=p.onSale?'1':'0';
   document.getElementById('p-testplace').value=p.testPlaceId||'';
+  document.getElementById('p-roles').value=(p.discordRoleIds||[]).join(', ');
   const keys=p.keyNames||[];
   [...document.getElementById('p-keys').options].forEach(o=>o.selected=keys.includes(o.value));
   document.querySelector('.tab[data-tab=products]').click();
   window.scrollTo({top:0,behavior:'smooth'});
+  document.getElementById('file-box').style.display='block';
+  renderFiles(p);
+}
+function renderFiles(p){
+  const box=document.getElementById('file-list');
+  const files=p.files||[];
+  if(!files.length){box.innerHTML='No files yet';return;}
+  box.innerHTML=files.map(f=>'<div>'+f.name+' ('+Math.round((f.size||0)/1024)+' KB) <button type="button" class="btn danger sm" onclick="delFile(\''+f.id+'\')">×</button></div>').join('');
+}
+async function uploadFiles(){
+  const id=document.getElementById('p-id').value.trim();
+  if(!id){alert('Save product first, then Edit and upload');return;}
+  const input=document.getElementById('p-file');
+  if(!input.files.length)return;
+  for(const file of input.files){
+    const buf=await file.arrayBuffer();
+    const bytes=new Uint8Array(buf);let s='';for(let i=0;i<bytes.length;i++)s+=String.fromCharCode(bytes[i]);const b64=btoa(s);
+    const r=await fetch('/api/hub/products/'+encodeURIComponent(id)+'/files',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:file.name,mime:file.type||'application/octet-stream',contentBase64:b64})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok){alert(j.error||'Upload failed');return;}
+  }
+  location.reload();
+}
+async function delFile(fid){
+  const id=document.getElementById('p-id').value.trim();
+  if(!id)return;
+  await fetch('/api/hub/products/'+encodeURIComponent(id)+'/files/'+encodeURIComponent(fid),{method:'DELETE'});
+  location.reload();
 }
 async function saveProduct(){
   const body={
@@ -4466,6 +4600,7 @@ async function saveProduct(){
     description:document.getElementById('p-desc').value,
     imageUrl:document.getElementById('p-image').value.trim(),
     keyNames:selectedKeys(),
+    discordRoleIds:document.getElementById('p-roles').value,
     discountPercent:document.getElementById('p-discount').value,
     onSale:document.getElementById('p-onsale').value==='1',
     testPlaceId:document.getElementById('p-testplace').value.trim()
@@ -4539,9 +4674,14 @@ app.post('/api/hub/products', checkAuth, async (req, res) => {
         row.discountPercent = discountPercent;
         row.onSale = onSale && discountPercent != null && discountPercent > 0;
         row.testPlaceId = testPlaceId;
+        row.discordRoleIds = Array.isArray(b.discordRoleIds)
+            ? b.discordRoleIds.map(String).map(s => s.trim()).filter(Boolean)
+            : String(b.discordRoleIds || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
         row.updatedAt = Date.now();
-        // Sync hub keys for everyone who owns this product
         syncHubKeysForProduct(data, row, oldKeys);
+        for (const o of (data.hubOwnerships || []).filter(x => x.productId === row.id)) {
+            notifyProductRevoked(data, row, o.robloxId);
+        }
     } else {
         id = newHubId();
         data.hubProducts.push({
@@ -4554,6 +4694,10 @@ app.post('/api/hub/products', checkAuth, async (req, res) => {
             discountPercent,
             onSale: onSale && discountPercent != null && discountPercent > 0,
             testPlaceId,
+            discordRoleIds: Array.isArray(b.discordRoleIds)
+                ? b.discordRoleIds.map(String).map(s => s.trim()).filter(Boolean)
+                : String(b.discordRoleIds || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean),
+            files: [],
             createdAt: Date.now(),
             updatedAt: Date.now()
         });
@@ -4700,6 +4844,7 @@ app.post('/api/hub/purchase', checkBotAuth, async (req, res) => {
             }
         }
     }
+    notifyProductGranted(data, product, robloxId, robloxName, publicBaseUrl(req));
     await safeSave();
     res.json({ ok: true, productId: product.id, ownershipId: ownId, keysGranted: keyNames });
 });
@@ -4748,6 +4893,7 @@ app.post('/api/hub/grant', checkAuth, async (req, res) => {
             else { existing.fromHub = true; existing.hubProductId = product.id; }
         }
     }
+    notifyProductGranted(data, product, robloxId, robloxName, publicBaseUrl(req));
     await safeSave();
     res.json({ ok: true });
 });
@@ -4758,7 +4904,12 @@ app.post('/api/hub/revoke', checkAuth, async (req, res) => {
     ensureHubStores(data);
     const ownershipId = String(req.body.ownershipId || '').trim();
     const before = data.hubOwnerships.length;
+    const removed = data.hubOwnerships.find(o => o.id === ownershipId);
     data.hubOwnerships = data.hubOwnerships.filter(o => o.id !== ownershipId);
+    if (removed) {
+        const prod = data.hubProducts.find(pr => pr.id === removed.productId);
+        if (prod) notifyProductRevoked(data, prod, removed.robloxId);
+    }
     await safeSave();
     res.json({ ok: true, removed: before - data.hubOwnerships.length });
 });
@@ -4788,6 +4939,144 @@ app.get('/api/bot/profile', checkBotAuth, (req, res) => {
         robloxId: link.robloxId,
         robloxName: link.robloxName,
         products
+    });
+});
+
+
+
+// ---- Hub files + bot jobs ----
+app.get('/api/hub/files/:token', (req, res) => {
+    const data = db.getData();
+    ensureHubStores(data);
+    const token = String(req.params.token || '').trim();
+    if (!token) return res.status(400).send('bad token');
+    for (const prod of (data.hubProducts || [])) {
+        const f = (prod.files || []).find(x => x.token === token);
+        if (f && f.contentBase64) {
+            const buf = Buffer.from(f.contentBase64, 'base64');
+            res.setHeader('Content-Type', f.mime || 'application/octet-stream');
+            res.setHeader('Content-Disposition', 'attachment; filename="' + String(f.name || 'file').replace(/"/g, '') + '"');
+            res.setHeader('Content-Length', buf.length);
+            return res.send(buf);
+        }
+    }
+    return res.status(404).send('File not found');
+});
+
+app.post('/api/hub/products/:id/files', checkAuth, async (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
+    const data = db.getData();
+    ensureHubStores(data);
+    const product = data.hubProducts.find(p => p.id === req.params.id);
+    if (!product) return res.status(404).json({ error: 'product not found' });
+    if (!Array.isArray(product.files)) product.files = [];
+    const name = String(req.body.name || 'file').slice(0, 120);
+    const mime = String(req.body.mime || 'application/octet-stream').slice(0, 80);
+    const contentBase64 = String(req.body.contentBase64 || '');
+    if (!contentBase64) return res.status(400).json({ error: 'contentBase64 required' });
+    const size = Buffer.from(contentBase64, 'base64').length;
+    if (size > 5 * 1024 * 1024) return res.status(400).json({ error: 'Max 5MB per file' });
+    if (product.files.length >= 10) return res.status(400).json({ error: 'Max 10 files per product' });
+    const file = {
+        id: newHubId(),
+        name,
+        mime,
+        size,
+        token: newHubId() + newHubId(),
+        contentBase64,
+        uploadedAt: Date.now()
+    };
+    product.files.push(file);
+    await safeSave();
+    res.json({ ok: true, id: file.id, token: file.token, name: file.name, size: file.size, url: publicBaseUrl(req) + '/api/hub/files/' + file.token });
+});
+
+app.delete('/api/hub/products/:id/files/:fileId', checkAuth, async (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
+    const data = db.getData();
+    ensureHubStores(data);
+    const product = data.hubProducts.find(p => p.id === req.params.id);
+    if (!product) return res.status(404).json({ error: 'product not found' });
+    product.files = (product.files || []).filter(f => f.id !== req.params.fileId);
+    await safeSave();
+    res.json({ ok: true });
+});
+
+app.get('/api/bot/jobs', checkBotAuth, (req, res) => {
+    const data = db.getData();
+    ensureHubStores(data);
+    res.json({ jobs: (data.pendingBotJobs || []).slice(0, 30) });
+});
+
+app.post('/api/bot/jobs/:id/complete', checkBotAuth, async (req, res) => {
+    const data = db.getData();
+    ensureHubStores(data);
+    const id = req.params.id;
+    data.pendingBotJobs = (data.pendingBotJobs || []).filter(j => j.id !== id);
+    await safeSave();
+    res.json({ ok: true });
+});
+
+app.post('/api/bot/jobs/:id/fail', checkBotAuth, async (req, res) => {
+    const data = db.getData();
+    ensureHubStores(data);
+    const job = (data.pendingBotJobs || []).find(j => j.id === req.params.id);
+    if (job) {
+        job.tries = (job.tries || 0) + 1;
+        job.lastError = String((req.body && req.body.error) || '').slice(0, 300);
+        job.lastTriedAt = Date.now();
+        // drop after many failures
+        if (job.tries >= 25) {
+            data.pendingBotJobs = data.pendingBotJobs.filter(j => j.id !== job.id);
+        }
+    }
+    await safeSave();
+    res.json({ ok: true });
+});
+
+app.get('/api/bot/hub-catalog', checkBotAuth, (req, res) => {
+    const data = db.getData();
+    ensureHubStores(data);
+    ensureBotConfig(data);
+    const cfg = data.botConfig;
+    const list = (data.hubProducts || []).filter(p => p.available !== false).map(p => {
+        const stock = p.stock;
+        const soldOut = stock != null && Number(stock) <= 0;
+        return {
+            id: p.id,
+            name: p.name,
+            description: p.description || '',
+            stock: stock == null ? null : Number(stock),
+            soldOut,
+            isFree: !p.developerProductId || String(p.developerProductId) === '0',
+            developerProductId: p.developerProductId
+        };
+    });
+    res.json({
+        products: list,
+        robloxGameUrl: cfg.robloxGameUrl || '',
+        showPrices: cfg.hubShowPrices !== false
+    });
+});
+
+app.get('/api/bot/retrieve', checkBotAuth, (req, res) => {
+    const data = db.getData();
+    ensureHubStores(data);
+    ensureLinkStores(data);
+    const discordId = String(req.query.discordId || '').trim();
+    const productName = String(req.query.product || '').trim().toLowerCase();
+    if (!discordId || !productName) return res.status(400).json({ error: 'discordId and product required' });
+    const link = (data.discordLinks || []).find(l => String(l.discordId) === discordId);
+    if (!link) return res.status(404).json({ error: 'Discord not linked to Roblox' });
+    const product = (data.hubProducts || []).find(p => String(p.name || '').toLowerCase() === productName)
+        || (data.hubProducts || []).find(p => String(p.name || '').toLowerCase().includes(productName));
+    if (!product) return res.status(404).json({ error: 'Product not found' });
+    const owns = (data.hubOwnerships || []).some(o => o.productId === product.id && String(o.robloxId) === String(link.robloxId));
+    if (!owns) return res.status(403).json({ error: 'You do not own this product' });
+    const base = publicBaseUrl(req);
+    res.json({
+        productName: product.name,
+        files: fileMetaList(product, base)
     });
 });
 
