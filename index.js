@@ -3877,6 +3877,23 @@ app.post('/api/bot/link/transfer-code', checkBotAuth, async (req, res) => {
     });
 });
 
+
+app.get('/api/bot/link/by-roblox', checkBotAuth, (req, res) => {
+    const data = db.getData();
+    ensureLinkStores(data);
+    const robloxId = String(req.query.robloxId || '').trim();
+    if (!robloxId) return res.status(400).json({ error: 'robloxId required' });
+    const row = (data.discordLinks || []).find(l => String(l.robloxId) === robloxId);
+    if (!row) return res.json({ linked: false, robloxId });
+    res.json({
+        linked: true,
+        robloxId: row.robloxId,
+        robloxName: row.robloxName,
+        discordId: row.discordId,
+        discordTag: row.discordTag
+    });
+});
+
 app.get('/api/bot/link/status', checkBotAuth, async (req, res) => {
     const data = db.getData();
     ensureLinkStores(data);
@@ -4348,7 +4365,7 @@ th{color:var(--muted)}code{font-size:12px;color:#a5b4fc}
     <input type="hidden" id="p-id"/>
     <div class="row">
       <div><label>Name</label><input id="p-name"/></div>
-      <div><label>Developer Product ID</label><input id="p-dev"/></div>
+      <div><label>Developer Product ID (empty or 0 = Free)</label><input id="p-dev" placeholder="Leave empty or 0 for free"/></div>
     </div>
     <div class="row">
       <div><label>Stock (empty = ∞)</label><input id="p-stock" type="number"/></div>
@@ -4485,9 +4502,14 @@ app.post('/api/hub/products', checkAuth, async (req, res) => {
     ensureHubStores(data);
     const b = req.body || {};
     const name = String(b.name || '').trim();
-    const developerProductId = String(b.developerProductId || '').trim();
+    let developerProductId = String(b.developerProductId || '').trim();
     if (!name) return res.status(400).json({ error: 'name required' });
-    if (!developerProductId) return res.status(400).json({ error: 'developerProductId required' });
+    // empty or "0" = free product
+    if (!developerProductId || developerProductId === '0') {
+        developerProductId = '0';
+    } else if (!/^\d+$/.test(developerProductId)) {
+        return res.status(400).json({ error: 'Developer Product ID must be a number (leave empty or 0 for free)' });
+    }
     let stock = b.stock;
     if (stock === '' || stock == null) stock = null;
     else stock = Number(stock);
@@ -4573,7 +4595,8 @@ app.get('/api/hub/catalog', checkBotAuth, (req, res) => {
         owned: ownedSet.has(p.id),
         discountPercent: p.discountPercent != null ? Number(p.discountPercent) : null,
         onSale: !!(p.onSale && p.discountPercent),
-        testPlaceId: p.testPlaceId || null
+        testPlaceId: p.testPlaceId || null,
+        isFree: !p.developerProductId || String(p.developerProductId).trim() === '' || String(p.developerProductId).trim() === '0'
     }));
     res.json({ products: list, ownedProductIds: [...ownedSet] });
 });
@@ -4585,12 +4608,34 @@ app.post('/api/hub/purchase', checkBotAuth, async (req, res) => {
     const robloxId = String(req.body.robloxId || '').trim();
     const robloxName = String(req.body.robloxName || '').trim() || null;
     const developerProductId = String(req.body.developerProductId || '').trim();
+    const productId = String(req.body.productId || '').trim();
     const purchaseId = String(req.body.purchaseId || '').trim() || null;
-    if (!robloxId || !developerProductId) {
-        return res.status(400).json({ error: 'robloxId and developerProductId required' });
+    const freeClaim = !!(req.body.freeClaim || req.body.free);
+    if (!robloxId) {
+        return res.status(400).json({ error: 'robloxId required' });
     }
-    const product = data.hubProducts.find(p => String(p.developerProductId) === developerProductId);
-    if (!product) return res.status(404).json({ error: 'Unknown developer product' });
+    let product = null;
+    if (productId) {
+        product = data.hubProducts.find(p => p.id === productId);
+    }
+    if (!product && developerProductId) {
+        product = data.hubProducts.find(p => String(p.developerProductId) === developerProductId);
+    }
+    if (!product) return res.status(404).json({ error: 'Unknown product' });
+    const devId = String(product.developerProductId || '').trim();
+    const isFree = !devId || devId === '0';
+    if (freeClaim) {
+        if (!isFree) return res.status(403).json({ error: 'Product is not free' });
+        if (!productId || product.id !== productId) {
+            return res.status(400).json({ error: 'productId required for free claim' });
+        }
+    } else {
+        if (isFree) return res.status(400).json({ error: 'Free product must use freeClaim' });
+        // Paid: only accept matching developer product id from Roblox receipt
+        if (!developerProductId || String(developerProductId) !== devId) {
+            return res.status(403).json({ error: 'developerProductId mismatch' });
+        }
+    }
     if (product.available === false) return res.status(403).json({ error: 'Product not available' });
     if (product.stock != null && product.stock <= 0) return res.status(403).json({ error: 'Out of stock' });
 
