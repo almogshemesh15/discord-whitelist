@@ -1759,6 +1759,7 @@ app.get('/', checkAuth, (req, res) => {
                     <a href="/bot" class="btn-obfuscate-page" style="background:#6366f1;border-color:#4f46e5;">🤖 Bot</a>
                     <a href="/users" class="btn-obfuscate-page" style="background:#14b8a6;border-color:#0d9488;">👤 Users</a>
                     <a href="/hub" class="btn-obfuscate-page" style="background:#ec4899;border-color:#db2777;">🛒 Hub</a>
+                    <a href="/composer" class="btn-obfuscate-page" style="background:#8b5cf6;border-color:#7c3aed;">✉️ Composer</a>
                     <a href="/messages" class="btn-obfuscate-page" style="background:#f59e0b;border-color:#d97706;">💬 ${tr('messages')}</a>
                     <a href="/obfuscate" class="btn-obfuscate-page">🔒 ${tr('obfuscate')}</a>
                     <a href="/force-save" class="btn-save-db">💾 ${tr('save')}</a>
@@ -4472,6 +4473,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
 <script>
 let PRODUCTS = [];
 let OWNERSHIPS = [];
+let LINKS = [];
 let KEYS = [];
 let pendingFiles = [];
 let pendingNames = {};
@@ -4488,7 +4490,7 @@ document.querySelectorAll('.tabs button').forEach(btn => {
   });
 });
 
-$('gType').addEventListener('change', () => {
+if ($('gType')) $('gType').addEventListener('change', () => {
   const t = $('gType').value;
   $('gValueLabel').textContent =
     t === 'robloxUsername' ? 'Roblox username' :
@@ -4679,7 +4681,7 @@ function renderProducts(){
 }
 
 function linkForRoblox(robloxId){
-  return LINKS.find(l => String(l.robloxId) === String(robloxId)) || null;
+  return (LINKS || []).find(l => String(l.robloxId) === String(robloxId)) || null;
 }
 function renderOwners(){
   const by = {};
@@ -4759,14 +4761,16 @@ async function refreshState(forceRender){
     const j = await r.json();
     PRODUCTS = j.products || [];
     OWNERSHIPS = j.ownerships || [];
+    LINKS = j.links || [];
     KEYS = j.keys || [];
     fillKeysSelect();
     renderProducts();
     renderOwners();
     renderHistory();
     renderGrant();
-    $('liveHint').textContent = '· live ' + new Date().toLocaleTimeString();
-  } catch (e) {}
+    const hint = $('liveHint');
+    if (hint) hint.textContent = '· live ' + new Date().toLocaleTimeString();
+  } catch (e) { console.error('refreshState', e); }
 }
 
 $('pFiles').addEventListener('change', () => {
