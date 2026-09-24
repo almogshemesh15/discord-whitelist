@@ -73,7 +73,8 @@ const DEFAULT_BOT_COMMANDS = [
     { id: 'wl-profile', name: 'profile', description: 'View linked Roblox profile and hub products', enabled: true, roleIds: ['ALL'] },
     { id: 'wl-hub', name: 'hub', description: 'Show Hub store products and game link', enabled: true, roleIds: ['ALL'] },
     { id: 'wl-retrieve', name: 'retrieve', description: 'DM your product delivery (files/links/text)', enabled: true, roleIds: ['ALL'] },
-    { id: 'wl-sendproduct', name: 'sendproduct', description: 'DM product delivery to another Discord user', enabled: true, roleIds: [] }
+    { id: 'wl-sendproduct', name: 'sendproduct', description: 'DM product delivery to another Discord user', enabled: true, roleIds: [] },
+    { id: 'wl-delete', name: 'delete', description: 'Delete bot DMs or channel messages', enabled: true, roleIds: [] }
 ];
 
 
