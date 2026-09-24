@@ -2,6 +2,7 @@ const express = require('express');
 const axios = require('axios');
 const session = require('express-session');
 const db = require('./database');
+const { registerDiscordComposer } = require('./discord-composer');
 const app = express();
 let isSaving = false;
 
@@ -4382,12 +4383,13 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
 </style></head><body><div class="wrap">
 <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
   <h1>Hub Store <span class="muted" id="liveHint" style="font-size:12px;font-weight:400"></span></h1>
-  <div><a href="/">Dashboard</a> · <a href="/users">Users</a> · <a href="/bot">Bot</a></div>
+  <div><a href="/">Dashboard</a> · <a href="/users">Users</a> · <a href="/composer">Composer</a> · <a href="/bot">Bot</a></div>
 </div>
 <div class="tabs">
   <button type="button" class="on" data-t="products">Products</button>
   <button type="button" data-t="owners">Owners</button>
   <button type="button" data-t="history">History</button>
+  <button type="button" data-t="linked">Linked</button>
   <button type="button" data-t="grant">Grant</button>
 </div>
 
@@ -4461,6 +4463,14 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
   </div>
 </div>
 
+<div id="panel-linked" class="panel">
+  <div class="card">
+    <h3>Discord-linked players</h3>
+    <input id="linkedSearch" placeholder="Search Roblox/Discord name or ID…" style="margin-bottom:12px"/>
+    <div id="linkedList"></div>
+  </div>
+</div>
+
 <div id="panel-grant" class="panel">
   <div class="card">
     <h3>Grant product</h3>
@@ -4481,6 +4491,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
 <script>
 let PRODUCTS = [];
 let OWNERSHIPS = [];
+let LINKS = [];
 let KEYS = [];
 let pendingFiles = [];
 let pendingNames = {};
@@ -4687,6 +4698,9 @@ function renderProducts(){
   });
 }
 
+function linkForRoblox(robloxId){
+  return LINKS.find(l => String(l.robloxId) === String(robloxId)) || null;
+}
 function renderOwners(){
   const by = {};
   OWNERSHIPS.forEach(o => {
@@ -4702,23 +4716,60 @@ function renderOwners(){
       keys: keyTags
     });
   });
-  const q = ($('ownerSearch').value || '').toLowerCase();
+  const q = ($('ownerSearch').value || '').toLowerCase().trim();
   const box = $('ownerList');
-  const filtered = Object.values(by).filter(pl => !q || (pl.robloxName + ' ' + pl.robloxId).toLowerCase().indexOf(q) >= 0);
+  const filtered = Object.values(by).filter(pl => {
+    if (!q) return true;
+    const link = linkForRoblox(pl.robloxId);
+    const blob = [
+      pl.robloxName, pl.robloxId,
+      link && link.discordTag, link && link.discordId
+    ].filter(Boolean).join(' ').toLowerCase();
+    return blob.indexOf(q) >= 0;
+  });
   if (!filtered.length) { box.innerHTML = '<p class="muted">No owners</p>'; return; }
   box.innerHTML = filtered.map(pl => {
+    const link = linkForRoblox(pl.robloxId);
+    const disc = link
+      ? ('Discord: <b>' + (link.discordTag || '—') + '</b> <code>' + link.discordId + '</code>')
+      : '<span class="muted">Discord: not linked</span>';
     const items = pl.items.map(it =>
       '<div style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid #1e293b">' +
       '<span><b>' + it.name + '</b> <span class="tags">' + (it.keys || '') + '</span></span>' +
       '<button type="button" class="btn danger" data-rev="' + it.ownershipId + '">×</button></div>'
     ).join('');
-    return '<div class="pc"><b>' + pl.robloxName + '</b> <code>' + pl.robloxId + '</code><div>' + items + '</div></div>';
+    return '<div class="pc"><b>' + pl.robloxName + '</b> <code>' + pl.robloxId + '</code><div class="muted" style="margin:4px 0">' + disc + '</div><div>' + items + '</div></div>';
   }).join('');
   box.querySelectorAll('[data-rev]').forEach(btn => {
     btn.addEventListener('click', async () => {
       if (!confirm('Remove product from player?')) return;
       await fetch('/api/hub/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ownershipId: btn.getAttribute('data-rev') }) });
+      await refreshState(true);
+    });
+  });
+}
+function renderLinked(){
+  const q = (($('linkedSearch') && $('linkedSearch').value) || '').toLowerCase().trim();
+  const box = $('linkedList');
+  if (!box) return;
+  const rows = (LINKS || []).filter(l => {
+    if (!q) return true;
+    const blob = [l.robloxName, l.robloxId, l.discordTag, l.discordId].join(' ').toLowerCase();
+    return blob.indexOf(q) >= 0;
+  });
+  if (!rows.length) { box.innerHTML = '<p class="muted">No linked users</p>'; return; }
+  box.innerHTML = rows.map(l =>
+    '<div class="pc" style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center">' +
+    '<div><b>' + (l.robloxName||'—') + '</b> <code>' + l.robloxId + '</code><div class="muted">Discord: <b>' +
+    (l.discordTag||'—') + '</b> <code>' + l.discordId + '</code></div></div>' +
+    '<button type="button" class="btn danger" data-unlink="' + l.discordId + '">Unlink</button></div>'
+  ).join('');
+  box.querySelectorAll('[data-unlink]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('Unlink this Discord user?')) return;
+      await fetch('/api/users/unlink', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ discordId: btn.getAttribute('data-unlink') }) });
       await refreshState(true);
     });
   });
@@ -4753,11 +4804,13 @@ async function refreshState(forceRender){
     const j = await r.json();
     PRODUCTS = j.products || [];
     OWNERSHIPS = j.ownerships || [];
+    LINKS = j.links || [];
     KEYS = j.keys || [];
     fillKeysSelect();
     renderProducts();
     renderOwners();
     renderHistory();
+    renderLinked();
     renderGrant();
     $('liveHint').textContent = '· live ' + new Date().toLocaleTimeString();
   } catch (e) {}
@@ -4842,6 +4895,7 @@ $('btnGrant').addEventListener('click', async () => {
   await refreshState(true);
 });
 $('ownerSearch').addEventListener('input', renderOwners);
+if ($('linkedSearch')) $('linkedSearch').addEventListener('input', renderLinked);
 
 renderLinksEditor([]);
 refreshState(true);
@@ -5250,7 +5304,15 @@ app.get('/api/hub/state', checkAuth, (req, res) => {
         purchasedAt: o.purchasedAt || null,
         manual: !!o.manual
     }));
-    res.json({ products, ownerships, keys: (data.keys || []).map(k => k.key) });
+    ensureLinkStores(data);
+    const links = (data.discordLinks || []).map(l => ({
+        discordId: String(l.discordId),
+        discordTag: l.discordTag || '',
+        robloxId: String(l.robloxId),
+        robloxName: l.robloxName || '',
+        linkedAt: l.linkedAt || null
+    }));
+    res.json({ products, ownerships, links, keys: (data.keys || []).map(k => k.key) });
 });
 
 app.get('/api/hub/files/:token' , (req, res) => {
@@ -5359,28 +5421,57 @@ app.post('/api/bot/jobs/:id/fail', checkBotAuth, async (req, res) => {
     res.json({ ok: true });
 });
 
-app.get('/api/bot/hub-catalog', checkBotAuth, (req, res) => {
+const _devProductPriceCache = new Map(); // id -> { price, at }
+async function fetchDevProductPrice(developerProductId) {
+    const id = String(developerProductId || '').trim();
+    if (!id || id === '0') return 0;
+    const cached = _devProductPriceCache.get(id);
+    if (cached && Date.now() - cached.at < 10 * 60 * 1000) return cached.price;
+    let price = null;
+    try {
+        const r = await axios.get('https://economy.roblox.com/v1/developer-products/' + id + '/info', { timeout: 8000 });
+        if (r.data && r.data.PriceInRobux != null) price = Number(r.data.PriceInRobux);
+    } catch (_) {}
+    if (price == null) {
+        try {
+            const r = await axios.get('https://apis.roblox.com/developer-products/v1/developer-products/' + id, { timeout: 8000 });
+            if (r.data && (r.data.priceInRobux != null || r.data.PriceInRobux != null)) {
+                price = Number(r.data.priceInRobux != null ? r.data.priceInRobux : r.data.PriceInRobux);
+            }
+        } catch (_) {}
+    }
+    _devProductPriceCache.set(id, { price, at: Date.now() });
+    return price;
+}
+
+app.get('/api/bot/hub-catalog', checkBotAuth, async (req, res) => {
     const data = db.getData();
     ensureHubStores(data);
     ensureBotConfig(data);
     const cfg = data.botConfig;
     const all = req.query.all === '1' || req.query.all === 'true';
-    const list = (data.hubProducts || [])
-        .filter(p => all || p.available !== false)
-        .map(p => {
+    const raw = (data.hubProducts || []).filter(p => all || p.available !== false);
+    const list = [];
+    for (const p of raw) {
         const stock = p.stock;
         const soldOut = stock != null && Number(stock) <= 0;
-        return {
+        const isFree = !p.developerProductId || String(p.developerProductId) === '0';
+        let priceInRobux = isFree ? 0 : null;
+        if (!isFree && cfg.hubShowPrices !== false) {
+            try { priceInRobux = await fetchDevProductPrice(p.developerProductId); } catch (_) {}
+        }
+        list.push({
             id: p.id,
             name: p.name,
             description: p.description || '',
             stock: stock == null ? null : Number(stock),
             soldOut,
             available: p.available !== false,
-            isFree: !p.developerProductId || String(p.developerProductId) === '0',
-            developerProductId: p.developerProductId
-        };
-    });
+            isFree,
+            developerProductId: p.developerProductId,
+            priceInRobux
+        });
+    }
     res.json({
         products: list,
         robloxGameUrl: cfg.robloxGameUrl || '',
@@ -5444,5 +5535,14 @@ app.get('/api/bot/retrieve', checkBotAuth, (req, res) => {
     });
 });
 
+
+registerDiscordComposer(app, {
+    checkAuth,
+    OWNER_EMAIL,
+    db,
+    enqueueBotJob,
+    safeSave,
+    publicBaseUrl
+});
 
 app.listen(PORT, () => {});
