@@ -5431,13 +5431,15 @@ app.get('/api/bot/retrieve', checkBotAuth, (req, res) => {
     const owns = (data.hubOwnerships || []).some(o => o.productId === product.id && String(o.robloxId) === String(link.robloxId));
     if (!owns) return res.status(403).json({ error: 'You do not own this product' });
     const base = publicBaseUrl(req);
-    const mode = String(product.deliveryMode || 'files').toLowerCase();
+    const includes = Array.isArray(product.deliveryIncludes) && product.deliveryIncludes.length
+        ? product.deliveryIncludes.map(String)
+        : ['files', 'links', 'text'];
     res.json({
         productName: product.name,
-        deliveryMode: mode,
-        files: mode === 'files' ? fileMetaList(product, base) : [],
-        links: mode === 'links' ? (product.links || []) : [],
-        testPlaceId: mode === 'text' ? (product.testPlaceId || null) : null
+        deliveryIncludes: includes,
+        files: includes.includes('files') ? fileMetaList(product, base) : [],
+        links: includes.includes('links') ? normalizeLinks(product.links) : [],
+        deliveryText: includes.includes('text') ? String(product.deliveryText || '') : ''
     });
 });
 
