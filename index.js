@@ -801,12 +801,22 @@ function entityHasAllAccess(item, data) {
 }
 
 function ensureStats(data) {
+    // one-shot slim: drop heavy arrays if present
+    if (data.stats) {
+        if (Array.isArray(data.stats.recent) && data.stats.recent.length) data.stats.recent = [];
+        if (data.stats.byPlace && Object.keys(data.stats.byPlace).length > 50) {
+            // keep counts but user asked not to store per-place — clear
+            data.stats.byPlace = {};
+        }
+    }
+
     if (!data.stats) {
         data.stats = { total: 0, allowed: 0, denied: 0, byKey: {}, byPlace: {}, recent: [] };
     }
     if (!data.stats.byKey) data.stats.byKey = {};
     if (!data.stats.byPlace) data.stats.byPlace = {};
-    if (!Array.isArray(data.stats.recent)) data.stats.recent = [];
+    data.stats.recent = []; // do not store per-request history
+    data.stats.byPlace = {}; // do not store per-place rows
 }
 
 function recordVerifyStat(data, { allowed, licenseKey, placeId }) {
@@ -819,20 +829,7 @@ function recordVerifyStat(data, { allowed, licenseKey, placeId }) {
         if (!data.stats.byKey[licenseKey]) data.stats.byKey[licenseKey] = { allowed: 0, denied: 0 };
         data.stats.byKey[licenseKey][allowed ? 'allowed' : 'denied']++;
     }
-    if (placeId != null) {
-        const pid = String(placeId);
-        if (!data.stats.byPlace[pid]) data.stats.byPlace[pid] = { allowed: 0, denied: 0 };
-        data.stats.byPlace[pid][allowed ? 'allowed' : 'denied']++;
-    }
-    data.stats.recent.push({
-        t: Date.now(),
-        allowed: !!allowed,
-        key: licenseKey || null,
-        placeId: placeId != null ? String(placeId) : null
-    });
-    // Keep 7 days of recent events (for weekly key ranking)
-    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-    data.stats.recent = data.stats.recent.filter(e => e.t > cutoff);
+    /* per-request place + recent log removed — only aggregate counters */
 }
 
 function formatIlDate(ts) {
@@ -1195,23 +1192,16 @@ app.get('/api/dashboard-data', checkAuth, async (req, res) => {
         hasFocus: sessionFocusMap[s.sid] ?? false
     }));
     ensureStats(data);
-    const recent = data.stats.recent || [];
-    const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
-    const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-    const last24 = recent.filter(e => e.t > dayAgo);
-    const last24hAllowed = last24.filter(e => e.allowed).length;
-    const last24hDenied = last24.filter(e => !e.allowed).length;
-
-    // Weekly key ranking (most used this week)
-    const weekKeyMap = {};
-    recent.filter(e => e.t > weekAgo && e.key).forEach(e => {
-        if (!weekKeyMap[e.key]) weekKeyMap[e.key] = { total: 0, allowed: 0, denied: 0 };
-        weekKeyMap[e.key].total++;
-        if (e.allowed) weekKeyMap[e.key].allowed++;
-        else weekKeyMap[e.key].denied++;
-    });
-    const topKeysWeek = Object.entries(weekKeyMap)
-        .map(([key, s]) => ({ key, ...s }))
+    // Aggregate-only stats (no per-request log)
+    const last24hAllowed = data.stats.last24hAllowed || 0;
+    const last24hDenied = data.stats.last24hDenied || 0;
+    const topKeysWeek = Object.entries(data.stats.byKey || {})
+        .map(([key, s]) => ({
+            key,
+            total: (s.allowed || 0) + (s.denied || 0),
+            allowed: s.allowed || 0,
+            denied: s.denied || 0
+        }))
         .sort((a, b) => b.total - a.total)
         .slice(0, 10);
 
@@ -4341,14 +4331,13 @@ app.get('/hub', checkAuth, (req, res) => {
     if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).send('Owner only');
     const data = db.getData();
     ensureHubStores(data);
-    const keyOpts = (data.keys || []).map(k => `<option value="${String(k.key).replace(/"/g,'&quot;')}">${k.key}</option>`).join('');
-    const productOpts = (data.hubProducts || []).map(p => `<option value="${p.id}">${p.name}</option>`).join('');
-    const productsForClient = (data.hubProducts || []).map(p => ({
+    const keys = (data.keys || []).map(k => k.key);
+    const products = (data.hubProducts || []).map(p => ({
         id: p.id,
-        name: p.name,
+        name: p.name || '',
         description: p.description || '',
         imageUrl: p.imageUrl || '',
-        developerProductId: p.developerProductId,
+        developerProductId: p.developerProductId || '0',
         keyNames: p.keyNames || [],
         stock: p.stock,
         available: p.available !== false,
@@ -4358,305 +4347,329 @@ app.get('/hub', checkAuth, (req, res) => {
         discordRoleIds: p.discordRoleIds || [],
         files: (p.files || []).map(f => ({ id: f.id, name: f.name, size: f.size || 0, token: f.token }))
     }));
-    const PRODUCTS_JSON = JSON.stringify(productsForClient).replace(/</g, '\\u003c');
-
-    const productCards = (data.hubProducts || []).map(p => {
-        const nOwn = (data.hubOwnerships || []).filter(o => o.productId === p.id).length;
-        const stock = p.stock == null ? '∞' : p.stock;
-        const av = p.available !== false;
-        const sale = p.onSale && p.discountPercent ? `<span class="pill sale">-${p.discountPercent}%</span>` : '';
-        const test = p.testPlaceId ? `<span class="pill">Test ${p.testPlaceId}</span>` : '';
-        const img = p.imageUrl
-            ? `<div class="thumb" style="background-image:url('${String(p.imageUrl).replace(/'/g,"%27")}')"></div>`
-            : `<div class="thumb empty">📦</div>`;
-        return `<div class="product-card" data-pid="${p.id}">
-          <div class="pc-top">${img}
-            <div class="pc-meta">
-              <div class="pc-name">${p.name || ''}</div>
-              <div class="pc-id">ID <code>${p.id}</code> · Dev <code>${p.developerProductId || ''}</code> · ${nOwn} owners</div>
-              <div class="pc-desc">${(p.description || '').replace(/</g,'&lt;')}</div>
-              <div class="pc-badges">
-                <span class="pill">${stock === '∞' ? 'Unlimited' : stock + ' left'}</span>
-                <span class="pill ${av ? 'on' : 'off'}">${av ? 'On sale' : 'Hidden'}</span>
-                ${sale}${test}
-                <span class="pill keys">${(p.keyNames || []).join(', ') || 'No keys'}</span>
-              </div>
-            </div>
-            <div class="pc-actions">
-              <button type="button" class="btn soft" onclick='editProduct(${JSON.stringify(p).replace(/</g,'\\u003c')})'>Edit</button>
-              <button type="button" class="btn danger" onclick="deleteProduct('${p.id}')">Delete</button>
-            </div>
-          </div>
-        </div>`;
-    }).join('') || '<div class="muted center">No products yet</div>';
-
-    // Owners aggregated by robloxId
-    const byPlayer = {};
-    for (const o of (data.hubOwnerships || [])) {
-        const rid = String(o.robloxId);
-        if (!byPlayer[rid]) byPlayer[rid] = { robloxId: rid, robloxName: o.robloxName || rid, items: [] };
-        if (o.robloxName) byPlayer[rid].robloxName = o.robloxName;
-        const prod = (data.hubProducts || []).find(p => p.id === o.productId);
-        byPlayer[rid].items.push({ ownershipId: o.id, productId: o.productId, name: prod ? prod.name : o.productId, keys: (prod && prod.keyNames) || [] });
-    }
-    const ownerBlocks = Object.values(byPlayer).sort((a,b)=>String(a.robloxName).localeCompare(String(b.robloxName))).map(pl => {
-        const items = pl.items.map(it => {
-            const tags = (it.keys || []).map(k => '🔑'+k).join(' ');
-            return `<div class="own-item"><span><b>${it.name}</b> <span class="tags">${tags}</span></span>
-              <button type="button" class="xbtn" title="Remove" onclick="revokeOwn('${it.ownershipId}')">×</button></div>`;
-        }).join('');
-        const search = (pl.robloxName + ' ' + pl.robloxId).toLowerCase().replace(/"/g,'');
-        return `<div class="owner-card" data-search="${search}">
-          <div class="owner-head"><strong>${pl.robloxName}</strong> <code>${pl.robloxId}</code>
-            <span class="muted">${pl.items.length} product(s)</span></div>
-          <div class="own-list">${items}</div>
-        </div>`;
-    }).join('') || '<div class="muted center">No owners yet</div>';
-
-    const historyRows = (data.hubOwnerships || []).slice().sort((a,b)=>(b.purchasedAt||0)-(a.purchasedAt||0)).slice(0,300).map(o => {
-        const prod = (data.hubProducts || []).find(x => x.id === o.productId);
-        const when = o.purchasedAt ? new Date(o.purchasedAt).toLocaleString('he-IL',{timeZone:'Asia/Jerusalem'}) : '—';
-        return `<tr><td>${when}</td><td>${prod?prod.name:o.productId}</td><td>${o.robloxName||'—'} <code>${o.robloxId}</code></td><td>${o.manual?'Manual':'Purchase'}</td>
-          <td><button type="button" class="btn danger sm" onclick="revokeOwn('${o.id}')">Revoke</button></td></tr>`;
-    }).join('') || '<tr><td colspan="5" class="muted center">No history</td></tr>';
-
+    const ownerships = (data.hubOwnerships || []).map(o => ({
+        id: o.id,
+        productId: o.productId,
+        robloxId: o.robloxId,
+        robloxName: o.robloxName || '',
+        purchasedAt: o.purchasedAt || null,
+        manual: !!o.manual
+    }));
     res.send(`<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Hub</title>
+<html lang="en"><head>
+<meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Hub</title>
 <style>
-:root{--bg:#070b14;--card:#0f1628;--line:#1e293b;--text:#e2e8f0;--muted:#94a3b8;--pink:#ec4899;--blue:#38bdf8}
-*{box-sizing:border-box}body{margin:0;font-family:Inter,system-ui,sans-serif;background:radial-gradient(1000px 500px at 0% 0%,#3b0764,transparent),var(--bg);color:var(--text)}
-.wrap{max-width:1200px;margin:0 auto;padding:28px 18px 70px}
-.top{display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:22px;flex-wrap:wrap;gap:12px}
-h1{margin:0;font-size:28px;background:linear-gradient(90deg,#f472b6,#a78bfa);-webkit-background-clip:text;color:transparent}
-.nav a{color:var(--blue);margin-left:12px;text-decoration:none;font-size:14px}
-.tabs{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
-.tab{padding:10px 16px;border-radius:999px;border:1px solid var(--line);background:#0b1220;color:var(--muted);cursor:pointer;font-weight:700;font-size:13px}
-.tab.active{background:linear-gradient(135deg,#db2777,#7c3aed);color:#fff;border-color:transparent}
-.panel{display:none}.panel.active{display:block}
-.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:20px;margin-bottom:16px;box-shadow:0 16px 40px rgba(0,0,0,.3)}
-.card h3{margin:0 0 12px;font-size:16px}
-label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:6px}
-input,select,textarea{width:100%;padding:12px 14px;margin-bottom:12px;border-radius:12px;border:1px solid #243044;background:#0b1220;color:#fff}
+body{margin:0;font-family:system-ui,sans-serif;background:#0b0f19;color:#e2e8f0}
+.wrap{max-width:1100px;margin:0 auto;padding:24px}
+h1{color:#f472b6;margin:0 0 8px}
+a{color:#38bdf8}
+.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}
+.tabs button{padding:10px 16px;border-radius:999px;border:1px solid #1e293b;background:#111827;color:#94a3b8;cursor:pointer;font-weight:700}
+.tabs button.on{background:linear-gradient(135deg,#db2777,#7c3aed);color:#fff;border-color:transparent}
+.panel{display:none}.panel.on{display:block}
+.card{background:#111827;border:1px solid #1e293b;border-radius:14px;padding:18px;margin-bottom:14px}
+label{display:block;font-size:12px;color:#94a3b8;margin:8px 0 4px}
+input,select,textarea{width:100%;padding:10px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#fff;box-sizing:border-box}
 .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-@media(max-width:700px){.row{grid-template-columns:1fr}}
-.btn{border:0;border-radius:12px;padding:11px 14px;font-weight:700;cursor:pointer;color:#fff;background:linear-gradient(135deg,#db2777,#7c3aed)}
-.btn.soft{background:#1e293b}.btn.danger{background:#e11d48}.btn.green{background:#059669}
-.btn.sm{padding:6px 10px;font-size:12px;border-radius:8px}
-.hint{font-size:12px;color:var(--muted);line-height:1.45}
-.product-card{border:1px solid var(--line);border-radius:16px;padding:14px;margin-bottom:12px;background:#0b1220}
-.pc-top{display:flex;gap:14px}.thumb{width:72px;height:72px;border-radius:14px;background:#1e293b center/cover;flex-shrink:0}
-.thumb.empty{display:flex;align-items:center;justify-content:center;font-size:28px}
-.pc-name{font-weight:800}.pc-id{font-size:12px;color:var(--muted);margin-top:4px}.pc-desc{font-size:13px;color:#cbd5e1;margin-top:6px}
-.pc-badges{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
-.pill{font-size:11px;padding:4px 8px;border-radius:999px;background:#1e293b;color:#cbd5e1}
-.pill.on{background:#064e3b;color:#6ee7b7}.pill.off{background:#4c0519;color:#fda4af}
-.pill.sale{background:#7c2d12;color:#fdba74}.pill.keys{background:#312e81;color:#c7d2fe}
-.pc-actions{display:flex;flex-direction:column;gap:8px;margin-left:auto}
-.owner-card{border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:10px;background:#0b1220}
-.owner-head{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
-.own-item{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px dashed #1e293b;font-size:13px}
-.own-item .tags{color:#fbbf24;font-size:12px;margin-left:8px}
-.xbtn{width:28px;height:28px;border:0;border-radius:8px;background:#7f1d1d;color:#fecaca;font-size:18px;cursor:pointer;line-height:1}
-.muted{color:var(--muted)}.center{text-align:center}
-table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:9px 6px;border-bottom:1px solid var(--line);text-align:left}
-th{color:var(--muted)}code{font-size:12px;color:#a5b4fc}
-.search{margin-bottom:12px}
+button.btn{padding:10px 14px;border:0;border-radius:8px;background:#db2777;color:#fff;font-weight:700;cursor:pointer;margin-right:8px;margin-top:8px}
+button.sec{background:#334155}button.danger{background:#e11d48}button.green{background:#059669}
+table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;border-bottom:1px solid #1e293b;text-align:left}
+.muted{color:#64748b;font-size:13px}code{color:#a5b4fc}
+.pc{border:1px solid #1e293b;border-radius:12px;padding:12px;margin-bottom:10px;background:#0f172a}
 </style></head><body><div class="wrap">
-<div class="top">
-  <div><div class="muted" style="font-size:12px">STORE</div><h1>Hub</h1></div>
-  <div class="nav"><a href="/users">Users</a><a href="/bot">Bot</a><a href="/">Dashboard</a></div>
+<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+  <h1>Hub Store</h1>
+  <div><a href="/">Dashboard</a> · <a href="/users">Users</a> · <a href="/bot">Bot</a></div>
 </div>
 <div class="tabs">
-  <button type="button" class="tab active" data-tab="products">Products</button>
-  <button type="button" class="tab" data-tab="owners">Owners</button>
-  <button type="button" class="tab" data-tab="history">History</button>
-  <button type="button" class="tab" data-tab="grant">Grant</button>
+  <button type="button" class="on" data-t="products">Products</button>
+  <button type="button" data-t="owners">Owners</button>
+  <button type="button" data-t="history">History</button>
+  <button type="button" data-t="grant">Grant</button>
 </div>
 
-<div id="tab-products" class="panel active">
+<div id="panel-products" class="panel on">
   <div class="card">
-    <h3 id="form-title">Create / edit product</h3>
-    <input type="hidden" id="p-id"/>
+    <h3 id="formTitle">Create product</h3>
+    <input type="hidden" id="pId"/>
     <div class="row">
-      <div><label>Name</label><input id="p-name"/></div>
-      <div><label>Developer Product ID (empty or 0 = Free)</label><input id="p-dev" placeholder="Leave empty or 0 for free"/></div>
-    </div>
-    <div class="row">
-      <div><label>Stock (empty = ∞)</label><input id="p-stock" type="number"/></div>
-      <div><label>Available</label><select id="p-available"><option value="1">Yes</option><option value="0">No</option></select></div>
+      <div><label>Name</label><input id="pName"/></div>
+      <div><label>Developer Product ID (empty/0 = Free)</label><input id="pDev" placeholder="0 = free"/></div>
     </div>
     <div class="row">
-      <div><label>Discount % (optional)</label><input id="p-discount" type="number" min="0" max="100" placeholder="e.g. 25"/></div>
-      <div><label>On sale badge</label><select id="p-onsale"><option value="0">No</option><option value="1">Yes — show discount</option></select></div>
+      <div><label>Stock (empty = unlimited)</label><input id="pStock" type="number"/></div>
+      <div><label>Available</label><select id="pAvail"><option value="1">Yes</option><option value="0">No</option></select></div>
     </div>
     <div class="row">
-      <div><label>Test Place ID (optional)</label><input id="p-testplace" placeholder="PlaceId for Test button"/></div>
-      <div><label>Image rbxassetid</label><input id="p-image" placeholder="rbxassetid://123"/></div>
+      <div><label>Discount %</label><input id="pDisc" type="number"/></div>
+      <div><label>On sale badge</label><select id="pSale"><option value="0">No</option><option value="1">Yes</option></select></div>
     </div>
-    <label>Description</label><textarea id="p-desc" rows="2"></textarea>
-    <label>Discord role IDs (comma-separated)</label><input id="p-roles" placeholder="123456789, 987654321"/>
-    <label>Keys granted</label><select id="p-keys" multiple size="5">${keyOpts}</select>
-    <div style="display:flex;gap:8px;margin-top:8px">
-      <button type="button" class="btn" onclick="saveProduct()">Save</button>
-      <button type="button" class="btn soft" onclick="resetForm()">Clear</button>
+    <div class="row">
+      <div><label>Test Place ID</label><input id="pTest"/></div>
+      <div><label>Image (rbxassetid)</label><input id="pImg"/></div>
     </div>
-    <p class="hint">Changing keys/roles updates all current owners. Image: rbxassetid for in-game. After save, use file upload below (edit product first).</p>
-    <div id="file-box" style="margin-top:18px;padding:16px;border:1px dashed #334155;border-radius:12px;background:#0b1220">
-      <h4 style="margin:0 0 6px;color:#f472b6">📎 Product files</h4>
-      <p class="hint" style="margin:0 0 10px">1) Save the product · 2) Click <b>Edit</b> on the product · 3) Choose files here · 4) Upload. Buyers get download links in Discord DM.</p>
-      <input type="file" id="p-file" multiple style="margin-bottom:8px"/>
-      <button type="button" class="btn soft" onclick="uploadFiles()">Upload selected files</button>
-      <div id="file-list" class="hint" style="margin-top:10px">Open a product with Edit to manage its files.</div>
+    <label>Description</label><textarea id="pDesc" rows="2"></textarea>
+    <label>Discord role IDs (comma-separated)</label><input id="pRoles"/>
+    <label>Keys (Ctrl multi-select)</label>
+    <select id="pKeys" multiple size="5"></select>
+    <div>
+      <button type="button" class="btn" id="btnSave">Save product</button>
+      <button type="button" class="btn sec" id="btnClear">Clear form</button>
+    </div>
+    <div id="fileSection" style="margin-top:16px;padding-top:12px;border-top:1px solid #1e293b;display:none">
+      <h4>Files for this product</h4>
+      <p class="muted">Save product first, then Edit, then upload. Max 5MB each.</p>
+      <input type="file" id="pFiles" multiple/>
+      <button type="button" class="btn sec" id="btnUpload">Upload files</button>
+      <div id="fileList" class="muted" style="margin-top:8px"></div>
     </div>
   </div>
-  <div class="card"><h3>All products</h3>${productCards}</div>
+  <div class="card"><h3>All products</h3><div id="productList"></div></div>
 </div>
 
-<div id="tab-owners" class="panel">
+<div id="panel-owners" class="panel">
   <div class="card">
-    <h3>Owners (at least 1 product)</h3>
-    <input class="search" id="owner-search" placeholder="Search Roblox name or ID…" oninput="filterOwners()"/>
-    <div id="owners-list">${ownerBlocks}</div>
+    <h3>Owners</h3>
+    <input id="ownerSearch" placeholder="Search name or id..." style="margin-bottom:12px"/>
+    <div id="ownerList"></div>
   </div>
 </div>
 
-<div id="tab-history" class="panel">
+<div id="panel-history" class="panel">
   <div class="card">
-    <h3>Purchase history (all time)</h3>
+    <h3>Purchase history</h3>
     <table><thead><tr><th>When</th><th>Product</th><th>Player</th><th>Source</th><th></th></tr></thead>
-    <tbody>${historyRows}</tbody></table>
+    <tbody id="histBody"></tbody></table>
   </div>
 </div>
 
-<div id="tab-grant" class="panel">
+<div id="panel-grant" class="panel">
   <div class="card">
     <h3>Grant product</h3>
-    <label>Product</label><select id="g-product">${productOpts}</select>
-    <label>Roblox ID</label><input id="g-roblox"/>
-    <label>Name (optional)</label><input id="g-name"/>
-    <button type="button" class="btn green" onclick="grantProduct()">Grant</button>
+    <label>Product</label><select id="gProduct"></select>
+    <label>Roblox ID</label><input id="gRoblox"/>
+    <label>Name (optional)</label><input id="gName"/>
+    <button type="button" class="btn green" id="btnGrant">Grant</button>
   </div>
 </div>
 
 <script>
-const PRODUCTS = ${PRODUCTS_JSON};
-function showTab(name){
-  document.querySelectorAll('.tab').forEach(b=>{
-    b.classList.toggle('active', b.getAttribute('data-tab')===name);
-  });
-  document.querySelectorAll('.panel').forEach(p=>{
-    p.classList.toggle('active', p.id==='tab-'+name);
-  });
-}
-document.querySelectorAll('.tab').forEach(btn=>{
-  btn.addEventListener('click', function(e){
-    e.preventDefault();
-    showTab(btn.getAttribute('data-tab'));
+const KEYS = ${JSON.stringify(keys)};
+const PRODUCTS = ${JSON.stringify(products).replace(/</g, '\\u003c')};
+const OWNERSHIPS = ${JSON.stringify(ownerships).replace(/</g, '\\u003c')};
+
+function $(id){ return document.getElementById(id); }
+
+// Tabs
+document.querySelectorAll('.tabs button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('on'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('on'));
+    btn.classList.add('on');
+    const panel = $('panel-' + btn.getAttribute('data-t'));
+    if (panel) panel.classList.add('on');
   });
 });
-function editProductById(id){
-  const p = PRODUCTS.find(x => x.id === id);
-  if(!p){ alert('Product not found'); return; }
-  editProduct(p);
+
+// Keys multi-select
+(function(){
+  const sel = $('pKeys');
+  KEYS.forEach(k => {
+    const o = document.createElement('option');
+    o.value = k; o.textContent = k;
+    sel.appendChild(o);
+  });
+})();
+
+function selectedKeys(){
+  return Array.from($('pKeys').selectedOptions).map(o => o.value);
 }
 
-function filterOwners(){
-  const q=(document.getElementById('owner-search').value||'').toLowerCase().trim();
-  document.querySelectorAll('.owner-card').forEach(c=>{
-    c.style.display=!q||(c.getAttribute('data-search')||'').includes(q)?'':'none';
+function clearForm(){
+  $('formTitle').textContent = 'Create product';
+  $('pId').value = '';
+  ['pName','pDev','pStock','pDesc','pImg','pDisc','pTest','pRoles'].forEach(id => $(id).value = '');
+  $('pAvail').value = '1';
+  $('pSale').value = '0';
+  Array.from($('pKeys').options).forEach(o => o.selected = false);
+  $('fileSection').style.display = 'none';
+  $('fileList').textContent = '';
+}
+
+function editProduct(p){
+  $('formTitle').textContent = 'Edit: ' + (p.name || '');
+  $('pId').value = p.id || '';
+  $('pName').value = p.name || '';
+  $('pDev').value = p.developerProductId || '';
+  $('pStock').value = (p.stock == null ? '' : p.stock);
+  $('pAvail').value = p.available === false ? '0' : '1';
+  $('pDesc').value = p.description || '';
+  $('pImg').value = p.imageUrl || '';
+  $('pDisc').value = p.discountPercent == null ? '' : p.discountPercent;
+  $('pSale').value = p.onSale ? '1' : '0';
+  $('pTest').value = p.testPlaceId || '';
+  $('pRoles').value = (p.discordRoleIds || []).join(', ');
+  const keys = p.keyNames || [];
+  Array.from($('pKeys').options).forEach(o => { o.selected = keys.indexOf(o.value) >= 0; });
+  $('fileSection').style.display = 'block';
+  renderFiles(p);
+  document.querySelector('.tabs button[data-t="products"]').click();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function renderFiles(p){
+  const files = p.files || [];
+  if (!files.length) { $('fileList').textContent = 'No files yet.'; return; }
+  $('fileList').innerHTML = files.map(f =>
+    '<div>' + f.name + ' (' + Math.round((f.size||0)/1024) + ' KB) ' +
+    '<button type="button" class="btn danger" data-fid="' + f.id + '">Delete</button></div>'
+  ).join('');
+  $('fileList').querySelectorAll('button[data-fid]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = $('pId').value;
+      await fetch('/api/hub/products/' + encodeURIComponent(id) + '/files/' + encodeURIComponent(btn.getAttribute('data-fid')), { method: 'DELETE' });
+      location.reload();
+    });
   });
 }
-function selectedKeys(){return [...document.getElementById('p-keys').selectedOptions].map(o=>o.value)}
-function resetForm(){
-  document.getElementById('form-title').textContent='Create / edit product';
-  ['p-id','p-name','p-dev','p-stock','p-desc','p-image','p-discount','p-testplace'].forEach(id=>document.getElementById(id).value='');
-  document.getElementById('p-available').value='1';
-  document.getElementById('p-onsale').value='0';
-  [...document.getElementById('p-keys').options].forEach(o=>o.selected=false);
+
+function renderProducts(){
+  const box = $('productList');
+  if (!PRODUCTS.length) { box.innerHTML = '<p class="muted">No products yet</p>'; return; }
+  box.innerHTML = PRODUCTS.map(p => {
+    const stock = p.stock == null ? '∞' : p.stock;
+    return '<div class="pc"><b>' + (p.name || '') + '</b> <code>' + p.id + '</code>' +
+      '<div class="muted">Dev: ' + (p.developerProductId||'') + ' · Stock: ' + stock +
+      ' · Keys: ' + ((p.keyNames||[]).join(', ')||'—') +
+      ' · Roles: ' + ((p.discordRoleIds||[]).join(', ')||'—') +
+      ' · Files: ' + ((p.files||[]).length) + '</div>' +
+      '<button type="button" class="btn sec" data-edit="' + p.id + '">Edit</button>' +
+      '<button type="button" class="btn danger" data-del="' + p.id + '">Delete</button></div>';
+  }).join('');
+  box.querySelectorAll('[data-edit]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const p = PRODUCTS.find(x => x.id === btn.getAttribute('data-edit'));
+      if (p) editProduct(p);
+    });
+  });
+  box.querySelectorAll('[data-del]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('Delete product?')) return;
+      await fetch('/api/hub/products/' + encodeURIComponent(btn.getAttribute('data-del')), { method: 'DELETE' });
+      location.reload();
+    });
+  });
 }
-function editProduct(p){
-  document.getElementById('form-title').textContent='Edit product';
-  document.getElementById('p-id').value=p.id||'';
-  document.getElementById('p-name').value=p.name||'';
-  document.getElementById('p-dev').value=p.developerProductId||'';
-  document.getElementById('p-stock').value=p.stock==null?'':p.stock;
-  document.getElementById('p-available').value=p.available===false?'0':'1';
-  document.getElementById('p-desc').value=p.description||'';
-  document.getElementById('p-image').value=p.imageUrl||'';
-  document.getElementById('p-discount').value=p.discountPercent==null?'':p.discountPercent;
-  document.getElementById('p-onsale').value=p.onSale?'1':'0';
-  document.getElementById('p-testplace').value=p.testPlaceId||'';
-  document.getElementById('p-roles').value=(p.discordRoleIds||[]).join(', ');
-  const keys=p.keyNames||[];
-  [...document.getElementById('p-keys').options].forEach(o=>o.selected=keys.includes(o.value));
-  showTab('products');
-  window.scrollTo({top:0,behavior:'smooth'});
-  document.getElementById('file-box').style.display='block';
-  renderFiles(p);
+
+function renderOwners(){
+  const by = {};
+  OWNERSHIPS.forEach(o => {
+    const rid = String(o.robloxId);
+    if (!by[rid]) by[rid] = { robloxId: rid, robloxName: o.robloxName || rid, items: [] };
+    if (o.robloxName) by[rid].robloxName = o.robloxName;
+    const prod = PRODUCTS.find(p => p.id === o.productId);
+    by[rid].items.push({ ownershipId: o.id, name: prod ? prod.name : o.productId, productId: o.productId });
+  });
+  const list = Object.values(by);
+  const q = ($('ownerSearch').value || '').toLowerCase();
+  const box = $('ownerList');
+  const filtered = list.filter(pl => !q || (pl.robloxName + ' ' + pl.robloxId).toLowerCase().indexOf(q) >= 0);
+  if (!filtered.length) { box.innerHTML = '<p class="muted">No owners</p>'; return; }
+  box.innerHTML = filtered.map(pl => {
+    const items = pl.items.map(it =>
+      '<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #1e293b">' +
+      '<span>' + it.name + '</span>' +
+      '<button type="button" class="btn danger" data-rev="' + it.ownershipId + '">×</button></div>'
+    ).join('');
+    return '<div class="pc"><b>' + pl.robloxName + '</b> <code>' + pl.robloxId + '</code><div>' + items + '</div></div>';
+  }).join('');
+  box.querySelectorAll('[data-rev]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('Remove product from player?')) return;
+      await fetch('/api/hub/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ownershipId: btn.getAttribute('data-rev') }) });
+      location.reload();
+    });
+  });
 }
-function renderFiles(p){
-  const box=document.getElementById('file-list');
-  const files=p.files||[];
-  if(!files.length){box.innerHTML='No files yet';return;}
-  box.innerHTML=files.map(f=>'<div>'+f.name+' ('+Math.round((f.size||0)/1024)+' KB) <button type="button" class="btn danger sm" onclick="delFile(\''+f.id+'\')">×</button></div>').join('');
+
+function renderHistory(){
+  const rows = OWNERSHIPS.slice().sort((a,b) => (b.purchasedAt||0) - (a.purchasedAt||0));
+  $('histBody').innerHTML = rows.map(o => {
+    const prod = PRODUCTS.find(p => p.id === o.productId);
+    const when = o.purchasedAt ? new Date(o.purchasedAt).toLocaleString() : '—';
+    return '<tr><td>' + when + '</td><td>' + (prod ? prod.name : o.productId) + '</td><td>' +
+      (o.robloxName||'') + ' <code>' + o.robloxId + '</code></td><td>' + (o.manual?'Manual':'Purchase') +
+      '</td><td><button type="button" class="btn danger" data-rev="' + o.id + '">Revoke</button></td></tr>';
+  }).join('') || '<tr><td colspan="5" class="muted">No history</td></tr>';
+  $('histBody').querySelectorAll('[data-rev]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      await fetch('/api/hub/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ownershipId: btn.getAttribute('data-rev') }) });
+      location.reload();
+    });
+  });
 }
-async function uploadFiles(){
-  const id=document.getElementById('p-id').value.trim();
-  if(!id){alert('Save product first, then Edit and upload');return;}
-  const input=document.getElementById('p-file');
-  if(!input.files.length)return;
-  for(const file of input.files){
-    const buf=await file.arrayBuffer();
-    const bytes=new Uint8Array(buf);let s='';for(let i=0;i<bytes.length;i++)s+=String.fromCharCode(bytes[i]);const b64=btoa(s);
-    const r=await fetch('/api/hub/products/'+encodeURIComponent(id)+'/files',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:file.name,mime:file.type||'application/octet-stream',contentBase64:b64})});
-    const j=await r.json().catch(()=>({}));
-    if(!r.ok){alert(j.error||'Upload failed');return;}
+
+function renderGrant(){
+  $('gProduct').innerHTML = PRODUCTS.map(p => '<option value="' + p.id + '">' + p.name + '</option>').join('');
+}
+
+$('btnClear').addEventListener('click', clearForm);
+$('btnSave').addEventListener('click', async () => {
+  const body = {
+    id: $('pId').value.trim() || undefined,
+    name: $('pName').value.trim(),
+    developerProductId: $('pDev').value.trim(),
+    stock: $('pStock').value,
+    available: $('pAvail').value === '1',
+    description: $('pDesc').value,
+    imageUrl: $('pImg').value.trim(),
+    keyNames: selectedKeys(),
+    discordRoleIds: $('pRoles').value,
+    discountPercent: $('pDisc').value,
+    onSale: $('pSale').value === '1',
+    testPlaceId: $('pTest').value.trim()
+  };
+  const r = await fetch('/api/hub/products', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { alert(j.error || 'Failed'); return; }
+  location.reload();
+});
+$('btnUpload').addEventListener('click', async () => {
+  const id = $('pId').value.trim();
+  if (!id) { alert('Edit a saved product first'); return; }
+  const input = $('pFiles');
+  if (!input.files.length) return;
+  for (const file of input.files) {
+    const buf = await file.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let s = '';
+    for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+    const b64 = btoa(s);
+    const r = await fetch('/api/hub/products/' + encodeURIComponent(id) + '/files', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: file.name, mime: file.type || 'application/octet-stream', contentBase64: b64 })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { alert(j.error || 'Upload failed'); return; }
   }
   location.reload();
-}
-async function delFile(fid){
-  const id=document.getElementById('p-id').value.trim();
-  if(!id)return;
-  await fetch('/api/hub/products/'+encodeURIComponent(id)+'/files/'+encodeURIComponent(fid),{method:'DELETE'});
+});
+$('btnGrant').addEventListener('click', async () => {
+  const r = await fetch('/api/hub/grant', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ productId: $('gProduct').value, robloxId: $('gRoblox').value.trim(), robloxName: $('gName').value.trim() }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { alert(j.error || 'Failed'); return; }
   location.reload();
-}
-async function saveProduct(){
-  const body={
-    id:document.getElementById('p-id').value.trim()||undefined,
-    name:document.getElementById('p-name').value.trim(),
-    developerProductId:document.getElementById('p-dev').value.trim(),
-    stock:document.getElementById('p-stock').value,
-    available:document.getElementById('p-available').value==='1',
-    description:document.getElementById('p-desc').value,
-    imageUrl:document.getElementById('p-image').value.trim(),
-    keyNames:selectedKeys(),
-    discordRoleIds:document.getElementById('p-roles').value,
-    discountPercent:document.getElementById('p-discount').value,
-    onSale:document.getElementById('p-onsale').value==='1',
-    testPlaceId:document.getElementById('p-testplace').value.trim()
-  };
-  const r=await fetch('/api/hub/products',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  const j=await r.json().catch(()=>({}));
-  if(!r.ok){alert(j.error||'Failed');return}
-  location.reload();
-}
-async function deleteProduct(id){
-  if(!confirm('Delete product?'))return;
-  const r=await fetch('/api/hub/products/'+encodeURIComponent(id),{method:'DELETE'});
-  if(r.ok)location.reload();else alert('Failed');
-}
-async function grantProduct(){
-  const body={productId:document.getElementById('g-product').value,robloxId:document.getElementById('g-roblox').value.trim(),robloxName:document.getElementById('g-name').value.trim()};
-  const r=await fetch('/api/hub/grant',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  const j=await r.json().catch(()=>({}));
-  if(!r.ok){alert(j.error||'Failed');return}
-  location.reload();
-}
-async function revokeOwn(id){
-  if(!confirm('Remove this product from player?'))return;
-  const r=await fetch('/api/hub/revoke',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ownershipId:id})});
-  if(r.ok)location.reload();else alert('Failed');
-}
+});
+$('ownerSearch').addEventListener('input', renderOwners);
+
+renderProducts();
+renderOwners();
+renderHistory();
+renderGrant();
 </script>
 </div></body></html>`);
 });
