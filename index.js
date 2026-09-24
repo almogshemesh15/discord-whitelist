@@ -2,7 +2,6 @@ const express = require('express');
 const axios = require('axios');
 const session = require('express-session');
 const db = require('./database');
-const { registerDiscordComposer } = require('./discord-composer');
 const app = express();
 let isSaving = false;
 
@@ -270,11 +269,10 @@ function normalizeRoleIds(raw) {
 
 function ensureBotConfig(data) {
     if (!data.botConfig || typeof data.botConfig !== 'object') {
-        data.botConfig = { enabled: true, commands: [], robloxGameUrl: '', hubShowPrices: true, updatedAt: Date.now() };
+        data.botConfig = { enabled: true, commands: [], robloxGameUrl: '', updatedAt: Date.now() };
     }
     if (typeof data.botConfig.enabled !== 'boolean') data.botConfig.enabled = true;
     if (typeof data.botConfig.robloxGameUrl !== 'string') data.botConfig.robloxGameUrl = data.botConfig.robloxGameUrl || '';
-    if (typeof data.botConfig.hubShowPrices !== 'boolean') data.botConfig.hubShowPrices = true;
     if (!Array.isArray(data.botConfig.commands)) data.botConfig.commands = [];
     const byId = {};
     data.botConfig.commands.forEach(c => { if (c && c.id) byId[c.id] = c; });
@@ -3666,7 +3664,6 @@ app.get('/api/bot/config', checkBotAuth, (req, res) => {
         enabled: !!cfg.enabled,
         commands: cfg.commands,
         robloxGameUrl: cfg.robloxGameUrl || '',
-        hubShowPrices: cfg.hubShowPrices !== false,
         updatedAt: cfg.updatedAt || null,
         status: getBotDashboardStatus()
     });
@@ -3680,9 +3677,6 @@ app.post('/api/bot/config', checkAuth, async (req, res) => {
     if (typeof body.enabled === 'boolean') cfg.enabled = body.enabled;
     if (body.robloxGameUrl != null) {
         cfg.robloxGameUrl = String(body.robloxGameUrl).trim().slice(0, 300);
-    }
-    if (body.hubShowPrices != null) {
-        cfg.hubShowPrices = body.hubShowPrices === true || body.hubShowPrices === '1' || body.hubShowPrices === 1;
     }
     if (Array.isArray(body.commands)) {
         const byId = {};
@@ -3756,10 +3750,7 @@ button.secondary{background:#374151;}
   <div style="margin-top:14px;">
     <label style="font-size:13px;color:#94a3b8;">Roblox game URL (for /link button)</label>
     <input id="roblox-url" type="text" value="${(cfg.robloxGameUrl || '').replace(/"/g, '&quot;')}" placeholder="https://www.roblox.com/games/..." style="margin-top:6px;"/>
-    <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;">
-      <input type="checkbox" id="hub-show-prices" ${cfg.hubShowPrices !== false ? 'checked' : ''}/>
-      /hub command shows product prices
-    </label>
+
   </div>
 </div>
 <div class="card">
@@ -3793,7 +3784,6 @@ async function saveAll(){
   const body = {
     enabled: document.getElementById('bot-enabled').checked,
     robloxGameUrl: (document.getElementById('roblox-url') || {}).value || '',
-    hubShowPrices: !!(document.getElementById('hub-show-prices') || {}).checked,
     commands
   };
   const r = await fetch('/api/bot/config', {
@@ -4389,7 +4379,6 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
   <button type="button" class="on" data-t="products">Products</button>
   <button type="button" data-t="owners">Owners</button>
   <button type="button" data-t="history">History</button>
-  <button type="button" data-t="linked">Linked</button>
   <button type="button" data-t="grant">Grant</button>
 </div>
 
@@ -4463,14 +4452,6 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
   </div>
 </div>
 
-<div id="panel-linked" class="panel">
-  <div class="card">
-    <h3>Discord-linked players</h3>
-    <input id="linkedSearch" placeholder="Search Roblox/Discord name or ID…" style="margin-bottom:12px"/>
-    <div id="linkedList"></div>
-  </div>
-</div>
-
 <div id="panel-grant" class="panel">
   <div class="card">
     <h3>Grant product</h3>
@@ -4491,7 +4472,6 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
 <script>
 let PRODUCTS = [];
 let OWNERSHIPS = [];
-let LINKS = [];
 let KEYS = [];
 let pendingFiles = [];
 let pendingNames = {};
@@ -4749,31 +4729,6 @@ function renderOwners(){
     });
   });
 }
-function renderLinked(){
-  const q = (($('linkedSearch') && $('linkedSearch').value) || '').toLowerCase().trim();
-  const box = $('linkedList');
-  if (!box) return;
-  const rows = (LINKS || []).filter(l => {
-    if (!q) return true;
-    const blob = [l.robloxName, l.robloxId, l.discordTag, l.discordId].join(' ').toLowerCase();
-    return blob.indexOf(q) >= 0;
-  });
-  if (!rows.length) { box.innerHTML = '<p class="muted">No linked users</p>'; return; }
-  box.innerHTML = rows.map(l =>
-    '<div class="pc" style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center">' +
-    '<div><b>' + (l.robloxName||'—') + '</b> <code>' + l.robloxId + '</code><div class="muted">Discord: <b>' +
-    (l.discordTag||'—') + '</b> <code>' + l.discordId + '</code></div></div>' +
-    '<button type="button" class="btn danger" data-unlink="' + l.discordId + '">Unlink</button></div>'
-  ).join('');
-  box.querySelectorAll('[data-unlink]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      if (!confirm('Unlink this Discord user?')) return;
-      await fetch('/api/users/unlink', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ discordId: btn.getAttribute('data-unlink') }) });
-      await refreshState(true);
-    });
-  });
-}
 
 function renderHistory(){
   const rows = OWNERSHIPS.slice().sort((a,b) => (b.purchasedAt||0) - (a.purchasedAt||0));
@@ -4804,13 +4759,11 @@ async function refreshState(forceRender){
     const j = await r.json();
     PRODUCTS = j.products || [];
     OWNERSHIPS = j.ownerships || [];
-    LINKS = j.links || [];
     KEYS = j.keys || [];
     fillKeysSelect();
     renderProducts();
     renderOwners();
     renderHistory();
-    renderLinked();
     renderGrant();
     $('liveHint').textContent = '· live ' + new Date().toLocaleTimeString();
   } catch (e) {}
@@ -4895,7 +4848,6 @@ $('btnGrant').addEventListener('click', async () => {
   await refreshState(true);
 });
 $('ownerSearch').addEventListener('input', renderOwners);
-if ($('linkedSearch')) $('linkedSearch').addEventListener('input', renderLinked);
 
 renderLinksEditor([]);
 refreshState(true);
@@ -5421,61 +5373,31 @@ app.post('/api/bot/jobs/:id/fail', checkBotAuth, async (req, res) => {
     res.json({ ok: true });
 });
 
-const _devProductPriceCache = new Map(); // id -> { price, at }
-async function fetchDevProductPrice(developerProductId) {
-    const id = String(developerProductId || '').trim();
-    if (!id || id === '0') return 0;
-    const cached = _devProductPriceCache.get(id);
-    if (cached && Date.now() - cached.at < 10 * 60 * 1000) return cached.price;
-    let price = null;
-    try {
-        const r = await axios.get('https://economy.roblox.com/v1/developer-products/' + id + '/info', { timeout: 8000 });
-        if (r.data && r.data.PriceInRobux != null) price = Number(r.data.PriceInRobux);
-    } catch (_) {}
-    if (price == null) {
-        try {
-            const r = await axios.get('https://apis.roblox.com/developer-products/v1/developer-products/' + id, { timeout: 8000 });
-            if (r.data && (r.data.priceInRobux != null || r.data.PriceInRobux != null)) {
-                price = Number(r.data.priceInRobux != null ? r.data.priceInRobux : r.data.PriceInRobux);
-            }
-        } catch (_) {}
-    }
-    _devProductPriceCache.set(id, { price, at: Date.now() });
-    return price;
-}
-
-app.get('/api/bot/hub-catalog', checkBotAuth, async (req, res) => {
+app.get('/api/bot/hub-catalog', checkBotAuth, (req, res) => {
     const data = db.getData();
     ensureHubStores(data);
     ensureBotConfig(data);
     const cfg = data.botConfig;
     const all = req.query.all === '1' || req.query.all === 'true';
-    const raw = (data.hubProducts || []).filter(p => all || p.available !== false);
-    const list = [];
-    for (const p of raw) {
-        const stock = p.stock;
-        const soldOut = stock != null && Number(stock) <= 0;
-        const isFree = !p.developerProductId || String(p.developerProductId) === '0';
-        let priceInRobux = isFree ? 0 : null;
-        if (!isFree && cfg.hubShowPrices !== false) {
-            try { priceInRobux = await fetchDevProductPrice(p.developerProductId); } catch (_) {}
-        }
-        list.push({
-            id: p.id,
-            name: p.name,
-            description: p.description || '',
-            stock: stock == null ? null : Number(stock),
-            soldOut,
-            available: p.available !== false,
-            isFree,
-            developerProductId: p.developerProductId,
-            priceInRobux
+    const list = (data.hubProducts || [])
+        .filter(p => all || p.available !== false)
+        .map(p => {
+            const stock = p.stock;
+            const soldOut = stock != null && Number(stock) <= 0;
+            return {
+                id: p.id,
+                name: p.name,
+                description: p.description || '',
+                stock: stock == null ? null : Number(stock),
+                soldOut,
+                available: p.available !== false,
+                isFree: !p.developerProductId || String(p.developerProductId) === '0',
+                developerProductId: p.developerProductId
+            };
         });
-    }
     res.json({
         products: list,
-        robloxGameUrl: cfg.robloxGameUrl || '',
-        showPrices: cfg.hubShowPrices !== false
+        robloxGameUrl: cfg.robloxGameUrl || ''
     });
 });
 
@@ -5536,13 +5458,189 @@ app.get('/api/bot/retrieve', checkBotAuth, (req, res) => {
 });
 
 
-registerDiscordComposer(app, {
-    checkAuth,
-    OWNER_EMAIL,
-    db,
-    enqueueBotJob,
-    safeSave,
-    publicBaseUrl
+
+// ========== Discord message composer (inline) ==========
+app.get('/composer', checkAuth, (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).send('Owner only');
+    res.send(`<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Message Composer</title>
+<style>
+body{margin:0;font-family:system-ui,sans-serif;background:#0b0f19;color:#e2e8f0}
+.wrap{max-width:900px;margin:0 auto;padding:24px}
+h1{color:#a78bfa;margin:0 0 8px}
+a{color:#38bdf8}
+.card{background:#111827;border:1px solid #1e293b;border-radius:14px;padding:18px;margin-bottom:14px}
+label{display:block;font-size:12px;color:#94a3b8;margin:10px 0 4px}
+input,textarea{width:100%;padding:10px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#fff;box-sizing:border-box}
+textarea{min-height:90px;font-family:ui-monospace,monospace}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+button.btn{padding:10px 14px;border:0;border-radius:8px;background:#7c3aed;color:#fff;font-weight:700;cursor:pointer;margin-right:8px;margin-top:10px}
+button.sec{background:#334155}button.green{background:#059669}
+.muted{color:#64748b;font-size:13px}
+.preview{background:#1e1f22;border-radius:8px;padding:14px;margin-top:12px}
+.preview .emb{background:#2b2d31;border-radius:4px;padding:12px;margin-top:8px;border-left:4px solid #5865f2}
+</style></head><body><div class="wrap">
+<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+  <h1>Discord Composer</h1>
+  <div><a href="/hub">Hub</a> · <a href="/bot">Bot</a> · <a href="/">Dashboard</a></div>
+</div>
+<p class="muted">Send or edit messages through the bot. Bot must be online.</p>
+<div class="card">
+  <h3>Target</h3>
+  <div class="row">
+    <div><label>Channel ID</label><input id="channelId" placeholder="1234567890"/></div>
+    <div><label>Message link (to edit existing)</label><input id="messageLink" placeholder="https://discord.com/channels/guild/channel/message"/></div>
+  </div>
+  <label>Mentions — user IDs and/or role:ID (comma-separated)</label>
+  <input id="mentions" placeholder="111, role:222, @everyone"/>
+</div>
+<div class="card">
+  <h3>Content</h3>
+  <label>Message content</label><textarea id="content"></textarea>
+  <label>Embed title</label><input id="embTitle"/>
+  <label>Embed description</label><textarea id="embDesc"></textarea>
+  <div class="row">
+    <div><label>Embed color (hex)</label><input id="embColor" value="#5865F2"/></div>
+    <div><label>Embed footer</label><input id="embFooter"/></div>
+  </div>
+  <label>Embed image URL</label><input id="embImage"/>
+  <label>Embed thumbnail URL</label><input id="embThumb"/>
+  <button type="button" class="btn green" id="btnSend">Send new message</button>
+  <button type="button" class="btn" id="btnEdit">Edit message from link</button>
+  <button type="button" class="btn sec" id="btnPreview">Refresh preview</button>
+  <div id="status" class="muted" style="margin-top:10px"></div>
+  <div class="preview" id="preview"></div>
+</div>
+<script>
+function parseMentions(raw){
+  const parts=String(raw||'').split(/[\\s,]+/).map(s=>s.trim()).filter(Boolean);
+  const users=[],roles=[]; let everyone=false,here=false;
+  for(const p of parts){
+    const low=p.toLowerCase();
+    if(low==='@everyone'||low==='everyone'){everyone=true;continue;}
+    if(low==='@here'||low==='here'){here=true;continue;}
+    if(/^role:/i.test(p)){roles.push(p.replace(/^role:/i,'').replace(/\\D/g,''));continue;}
+    if(/^\\d+$/.test(p)) users.push(p);
+  }
+  return {users,roles,everyone,here};
+}
+function buildMentionPrefix(m){
+  const bits=[];
+  if(m.everyone) bits.push('@everyone');
+  if(m.here) bits.push('@here');
+  m.roles.forEach(id=>bits.push('<@&'+id+'>'));
+  m.users.forEach(id=>bits.push('<@'+id+'>'));
+  return bits.join(' ');
+}
+function payload(){
+  const mentions=parseMentions(document.getElementById('mentions').value);
+  const prefix=buildMentionPrefix(mentions);
+  let content=document.getElementById('content').value||'';
+  if(prefix) content=(prefix+(content?' '+content:'')).trim();
+  const colorRaw=(document.getElementById('embColor').value||'#5865F2').replace('#','');
+  const color=parseInt(colorRaw,16);
+  const embed={};
+  const title=document.getElementById('embTitle').value.trim();
+  const desc=document.getElementById('embDesc').value.trim();
+  const footer=document.getElementById('embFooter').value.trim();
+  const image=document.getElementById('embImage').value.trim();
+  const thumb=document.getElementById('embThumb').value.trim();
+  if(title) embed.title=title;
+  if(desc) embed.description=desc;
+  if(!isNaN(color)) embed.color=color;
+  if(footer) embed.footer={text:footer};
+  if(image) embed.image={url:image};
+  if(thumb) embed.thumbnail={url:thumb};
+  const embeds=(title||desc||image||thumb||footer)?[embed]:[];
+  return {
+    channelId:document.getElementById('channelId').value.trim(),
+    messageLink:document.getElementById('messageLink').value.trim(),
+    content, embeds,
+    allowedMentions:{ parse:[mentions.everyone&&'everyone',mentions.here&&'here'].filter(Boolean), users:mentions.users, roles:mentions.roles }
+  };
+}
+function renderPreview(){
+  const p=payload();
+  let html='<div>'+(p.content?p.content.replace(/</g,'&lt;'):'<span class="muted">(no content)</span>')+'</div>';
+  (p.embeds||[]).forEach(e=>{
+    html+='<div class="emb" style="border-left-color:#'+(e.color!=null?e.color.toString(16).padStart(6,'0'):'5865f2')+'">';
+    if(e.title) html+='<div style="font-weight:700">'+e.title.replace(/</g,'&lt;')+'</div>';
+    if(e.description) html+='<div style="margin-top:6px;white-space:pre-wrap">'+e.description.replace(/</g,'&lt;')+'</div>';
+    if(e.footer&&e.footer.text) html+='<div class="muted" style="margin-top:8px">'+e.footer.text.replace(/</g,'&lt;')+'</div>';
+    html+='</div>';
+  });
+  document.getElementById('preview').innerHTML=html;
+}
+document.getElementById('btnPreview').onclick=renderPreview;
+async function post(path,body){
+  const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
+  return j;
+}
+document.getElementById('btnSend').onclick=async()=>{
+  const st=document.getElementById('status');
+  try{
+    const p=payload();
+    if(!p.channelId) throw new Error('Channel ID required');
+    if(!p.content&&!(p.embeds&&p.embeds.length)) throw new Error('Content or embed required');
+    st.textContent='Queuing send…';
+    await post('/api/composer/send',p);
+    st.textContent='Queued. Bot will send when online.';
+  }catch(e){st.textContent=e.message||e;}
+};
+document.getElementById('btnEdit').onclick=async()=>{
+  const st=document.getElementById('status');
+  try{
+    const p=payload();
+    if(!p.messageLink) throw new Error('Message link required');
+    st.textContent='Queuing edit…';
+    await post('/api/composer/edit',p);
+    st.textContent='Queued. Bot will edit when online.';
+  }catch(e){st.textContent=e.message||e;}
+};
+renderPreview();
+</script>
+</div></body></html>`);
 });
+
+app.post('/api/composer/send', checkAuth, async (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
+    const data = db.getData();
+    ensureHubStores(data);
+    const channelId = String(req.body.channelId || '').trim();
+    if (!/^\d+$/.test(channelId)) return res.status(400).json({ error: 'Valid channelId required' });
+    const content = String(req.body.content || '');
+    const embeds = Array.isArray(req.body.embeds) ? req.body.embeds : [];
+    if (!content && !embeds.length) return res.status(400).json({ error: 'content or embeds required' });
+    enqueueBotJob(data, 'discord_message_send', {
+        channelId, content, embeds,
+        allowedMentions: req.body.allowedMentions || { parse: [] }
+    });
+    await safeSave();
+    res.json({ ok: true });
+});
+
+app.post('/api/composer/edit', checkAuth, async (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
+    const data = db.getData();
+    ensureHubStores(data);
+    const link = String(req.body.messageLink || '').trim();
+    const m = link.match(/channels\/(\d+)\/(\d+)\/(\d+)/);
+    if (!m) return res.status(400).json({ error: 'Invalid message link' });
+    const channelId = m[2];
+    const messageId = m[3];
+    const content = String(req.body.content || '');
+    const embeds = Array.isArray(req.body.embeds) ? req.body.embeds : [];
+    enqueueBotJob(data, 'discord_message_edit', {
+        channelId, messageId, content, embeds,
+        allowedMentions: req.body.allowedMentions || { parse: [] }
+    });
+    await safeSave();
+    res.json({ ok: true, channelId, messageId });
+});
+
 
 app.listen(PORT, () => {});
