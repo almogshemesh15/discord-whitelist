@@ -151,26 +151,43 @@ async function loadSideTables(client) {
             linkedAt: r.linked_at ? new Date(r.linked_at).getTime() : null,
             ...(r.meta && typeof r.meta === 'object' ? r.meta : {})
         })),
-        hubProducts: products.rows.map(r => ({
-            id: r.id,
-            name: r.name,
-            description: r.description || '',
-            imageUrl: r.image_url || '',
-            developerProductId: r.developer_product_id,
-            keyNames: Array.isArray(r.key_names) ? r.key_names : (r.key_names || []),
-            stock: r.stock == null ? null : Number(r.stock),
-            available: !!r.available,
-            createdAt: r.created_at ? new Date(r.created_at).getTime() : null,
-            updatedAt: r.updated_at ? new Date(r.updated_at).getTime() : null
-        })),
-        hubOwnerships: owns.rows.map(r => ({
-            id: r.id,
-            productId: r.product_id,
-            robloxId: r.roblox_id,
-            robloxName: r.roblox_name,
-            purchaseId: r.purchase_id,
-            purchasedAt: r.purchased_at ? new Date(r.purchased_at).getTime() : null
-        }))
+        hubProducts: products.rows.map(r => {
+            const meta = (r.meta && typeof r.meta === 'object') ? r.meta : {};
+            return {
+                id: r.id,
+                name: r.name,
+                description: r.description || '',
+                imageUrl: r.image_url || '',
+                developerProductId: r.developer_product_id,
+                keyNames: Array.isArray(r.key_names) ? r.key_names : (r.key_names || []),
+                stock: r.stock == null ? null : Number(r.stock),
+                available: !!r.available,
+                createdAt: r.created_at ? new Date(r.created_at).getTime() : null,
+                updatedAt: r.updated_at ? new Date(r.updated_at).getTime() : null,
+                // extended fields from meta
+                discordRoleIds: meta.discordRoleIds || [],
+                deliveryIncludes: meta.deliveryIncludes || ['files', 'links', 'text'],
+                deliveryMode: meta.deliveryMode || 'mixed',
+                deliveryText: meta.deliveryText || '',
+                links: meta.links || [],
+                files: meta.files || [],
+                discountPercent: meta.discountPercent != null ? meta.discountPercent : null,
+                onSale: !!meta.onSale,
+                testPlaceId: meta.testPlaceId || null
+            };
+        }),
+        hubOwnerships: owns.rows.map(r => {
+            const meta = (r.meta && typeof r.meta === 'object') ? r.meta : {};
+            return {
+                id: r.id,
+                productId: r.product_id,
+                robloxId: r.roblox_id,
+                robloxName: r.roblox_name,
+                purchaseId: r.purchase_id,
+                purchasedAt: r.purchased_at ? new Date(r.purchased_at).getTime() : null,
+                manual: !!meta.manual
+            };
+        })
     };
 }
 
@@ -203,16 +220,28 @@ async function persistSideTables(client, full) {
         await client.query('DELETE FROM hub_products');
     }
     for (const p of products) {
+        const meta = {
+            discordRoleIds: p.discordRoleIds || [],
+            deliveryIncludes: Array.isArray(p.deliveryIncludes) ? p.deliveryIncludes : ['files', 'links', 'text'],
+            deliveryMode: p.deliveryMode || 'mixed',
+            deliveryText: p.deliveryText || '',
+            links: p.links || [],
+            files: p.files || [],
+            discountPercent: p.discountPercent != null ? p.discountPercent : null,
+            onSale: !!p.onSale,
+            testPlaceId: p.testPlaceId || null
+        };
         await client.query(
-            `INSERT INTO hub_products (id, name, description, image_url, developer_product_id, key_names, stock, available, updated_at)
-             VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,NOW())
+            `INSERT INTO hub_products (id, name, description, image_url, developer_product_id, key_names, stock, available, meta, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9::jsonb,NOW())
              ON CONFLICT (id) DO UPDATE SET
                name=EXCLUDED.name, description=EXCLUDED.description, image_url=EXCLUDED.image_url,
                developer_product_id=EXCLUDED.developer_product_id, key_names=EXCLUDED.key_names,
-               stock=EXCLUDED.stock, available=EXCLUDED.available, updated_at=NOW()`,
+               stock=EXCLUDED.stock, available=EXCLUDED.available, meta=EXCLUDED.meta, updated_at=NOW()`,
             [p.id, p.name || 'Product', p.description || '', p.imageUrl || '',
-             String(p.developerProductId || ''), JSON.stringify(p.keyNames || []),
-             p.stock == null || p.stock === '' ? null : Number(p.stock), p.available !== false]
+             String(p.developerProductId || '0'), JSON.stringify(p.keyNames || []),
+             p.stock == null || p.stock === '' ? null : Number(p.stock), p.available !== false,
+             JSON.stringify(meta)]
         );
     }
 
@@ -224,13 +253,15 @@ async function persistSideTables(client, full) {
         await client.query('DELETE FROM hub_ownerships');
     }
     for (const o of owns) {
+        const meta = { manual: !!o.manual };
         await client.query(
-            `INSERT INTO hub_ownerships (id, product_id, roblox_id, roblox_name, purchase_id, purchased_at)
-             VALUES ($1,$2,$3,$4,$5, to_timestamp($6/1000.0))
+            `INSERT INTO hub_ownerships (id, product_id, roblox_id, roblox_name, purchase_id, meta, purchased_at)
+             VALUES ($1,$2,$3,$4,$5,$6::jsonb, to_timestamp($7/1000.0))
              ON CONFLICT (id) DO UPDATE SET
                product_id=EXCLUDED.product_id, roblox_id=EXCLUDED.roblox_id,
-               roblox_name=EXCLUDED.roblox_name, purchase_id=EXCLUDED.purchase_id`,
-            [o.id, o.productId, String(o.robloxId), o.robloxName || null, o.purchaseId || null, o.purchasedAt || Date.now()]
+               roblox_name=EXCLUDED.roblox_name, purchase_id=EXCLUDED.purchase_id, meta=EXCLUDED.meta`,
+            [o.id, o.productId, String(o.robloxId), o.robloxName || null, o.purchaseId || null,
+             JSON.stringify(meta), o.purchasedAt || Date.now()]
         );
     }
 }
