@@ -4343,6 +4343,22 @@ app.get('/hub', checkAuth, (req, res) => {
     ensureHubStores(data);
     const keyOpts = (data.keys || []).map(k => `<option value="${String(k.key).replace(/"/g,'&quot;')}">${k.key}</option>`).join('');
     const productOpts = (data.hubProducts || []).map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+    const productsForClient = (data.hubProducts || []).map(p => ({
+        id: p.id,
+        name: p.name,
+        description: p.description || '',
+        imageUrl: p.imageUrl || '',
+        developerProductId: p.developerProductId,
+        keyNames: p.keyNames || [],
+        stock: p.stock,
+        available: p.available !== false,
+        discountPercent: p.discountPercent,
+        onSale: !!p.onSale,
+        testPlaceId: p.testPlaceId || '',
+        discordRoleIds: p.discordRoleIds || [],
+        files: (p.files || []).map(f => ({ id: f.id, name: f.name, size: f.size || 0, token: f.token }))
+    }));
+    const PRODUCTS_JSON = JSON.stringify(productsForClient).replace(/</g, '\\u003c');
 
     const productCards = (data.hubProducts || []).map(p => {
         const nOwn = (data.hubOwnerships || []).filter(o => o.productId === p.id).length;
@@ -4485,11 +4501,12 @@ th{color:var(--muted)}code{font-size:12px;color:#a5b4fc}
       <button type="button" class="btn soft" onclick="resetForm()">Clear</button>
     </div>
     <p class="hint">Changing keys/roles updates all current owners. Image: rbxassetid for in-game. After save, use file upload below (edit product first).</p>
-    <div id="file-box" style="display:none;margin-top:16px;padding-top:14px;border-top:1px solid #1e293b">
-      <h4 style="margin:0 0 8px">Product files (DM download links)</h4>
-      <input type="file" id="p-file" multiple/>
-      <button type="button" class="btn soft" style="margin-top:8px" onclick="uploadFiles()">Upload selected files</button>
-      <div id="file-list" class="hint" style="margin-top:10px"></div>
+    <div id="file-box" style="margin-top:18px;padding:16px;border:1px dashed #334155;border-radius:12px;background:#0b1220">
+      <h4 style="margin:0 0 6px;color:#f472b6">📎 Product files</h4>
+      <p class="hint" style="margin:0 0 10px">1) Save the product · 2) Click <b>Edit</b> on the product · 3) Choose files here · 4) Upload. Buyers get download links in Discord DM.</p>
+      <input type="file" id="p-file" multiple style="margin-bottom:8px"/>
+      <button type="button" class="btn soft" onclick="uploadFiles()">Upload selected files</button>
+      <div id="file-list" class="hint" style="margin-top:10px">Open a product with Edit to manage its files.</div>
     </div>
   </div>
   <div class="card"><h3>All products</h3>${productCards}</div>
@@ -4522,14 +4539,27 @@ th{color:var(--muted)}code{font-size:12px;color:#a5b4fc}
 </div>
 
 <script>
+const PRODUCTS = ${PRODUCTS_JSON};
+function showTab(name){
+  document.querySelectorAll('.tab').forEach(b=>{
+    b.classList.toggle('active', b.getAttribute('data-tab')===name);
+  });
+  document.querySelectorAll('.panel').forEach(p=>{
+    p.classList.toggle('active', p.id==='tab-'+name);
+  });
+}
 document.querySelectorAll('.tab').forEach(btn=>{
-  btn.onclick=()=>{
-    document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active'));
-    document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
-    btn.classList.add('active');
-    document.getElementById('tab-'+btn.dataset.tab).classList.add('active');
-  };
+  btn.addEventListener('click', function(e){
+    e.preventDefault();
+    showTab(btn.getAttribute('data-tab'));
+  });
 });
+function editProductById(id){
+  const p = PRODUCTS.find(x => x.id === id);
+  if(!p){ alert('Product not found'); return; }
+  editProduct(p);
+}
+
 function filterOwners(){
   const q=(document.getElementById('owner-search').value||'').toLowerCase().trim();
   document.querySelectorAll('.owner-card').forEach(c=>{
@@ -4559,7 +4589,7 @@ function editProduct(p){
   document.getElementById('p-roles').value=(p.discordRoleIds||[]).join(', ');
   const keys=p.keyNames||[];
   [...document.getElementById('p-keys').options].forEach(o=>o.selected=keys.includes(o.value));
-  document.querySelector('.tab[data-tab=products]').click();
+  showTab('products');
   window.scrollTo({top:0,behavior:'smooth'});
   document.getElementById('file-box').style.display='block';
   renderFiles(p);
