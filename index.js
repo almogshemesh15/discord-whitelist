@@ -110,6 +110,8 @@ function ensureHubStores(data) {
     if (!Array.isArray(data.hubProducts)) data.hubProducts = [];
     if (!Array.isArray(data.hubOwnerships)) data.hubOwnerships = [];
     if (!Array.isArray(data.pendingBotJobs)) data.pendingBotJobs = [];
+    // never persist composer message loads
+    if (data.composerLoadRequests) delete data.composerLoadRequests;
 }
 function publicBaseUrl(req) {
     const env = process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || '';
@@ -120,6 +122,15 @@ function publicBaseUrl(req) {
     }
     return 'https://discord-whitelist-ow56.onrender.com';
 }
+/** In-memory only — never persisted to DB */
+const composerLoadMemory = new Map();
+function pruneComposerLoadMemory() {
+    const cutoff = Date.now() - 10 * 60 * 1000;
+    for (const [k, v] of composerLoadMemory) {
+        if (!v || (v.createdAt || 0) < cutoff) composerLoadMemory.delete(k);
+    }
+}
+
 function enqueueBotJob(data, type, payload) {
     ensureHubStores(data);
     const job = {
@@ -5791,12 +5802,19 @@ $('btnLoad').onclick = async () => {
         $('embDesc').value=emb.description||'';
         $('embFooter').value=(emb.footer&&emb.footer.text)||'';
         if (emb.color!=null) $('embColor').value='#'+Number(emb.color).toString(16).padStart(6,'0');
+        if ($('embThumb')) $('embThumb').value=(emb.thumbnail&&emb.thumbnail.url)||'';
         images=[];
         (m.embeds||[]).forEach(e=>{ if(e.image&&e.image.url) images.push({type:'url',url:e.image.url}); });
         (m.attachments||[]).forEach(a=>{ if(a.url) images.push({type:'url',url:a.url,name:a.name}); });
+        buttons = Array.isArray(m.buttons) ? m.buttons.map(b => ({
+          label: b.label||'Button',
+          style: b.style||'Primary',
+          action: b.action||'role_add',
+          value: b.value||''
+        })) : [];
         if (m.channelId && $('channelIds')) $('channelIds').value=m.channelId;
-        renderImageList(); renderPreview();
-        st.textContent='Loaded. Edit then Save edit.';
+        renderImageList(); renderButtons(); renderPreview();
+        st.textContent='Loaded (incl. buttons). Edit then Save edit.';
         return;
       }
     }
@@ -5877,39 +5895,60 @@ app.post('/api/composer/edit', checkAuth, async (req, res) => {
 
 app.post('/api/composer/load', checkAuth, async (req, res) => {
     if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
+    pruneComposerLoadMemory();
     const data = db.getData();
     ensureHubStores(data);
-    if (!data.composerLoadRequests) data.composerLoadRequests = {};
     const link = String(req.body.messageLink || '').trim();
     const m = link.match(/channels\/(\d+)\/(\d+)\/(\d+)/);
     if (!m) return res.status(400).json({ error: 'Invalid message link' });
     const requestId = newHubId();
-    data.composerLoadRequests[requestId] = {
-        status: 'pending', channelId: m[2], messageId: m[3], createdAt: Date.now()
-    };
+    composerLoadMemory.set(requestId, {
+        status: 'pending',
+        channelId: m[2],
+        messageId: m[3],
+        createdAt: Date.now()
+    });
+    // Job payload only — no message body stored in DB
     enqueueBotJob(data, 'discord_message_load', { requestId, channelId: m[2], messageId: m[3] });
-    await safeSave();
+    await safeSave(); // only for job queue
     res.json({ ok: true, requestId });
 });
 
 app.get('/api/composer/load/:id', checkAuth, (req, res) => {
     if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
-    const row = ((db.getData().composerLoadRequests) || {})[req.params.id];
+    pruneComposerLoadMemory();
+    const row = composerLoadMemory.get(req.params.id);
     if (!row) return res.status(404).json({ error: 'not found' });
-    res.json(row);
+    const out = { ...row };
+    // one-time read for completed results — free memory
+    if (row.status === 'ok' || row.status === 'error') {
+        composerLoadMemory.delete(req.params.id);
+    }
+    res.json(out);
 });
 
 app.post('/api/bot/composer-load-result', checkBotAuth, async (req, res) => {
-    const data = db.getData();
-    if (!data.composerLoadRequests) data.composerLoadRequests = {};
+    pruneComposerLoadMemory();
     const requestId = String(req.body.requestId || '');
-    if (!requestId || !data.composerLoadRequests[requestId]) return res.status(404).json({ error: 'request not found' });
-    if (req.body.error) {
-        data.composerLoadRequests[requestId] = { ...data.composerLoadRequests[requestId], status: 'error', error: String(req.body.error) };
-    } else {
-        data.composerLoadRequests[requestId] = { ...data.composerLoadRequests[requestId], status: 'ok', message: req.body.message || null };
+    if (!requestId || !composerLoadMemory.has(requestId)) {
+        // still accept late results into memory
+        if (!requestId) return res.status(400).json({ error: 'requestId required' });
     }
-    await safeSave();
+    const prev = composerLoadMemory.get(requestId) || { createdAt: Date.now() };
+    if (req.body.error) {
+        composerLoadMemory.set(requestId, {
+            ...prev,
+            status: 'error',
+            error: String(req.body.error)
+        });
+    } else {
+        composerLoadMemory.set(requestId, {
+            ...prev,
+            status: 'ok',
+            message: req.body.message || null
+        });
+    }
+    // never safeSave message content
     res.json({ ok: true });
 });
 
