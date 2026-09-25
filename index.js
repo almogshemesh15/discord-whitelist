@@ -5472,34 +5472,61 @@ app.get('/composer', checkAuth, (req, res) => {
 <title>Message Composer</title>
 <style>
 body{margin:0;font-family:system-ui,sans-serif;background:#0b0f19;color:#e2e8f0}
-.wrap{max-width:900px;margin:0 auto;padding:24px}
+.wrap{max-width:960px;margin:0 auto;padding:24px}
 h1{color:#a78bfa;margin:0 0 8px}
 a{color:#38bdf8}
 .card{background:#111827;border:1px solid #1e293b;border-radius:14px;padding:18px;margin-bottom:14px}
 label{display:block;font-size:12px;color:#94a3b8;margin:10px 0 4px}
-input,textarea{width:100%;padding:10px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#fff;box-sizing:border-box}
+input,textarea,select{width:100%;padding:10px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#fff;box-sizing:border-box}
 textarea{min-height:90px;font-family:ui-monospace,monospace}
 .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
 button.btn{padding:10px 14px;border:0;border-radius:8px;background:#7c3aed;color:#fff;font-weight:700;cursor:pointer;margin-right:8px;margin-top:10px}
-button.sec{background:#334155}button.green{background:#059669}
+button.sec{background:#334155}button.green{background:#059669}button.danger{background:#e11d48}
 .muted{color:#64748b;font-size:13px}
 .preview{background:#1e1f22;border-radius:8px;padding:14px;margin-top:12px}
 .preview .emb{background:#2b2d31;border-radius:4px;padding:12px;margin-top:8px;border-left:4px solid #5865f2}
+.preview img{max-width:100%;border-radius:8px;margin-top:8px;display:block}
+.cheat code{background:#0f172a;padding:2px 6px;border-radius:4px;cursor:pointer;user-select:all}
+.cheat td,.cheat th{padding:6px 8px;border-bottom:1px solid #1e293b;text-align:left;font-size:13px}
+.img-row{display:flex;gap:8px;align-items:center;margin:6px 0;flex-wrap:wrap}
 </style></head><body><div class="wrap">
 <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
   <h1>Discord Composer</h1>
   <div><a href="/hub">Hub</a> · <a href="/bot">Bot</a> · <a href="/">Dashboard</a></div>
 </div>
 <p class="muted">Send or edit messages through the bot. Bot must be online.</p>
+
 <div class="card">
   <h3>Target</h3>
   <div class="row">
-    <div><label>Channel ID</label><input id="channelId" placeholder="1234567890"/></div>
-    <div><label>Message link (to edit existing)</label><input id="messageLink" placeholder="https://discord.com/channels/guild/channel/message"/></div>
+    <div>
+      <label>Send to</label>
+      <select id="targetType">
+        <option value="channel">Channel</option>
+        <option value="user">User (DM)</option>
+        <option value="role">Role (post in a channel + ping role)</option>
+      </select>
+    </div>
+    <div>
+      <label id="targetIdLabel">Channel ID</label>
+      <input id="targetId" placeholder="1234567890"/>
+    </div>
   </div>
-  <label>Mentions — user IDs and/or role:ID (comma-separated)</label>
-  <input id="mentions" placeholder="111, role:222, @everyone"/>
+  <div id="roleChannelBox" style="display:none">
+    <label>Channel ID (where to post the role ping)</label>
+    <input id="roleChannelId" placeholder="Channel to post in"/>
+  </div>
+  <label>Load existing message (paste message link)</label>
+  <div class="row">
+    <div><input id="messageLink" placeholder="https://discord.com/channels/guild/channel/message"/></div>
+    <div style="display:flex;align-items:flex-end;gap:8px">
+      <button type="button" class="btn sec" id="btnLoad" style="margin-top:0">Load message</button>
+    </div>
+  </div>
+  <p class="muted" id="loadStatus"></p>
 </div>
+
 <div class="card">
   <h3>Content</h3>
   <label>Message content</label><textarea id="content"></textarea>
@@ -5509,102 +5536,234 @@ button.sec{background:#334155}button.green{background:#059669}
     <div><label>Embed color (hex)</label><input id="embColor" value="#5865F2"/></div>
     <div><label>Embed footer</label><input id="embFooter"/></div>
   </div>
-  <label>Embed image URL</label><input id="embImage"/>
-  <label>Embed thumbnail URL</label><input id="embThumb"/>
+  <label>Images (URLs and/or uploads) — multiple allowed</label>
+  <div id="imageList"></div>
+  <div class="img-row">
+    <input id="imgUrl" placeholder="https://image-url.png" style="flex:1"/>
+    <button type="button" class="btn sec" id="btnAddUrl" style="margin-top:0">Add URL</button>
+  </div>
+  <div class="img-row">
+    <input type="file" id="imgFile" accept="image/*" multiple/>
+    <button type="button" class="btn sec" id="btnAddFiles" style="margin-top:0">Add uploads</button>
+  </div>
+  <p class="muted">Thumbnail is always the bot avatar (not configurable).</p>
   <button type="button" class="btn green" id="btnSend">Send new message</button>
-  <button type="button" class="btn" id="btnEdit">Edit message from link</button>
+  <button type="button" class="btn" id="btnEdit">Save edit to loaded message</button>
   <button type="button" class="btn sec" id="btnPreview">Refresh preview</button>
   <div id="status" class="muted" style="margin-top:10px"></div>
   <div class="preview" id="preview"></div>
 </div>
+
+<div class="card cheat">
+  <h3>Copy helpers — Discord formatting</h3>
+  <p class="muted">Click a code to select · paste into content</p>
+  <table style="width:100%;border-collapse:collapse">
+    <tr><th>What</th><th>Format</th><th>Example</th></tr>
+    <tr><td>Channel</td><td><code>&lt;#CHANNEL_ID&gt;</code></td><td><code>&lt;#1234567890&gt;</code></td></tr>
+    <tr><td>User</td><td><code>&lt;@USER_ID&gt;</code></td><td><code>&lt;@1234567890&gt;</code></td></tr>
+    <tr><td>Role</td><td><code>&lt;@&amp;ROLE_ID&gt;</code></td><td><code>&lt;@&amp;1234567890&gt;</code></td></tr>
+    <tr><td>@everyone</td><td><code>@everyone</code></td><td>—</td></tr>
+    <tr><td>@here</td><td><code>@here</code></td><td>—</td></tr>
+    <tr><td>Custom emoji</td><td><code>&lt;:name:EMOJI_ID&gt;</code></td><td><code>&lt;:wave:123&gt;</code></td></tr>
+    <tr><td>Animated emoji</td><td><code>&lt;a:name:EMOJI_ID&gt;</code></td><td><code>&lt;a:blob:123&gt;</code></td></tr>
+    <tr><td>Timestamp (relative)</td><td><code>&lt;t:UNIX:R&gt;</code></td><td><code>&lt;t:1735689600:R&gt;</code></td></tr>
+    <tr><td>Timestamp (full)</td><td><code>&lt;t:UNIX:F&gt;</code></td><td><code>&lt;t:1735689600:F&gt;</code></td></tr>
+    <tr><td>Timestamp (date)</td><td><code>&lt;t:UNIX:D&gt;</code></td><td><code>&lt;t:1735689600:D&gt;</code></td></tr>
+    <tr><td>Timestamp (time)</td><td><code>&lt;t:UNIX:t&gt;</code></td><td><code>&lt;t:1735689600:t&gt;</code></td></tr>
+    <tr><td>Slash command</td><td><code>&lt;/name:COMMAND_ID&gt;</code></td><td><code>&lt;/hub:123&gt;</code></td></tr>
+    <tr><td>Spoiler</td><td><code>||text||</code></td><td><code>||secret||</code></td></tr>
+    <tr><td>Bold / italic</td><td><code>**bold** *italic*</code></td><td>—</td></tr>
+    <tr><td>Code block</td><td><code>\`\`\`lang\\ncode\\n\`\`\`</code></td><td>—</td></tr>
+    <tr><td>Quote</td><td><code>&gt; line</code></td><td>—</td></tr>
+  </table>
+  <p class="muted" style="margin-top:10px">UNIX time now: <code id="unixNow"></code> · <button type="button" class="btn sec" id="btnUnix" style="margin-top:0">Refresh</button></p>
+</div>
+
 <script>
-function parseMentions(raw){
-  const parts=String(raw||'').split(/[\\s,]+/).map(s=>s.trim()).filter(Boolean);
-  const users=[],roles=[]; let everyone=false,here=false;
-  for(const p of parts){
-    const low=p.toLowerCase();
-    if(low==='@everyone'||low==='everyone'){everyone=true;continue;}
-    if(low==='@here'||low==='here'){here=true;continue;}
-    if(/^role:/i.test(p)){roles.push(p.replace(/^role:/i,'').replace(/\\D/g,''));continue;}
-    if(/^\\d+$/.test(p)) users.push(p);
+let images = []; // { type:'url'|'upload', url?, name?, mime?, contentBase64? }
+let loadedMessage = null; // { channelId, messageId }
+
+function $(id){ return document.getElementById(id); }
+
+$('targetType').addEventListener('change', () => {
+  const t = $('targetType').value;
+  $('roleChannelBox').style.display = t === 'role' ? 'block' : 'none';
+  $('targetIdLabel').textContent =
+    t === 'user' ? 'User ID' :
+    t === 'role' ? 'Role ID' : 'Channel ID';
+});
+
+function renderImageList(){
+  const box = $('imageList');
+  if (!images.length) { box.innerHTML = '<p class="muted">No images yet</p>'; return; }
+  box.innerHTML = images.map((img, i) =>
+    '<div class="img-row"><span class="muted">' + (img.type === 'upload' ? 'Upload: ' + (img.name||'file') : 'URL') +
+    '</span> <code style="max-width:280px;overflow:hidden;text-overflow:ellipsis">' +
+    (img.url || img.name || '') + '</code>' +
+    '<button type="button" class="btn danger" data-i="' + i + '" style="margin-top:0">×</button></div>'
+  ).join('');
+  box.querySelectorAll('[data-i]').forEach(btn => {
+    btn.onclick = () => { images.splice(Number(btn.getAttribute('data-i')), 1); renderImageList(); renderPreview(); };
+  });
+}
+
+$('btnAddUrl').onclick = () => {
+  const url = $('imgUrl').value.trim();
+  if (!url) return;
+  images.push({ type: 'url', url });
+  $('imgUrl').value = '';
+  renderImageList();
+  renderPreview();
+};
+
+$('btnAddFiles').onclick = async () => {
+  const files = Array.from(($('imgFile').files || []));
+  for (const file of files) {
+    if (!file.type.startsWith('image/')) continue;
+    if (file.size > 8 * 1024 * 1024) { alert(file.name + ' too large (max 8MB)'); continue; }
+    const buf = await file.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let s = '';
+    for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+    images.push({ type: 'upload', name: file.name, mime: file.type, contentBase64: btoa(s) });
   }
-  return {users,roles,everyone,here};
-}
-function buildMentionPrefix(m){
-  const bits=[];
-  if(m.everyone) bits.push('@everyone');
-  if(m.here) bits.push('@here');
-  m.roles.forEach(id=>bits.push('<@&'+id+'>'));
-  m.users.forEach(id=>bits.push('<@'+id+'>'));
-  return bits.join(' ');
-}
+  $('imgFile').value = '';
+  renderImageList();
+  renderPreview();
+};
+
 function payload(){
-  const mentions=parseMentions(document.getElementById('mentions').value);
-  const prefix=buildMentionPrefix(mentions);
-  let content=document.getElementById('content').value||'';
-  if(prefix) content=(prefix+(content?' '+content:'')).trim();
-  const colorRaw=(document.getElementById('embColor').value||'#5865F2').replace('#','');
-  const color=parseInt(colorRaw,16);
-  const embed={};
-  const title=document.getElementById('embTitle').value.trim();
-  const desc=document.getElementById('embDesc').value.trim();
-  const footer=document.getElementById('embFooter').value.trim();
-  const image=document.getElementById('embImage').value.trim();
-  const thumb=document.getElementById('embThumb').value.trim();
-  if(title) embed.title=title;
-  if(desc) embed.description=desc;
-  if(!isNaN(color)) embed.color=color;
-  if(footer) embed.footer={text:footer};
-  if(image) embed.image={url:image};
-  if(thumb) embed.thumbnail={url:thumb};
-  const embeds=(title||desc||image||thumb||footer)?[embed]:[];
+  const colorRaw = ($('embColor').value || '#5865F2').replace('#','');
+  const color = parseInt(colorRaw, 16);
+  const embed = {};
+  const title = $('embTitle').value.trim();
+  const desc = $('embDesc').value.trim();
+  const footer = $('embFooter').value.trim();
+  if (title) embed.title = title;
+  if (desc) embed.description = desc;
+  if (!isNaN(color)) embed.color = color;
+  if (footer) embed.footer = { text: footer };
+  // image URLs go on embed (first as main image, rest as extra via attachments)
+  const urlImgs = images.filter(i => i.type === 'url' && i.url);
+  if (urlImgs[0]) embed.image = { url: urlImgs[0].url };
+  const embeds = (title || desc || footer || urlImgs[0]) ? [embed] : [];
   return {
-    channelId:document.getElementById('channelId').value.trim(),
-    messageLink:document.getElementById('messageLink').value.trim(),
-    content, embeds,
-    allowedMentions:{ parse:[mentions.everyone&&'everyone',mentions.here&&'here'].filter(Boolean), users:mentions.users, roles:mentions.roles }
+    targetType: $('targetType').value,
+    targetId: $('targetId').value.trim(),
+    roleChannelId: $('roleChannelId').value.trim(),
+    messageLink: $('messageLink').value.trim(),
+    content: $('content').value || '',
+    embeds,
+    images: images.map(i => ({
+      type: i.type,
+      url: i.url || null,
+      name: i.name || null,
+      mime: i.mime || null,
+      contentBase64: i.contentBase64 || null
+    })),
+    loaded: loadedMessage
   };
 }
+
 function renderPreview(){
-  const p=payload();
-  let html='<div>'+(p.content?p.content.replace(/</g,'&lt;'):'<span class="muted">(no content)</span>')+'</div>';
-  (p.embeds||[]).forEach(e=>{
-    html+='<div class="emb" style="border-left-color:#'+(e.color!=null?e.color.toString(16).padStart(6,'0'):'5865f2')+'">';
-    if(e.title) html+='<div style="font-weight:700">'+e.title.replace(/</g,'&lt;')+'</div>';
-    if(e.description) html+='<div style="margin-top:6px;white-space:pre-wrap">'+e.description.replace(/</g,'&lt;')+'</div>';
-    if(e.footer&&e.footer.text) html+='<div class="muted" style="margin-top:8px">'+e.footer.text.replace(/</g,'&lt;')+'</div>';
-    html+='</div>';
+  const p = payload();
+  let html = '<div style="white-space:pre-wrap">' + (p.content ? p.content.replace(/</g,'&lt;') : '<span class="muted">(no content)</span>') + '</div>';
+  (p.embeds || []).forEach(e => {
+    html += '<div class="emb" style="border-left-color:#' + (e.color != null ? e.color.toString(16).padStart(6,'0') : '5865f2') + '">';
+    if (e.title) html += '<div style="font-weight:700">' + e.title.replace(/</g,'&lt;') + '</div>';
+    if (e.description) html += '<div style="margin-top:6px;white-space:pre-wrap">' + e.description.replace(/</g,'&lt;') + '</div>';
+    if (e.footer && e.footer.text) html += '<div class="muted" style="margin-top:8px">' + e.footer.text.replace(/</g,'&lt;') + '</div>';
+    html += '<div class="muted" style="margin-top:8px;font-size:11px">Thumbnail: bot avatar</div>';
+    html += '</div>';
   });
-  document.getElementById('preview').innerHTML=html;
+  images.forEach(img => {
+    if (img.type === 'url' && img.url) html += '<img src="' + img.url.replace(/"/g,'') + '" alt=""/>';
+    else if (img.type === 'upload' && img.contentBase64) html += '<img src="data:' + (img.mime||'image/png') + ';base64,' + img.contentBase64 + '" alt=""/>';
+  });
+  $('preview').innerHTML = html;
 }
-document.getElementById('btnPreview').onclick=renderPreview;
-async function post(path,body){
-  const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  const j=await r.json().catch(()=>({}));
-  if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
+
+$('btnPreview').onclick = renderPreview;
+['content','embTitle','embDesc','embColor','embFooter'].forEach(id => {
+  const el = $(id); if (el) el.addEventListener('input', renderPreview);
+});
+
+async function post(path, body) {
+  const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
   return j;
 }
-document.getElementById('btnSend').onclick=async()=>{
-  const st=document.getElementById('status');
-  try{
-    const p=payload();
-    if(!p.channelId) throw new Error('Channel ID required');
-    if(!p.content&&!(p.embeds&&p.embeds.length)) throw new Error('Content or embed required');
-    st.textContent='Queuing send…';
-    await post('/api/composer/send',p);
-    st.textContent='Queued. Bot will send when online.';
-  }catch(e){st.textContent=e.message||e;}
+
+$('btnSend').onclick = async () => {
+  const st = $('status');
+  try {
+    const p = payload();
+    if (!p.targetId) throw new Error('Target ID required');
+    if (p.targetType === 'role' && !p.roleChannelId) throw new Error('Role target needs a channel to post in');
+    if (!p.content && !(p.embeds && p.embeds.length) && !p.images.length) throw new Error('Content, embed or image required');
+    st.textContent = 'Queuing send…';
+    await post('/api/composer/send', p);
+    st.textContent = 'Queued. Bot will send when online.';
+  } catch (e) { st.textContent = e.message || e; }
 };
-document.getElementById('btnEdit').onclick=async()=>{
-  const st=document.getElementById('status');
-  try{
-    const p=payload();
-    if(!p.messageLink) throw new Error('Message link required');
-    st.textContent='Queuing edit…';
-    await post('/api/composer/edit',p);
-    st.textContent='Queued. Bot will edit when online.';
-  }catch(e){st.textContent=e.message||e;}
+
+$('btnEdit').onclick = async () => {
+  const st = $('status');
+  try {
+    const p = payload();
+    if (!loadedMessage && !p.messageLink) throw new Error('Load a message first (or paste link)');
+    st.textContent = 'Queuing edit…';
+    await post('/api/composer/edit', p);
+    st.textContent = 'Queued. Bot will edit when online.';
+  } catch (e) { st.textContent = e.message || e; }
 };
+
+$('btnLoad').onclick = async () => {
+  const st = $('loadStatus');
+  try {
+    const link = $('messageLink').value.trim();
+    if (!link) throw new Error('Paste a message link first');
+    st.textContent = 'Loading…';
+    const j = await post('/api/composer/load', { messageLink: link });
+    // poll for result
+    const id = j.requestId;
+    for (let i = 0; i < 20; i++) {
+      await new Promise(r => setTimeout(r, 1000));
+      const r = await fetch('/api/composer/load/' + encodeURIComponent(id));
+      const data = await r.json();
+      if (data.status === 'pending') { st.textContent = 'Waiting for bot… (' + (i+1) + 's)'; continue; }
+      if (data.status === 'error') throw new Error(data.error || 'Load failed');
+      if (data.status === 'ok' && data.message) {
+        const m = data.message;
+        loadedMessage = { channelId: m.channelId, messageId: m.messageId };
+        $('content').value = m.content || '';
+        const emb = (m.embeds && m.embeds[0]) || {};
+        $('embTitle').value = emb.title || '';
+        $('embDesc').value = emb.description || '';
+        $('embFooter').value = (emb.footer && emb.footer.text) || '';
+        if (emb.color != null) $('embColor').value = '#' + Number(emb.color).toString(16).padStart(6,'0');
+        images = [];
+        if (emb.image && emb.image.url) images.push({ type: 'url', url: emb.image.url });
+        (m.attachments || []).forEach(a => {
+          if (a.url) images.push({ type: 'url', url: a.url, name: a.name });
+        });
+        $('targetType').value = 'channel';
+        $('targetId').value = m.channelId || '';
+        $('targetType').dispatchEvent(new Event('change'));
+        renderImageList();
+        renderPreview();
+        st.textContent = 'Loaded message ' + m.messageId + ' — edit fields then click “Save edit”.';
+        return;
+      }
+    }
+    throw new Error('Timeout waiting for bot. Is the bot online?');
+  } catch (e) { st.textContent = e.message || e; }
+};
+
+$('btnUnix').onclick = () => { $('unixNow').textContent = String(Math.floor(Date.now()/1000)); };
+$('btnUnix').click();
+renderImageList();
 renderPreview();
 </script>
 </div></body></html>`);
@@ -5614,14 +5773,20 @@ app.post('/api/composer/send', checkAuth, async (req, res) => {
     if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
     const data = db.getData();
     ensureHubStores(data);
-    const channelId = String(req.body.channelId || '').trim();
-    if (!/^\d+$/.test(channelId)) return res.status(400).json({ error: 'Valid channelId required' });
+    const targetType = String(req.body.targetType || 'channel');
+    const targetId = String(req.body.targetId || '').trim();
+    if (!/^\d+$/.test(targetId)) return res.status(400).json({ error: 'Valid target ID required' });
+    const roleChannelId = String(req.body.roleChannelId || '').trim();
+    if (targetType === 'role' && !/^\d+$/.test(roleChannelId)) {
+        return res.status(400).json({ error: 'roleChannelId required for role target' });
+    }
     const content = String(req.body.content || '');
     const embeds = Array.isArray(req.body.embeds) ? req.body.embeds : [];
-    if (!content && !embeds.length) return res.status(400).json({ error: 'content or embeds required' });
+    const images = Array.isArray(req.body.images) ? req.body.images.slice(0, 10) : [];
+    if (!content && !embeds.length && !images.length) return res.status(400).json({ error: 'content, embed or image required' });
     enqueueBotJob(data, 'discord_message_send', {
-        channelId, content, embeds,
-        allowedMentions: req.body.allowedMentions || { parse: [] }
+        targetType, targetId, roleChannelId: roleChannelId || null,
+        content, embeds, images
     });
     await safeSave();
     res.json({ ok: true });
@@ -5631,19 +5796,81 @@ app.post('/api/composer/edit', checkAuth, async (req, res) => {
     if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
     const data = db.getData();
     ensureHubStores(data);
-    const link = String(req.body.messageLink || '').trim();
-    const m = link.match(/channels\/(\d+)\/(\d+)\/(\d+)/);
-    if (!m) return res.status(400).json({ error: 'Invalid message link' });
-    const channelId = m[2];
-    const messageId = m[3];
+    let channelId = req.body.loaded && req.body.loaded.channelId;
+    let messageId = req.body.loaded && req.body.loaded.messageId;
+    if (!channelId || !messageId) {
+        const link = String(req.body.messageLink || '').trim();
+        const m = link.match(/channels\/(\d+)\/(\d+)\/(\d+)/);
+        if (!m) return res.status(400).json({ error: 'Load a message or provide a valid message link' });
+        channelId = m[2];
+        messageId = m[3];
+    }
     const content = String(req.body.content || '');
     const embeds = Array.isArray(req.body.embeds) ? req.body.embeds : [];
+    const images = Array.isArray(req.body.images) ? req.body.images.slice(0, 10) : [];
     enqueueBotJob(data, 'discord_message_edit', {
-        channelId, messageId, content, embeds,
-        allowedMentions: req.body.allowedMentions || { parse: [] }
+        channelId: String(channelId), messageId: String(messageId),
+        content, embeds, images
     });
     await safeSave();
     res.json({ ok: true, channelId, messageId });
+});
+
+app.post('/api/composer/load', checkAuth, async (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
+    const data = db.getData();
+    ensureHubStores(data);
+    if (!data.composerLoadRequests) data.composerLoadRequests = {};
+    const link = String(req.body.messageLink || '').trim();
+    const m = link.match(/channels\/(\d+)\/(\d+)\/(\d+)/);
+    if (!m) return res.status(400).json({ error: 'Invalid message link' });
+    const requestId = newHubId();
+    data.composerLoadRequests[requestId] = {
+        status: 'pending',
+        guildId: m[1],
+        channelId: m[2],
+        messageId: m[3],
+        createdAt: Date.now()
+    };
+    enqueueBotJob(data, 'discord_message_load', {
+        requestId,
+        channelId: m[2],
+        messageId: m[3]
+    });
+    await safeSave();
+    res.json({ ok: true, requestId });
+});
+
+app.get('/api/composer/load/:id', checkAuth, (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
+    const data = db.getData();
+    const row = (data.composerLoadRequests || {})[req.params.id];
+    if (!row) return res.status(404).json({ error: 'not found' });
+    res.json(row);
+});
+
+app.post('/api/bot/composer-load-result', checkBotAuth, async (req, res) => {
+    const data = db.getData();
+    if (!data.composerLoadRequests) data.composerLoadRequests = {};
+    const requestId = String(req.body.requestId || '');
+    if (!requestId || !data.composerLoadRequests[requestId]) {
+        return res.status(404).json({ error: 'request not found' });
+    }
+    if (req.body.error) {
+        data.composerLoadRequests[requestId] = {
+            ...data.composerLoadRequests[requestId],
+            status: 'error',
+            error: String(req.body.error)
+        };
+    } else {
+        data.composerLoadRequests[requestId] = {
+            ...data.composerLoadRequests[requestId],
+            status: 'ok',
+            message: req.body.message || null
+        };
+    }
+    await safeSave();
+    res.json({ ok: true });
 });
 
 
