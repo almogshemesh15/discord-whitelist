@@ -162,8 +162,21 @@ function allHubRoleIds(data) {
     }
     return [...set];
 }
+function cancelPendingProductJobs(data, productId, robloxId) {
+    ensureHubStores(data);
+    const before = (data.pendingBotJobs || []).length;
+    data.pendingBotJobs = (data.pendingBotJobs || []).filter(j => {
+        if (j.type !== 'product_granted' && j.type !== 'product_granted_pending_link') return true;
+        const p = j.payload || {};
+        if (productId && String(p.productId) !== String(productId)) return true;
+        if (robloxId && String(p.robloxId) !== String(robloxId)) return true;
+        return false; // cancel matching grant jobs
+    });
+    return before - data.pendingBotJobs.length;
+}
 function notifyProductRevoked(data, product, robloxId) {
     ensureLinkStores(data);
+    cancelPendingProductJobs(data, product && product.id, robloxId);
     const link = (data.discordLinks || []).find(l => String(l.robloxId) === String(robloxId));
     if (!link || !link.discordId) return;
     enqueueBotJob(data, 'roles_sync', {
@@ -5521,6 +5534,8 @@ button.sec{background:#334155}button.green{background:#059669}button.danger{back
     <div><label>Embed color (hex)</label><input id="embColor" value="#5865F2"/></div>
     <div><label>Embed footer</label><input id="embFooter"/></div>
   </div>
+  <label>Thumbnail URL (optional — small image on the side; leave empty for none)</label>
+  <input id="embThumb" placeholder="https://… or leave empty"/>
   <label>Images inside embed (URLs and uploads — first = main image, more = extra embed cards)</label>
   <div id="imageList"></div>
   <div class="img-row">
@@ -5531,7 +5546,10 @@ button.sec{background:#334155}button.green{background:#059669}button.danger{back
     <input type="file" id="imgFile" accept="image/*" multiple/>
     <button type="button" class="btn sec" id="btnAddFiles" style="margin-top:0">Add uploads</button>
   </div>
-  <p class="muted">Thumbnail = bot avatar always.</p>
+  <h3 style="margin-top:18px">Buttons</h3>
+  <p class="muted">Role add/remove only work in server channels (not DMs). File buttons work everywhere.</p>
+  <div id="btnList"></div>
+  <button type="button" class="btn sec" id="btnAddButton">+ Add button</button>
   <button type="button" class="btn green" id="btnSend">Send</button>
   <button type="button" class="btn" id="btnEdit">Save edit to loaded message</button>
   <button type="button" class="btn sec" id="btnPreview">Refresh preview</button>
@@ -5617,7 +5635,8 @@ function buildEmbeds(){
   if (desc) main.description = desc;
   if (!isNaN(color)) main.color = color;
   if (footer) main.footer = { text: footer };
-  main.thumbnail = { url: 'BOT_AVATAR' }; // placeholder in preview
+  const thumb = ($('embThumb') && $('embThumb').value || '').trim();
+  if (thumb) main.thumbnail = { url: thumb };
   if (images[0]) {
     if (images[0].type === 'url') main.image = { url: images[0].url };
     else if (images[0].contentBase64) main.image = { url: 'data:'+(images[0].mime||'image/png')+';base64,'+images[0].contentBase64 };
@@ -5632,6 +5651,48 @@ function buildEmbeds(){
   return embeds;
 }
 
+let buttons = [];
+function renderButtons(){
+  const box = $('btnList');
+  if (!box) return;
+  if (!buttons.length) { box.innerHTML = '<p class="muted">No buttons</p>'; return; }
+  box.innerHTML = buttons.map((b,i) =>
+    '<div class="card" style="padding:12px;margin:8px 0">' +
+    '<div class="row"><div><label>Label</label><input data-bf="label" data-i="'+i+'" value="'+(b.label||'').replace(/"/g,'&quot;')+'"/></div>' +
+    '<div><label>Color</label><select data-bf="style" data-i="'+i+'">' +
+    ['Primary','Secondary','Success','Danger'].map(s => '<option value="'+s+'"'+(b.style===s?' selected':'')+'>'+s+'</option>').join('') +
+    '</select></div></div>' +
+    '<div class="row"><div><label>Action</label><select data-bf="action" data-i="'+i+'">' +
+    [['role_add','Give role'],['role_remove','Remove role'],['product_file','Send product files']].map(a =>
+      '<option value="'+a[0]+'"'+(b.action===a[0]?' selected':'')+'>'+a[1]+'</option>').join('') +
+    '</select></div>' +
+    '<div><label>Role ID / Product name</label><input data-bf="value" data-i="'+i+'" value="'+(b.value||'').replace(/"/g,'&quot;')+'" placeholder="role id or product name"/></div></div>' +
+    '<button type="button" class="btn danger" data-rm-btn="'+i+'" style="margin-top:8px">Remove</button></div>'
+  ).join('');
+  box.querySelectorAll('[data-bf]').forEach(el => {
+    el.onchange = el.oninput = () => {
+      const i = +el.getAttribute('data-i');
+      const f = el.getAttribute('data-bf');
+      if (buttons[i]) buttons[i][f] = el.value;
+    };
+  });
+  box.querySelectorAll('[data-rm-btn]').forEach(btn => {
+    btn.onclick = () => { buttons.splice(+btn.getAttribute('data-rm-btn'),1); renderButtons(); };
+  });
+}
+function collectButtons(){
+  return buttons.filter(b => b.label && b.action && b.value).map(b => ({
+    label: String(b.label).slice(0,80),
+    style: b.style || 'Primary',
+    action: b.action,
+    value: String(b.value).trim()
+  })).slice(0, 25);
+}
+if ($('btnAddButton')) $('btnAddButton').onclick = () => {
+  buttons.push({ label: 'Button', style: 'Primary', action: 'role_add', value: '' });
+  renderButtons();
+};
+
 function payload(){
   const splitIds = (v) => String(v||'').split(/[,\\s]+/).map(s=>s.trim()).filter(s=>/^\\d+$/.test(s));
   return {
@@ -5641,14 +5702,15 @@ function payload(){
     messageLink: ($('messageLink').value||'').trim(),
     content: $('content').value||'',
     embeds: buildEmbeds().map(e => {
-      const copy = { ...e };
-      if (copy.thumbnail && copy.thumbnail.url === 'BOT_AVATAR') delete copy.thumbnail; // bot adds real avatar
-      // strip data: urls for upload images — bot uses files + attachment://
+      const copy = Object.assign({}, e);
+      if (copy.thumbnail) copy.thumbnail = Object.assign({}, copy.thumbnail);
+      if (copy.image) copy.image = Object.assign({}, copy.image);
       return copy;
     }),
     images: images.map(i => ({
       type: i.type, url: i.url||null, name: i.name||null, mime: i.mime||null, contentBase64: i.contentBase64||null
     })),
+    buttons: collectButtons(),
     loaded: loadedMessage
   };
 }
@@ -5660,7 +5722,7 @@ function renderPreview(){
   embeds.forEach(e => {
     const col = e.color != null ? e.color.toString(16).padStart(6,'0') : '5865f2';
     html += '<div class="emb" style="border-left-color:#'+col+'">';
-    html += '<div class="thumb" title="bot avatar"></div>';
+    if (e.thumbnail && e.thumbnail.url) html += '<img class="thumb" src="'+String(e.thumbnail.url).replace(/"/g,'')+'" alt=""/>';
     if (e.title) html += '<div style="font-weight:700;font-size:16px">'+e.title.replace(/</g,'&lt;')+'</div>';
     if (e.description) html += '<div style="margin-top:6px;white-space:pre-wrap;color:#dbdee1">'+e.description.replace(/</g,'&lt;')+'</div>';
     if (e.footer && e.footer.text) html += '<div class="muted" style="margin-top:10px;font-size:12px;clear:both">'+e.footer.text.replace(/</g,'&lt;')+'</div>';
@@ -5672,7 +5734,7 @@ function renderPreview(){
 }
 
 $('btnPreview').onclick = renderPreview;
-['content','embTitle','embDesc','embColor','embFooter'].forEach(id => {
+['content','embTitle','embDesc','embColor','embFooter','embThumb'].forEach(id => {
   const el=$(id); if(el) el.addEventListener('input', renderPreview);
 });
 
@@ -5744,7 +5806,7 @@ $('btnLoad').onclick = async () => {
 
 $('btnUnix').onclick=()=>{ $('unixNow').textContent=String(Math.floor(Date.now()/1000)); };
 $('btnUnix').click();
-renderImageList(); renderPreview();
+renderImageList(); renderButtons(); renderPreview();
 </script>
 </div></body></html>`);
 });
@@ -5774,13 +5836,15 @@ app.post('/api/composer/send', checkAuth, async (req, res) => {
         return res.status(400).json({ error: 'Images too large (max ~20MB total uploads)' });
     }
     if (!content && !embeds.length && !images.length) return res.status(400).json({ error: 'Empty message' });
+    const buttons = Array.isArray(req.body.buttons) ? req.body.buttons.slice(0, 25) : [];
     enqueueBotJob(data, 'discord_message_send', {
         channelIds,
         userIds,
         roleIds,
         content,
         embeds,
-        images
+        images,
+        buttons
     });
     await safeSave();
     res.json({ ok: true });
@@ -5804,7 +5868,8 @@ app.post('/api/composer/edit', checkAuth, async (req, res) => {
         messageId: String(messageId),
         content: String(req.body.content || ''),
         embeds: Array.isArray(req.body.embeds) ? req.body.embeds : [],
-        images: Array.isArray(req.body.images) ? req.body.images.slice(0, 10) : []
+        images: Array.isArray(req.body.images) ? req.body.images.slice(0, 10) : [],
+        buttons: Array.isArray(req.body.buttons) ? req.body.buttons.slice(0, 25) : []
     });
     await safeSave();
     res.json({ ok: true, channelId, messageId });
