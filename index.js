@@ -12,7 +12,8 @@ process.on('uncaughtException', (err) => {
     console.error('Uncaught Exception:', err);
 });
 
-app.use(express.json());
+app.use(express.json({ limit: '25mb' }));
+app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 app.set('trust proxy', 1);
@@ -5496,13 +5497,13 @@ button.sec{background:#334155}button.green{background:#059669}button.danger{back
 
 <div class="card">
   <h3>Targets (combine any)</h3>
-  <label>Channel ID (optional — post in channel)</label>
-  <input id="channelId" placeholder="123…"/>
+  <label>Channel IDs (optional — post in each, comma-separated)</label>
+  <input id="channelIds" placeholder="111, 222"/>
   <label>User IDs (optional — DM each, comma-separated)</label>
   <input id="userIds" placeholder="111, 222"/>
-  <label>Role ID (optional — DM everyone who has this role)</label>
-  <input id="roleId" placeholder="333…"/>
-  <p class="muted">Fill any combination. Role DMs need the bot in a server where that role exists (and Members intent if possible).</p>
+  <label>Role IDs (optional — DM everyone with these roles, comma-separated)</label>
+  <input id="roleIds" placeholder="333, 444"/>
+  <p class="muted">Combine freely. Large image uploads are OK up to ~20MB total. Role DMs need the bot in that server.</p>
   <label>Load existing message (paste link)</label>
   <div class="row">
     <div><input id="messageLink" placeholder="https://discord.com/channels/guild/channel/message"/></div>
@@ -5632,11 +5633,11 @@ function buildEmbeds(){
 }
 
 function payload(){
-  const userIds = ($('userIds').value||'').split(/[,\\s]+/).map(s=>s.trim()).filter(s=>/^\\d+$/.test(s));
+  const splitIds = (v) => String(v||'').split(/[,\\s]+/).map(s=>s.trim()).filter(s=>/^\\d+$/.test(s));
   return {
-    channelId: ($('channelId').value||'').trim(),
-    userIds,
-    roleId: ($('roleId').value||'').trim(),
+    channelIds: splitIds(($('channelIds')||{}).value||''),
+    userIds: splitIds(($('userIds')||{}).value||''),
+    roleIds: splitIds(($('roleIds')||{}).value||''),
     messageLink: ($('messageLink').value||'').trim(),
     content: $('content').value||'',
     embeds: buildEmbeds().map(e => {
@@ -5686,7 +5687,7 @@ $('btnSend').onclick = async () => {
   const st=$('status');
   try {
     const p = payload();
-    if (!p.channelId && !p.userIds.length && !p.roleId) throw new Error('Set at least one target: channel, user(s), or role');
+    if (!p.channelIds.length && !p.userIds.length && !p.roleIds.length) throw new Error('Set at least one target: channel(s), user(s), or role(s)');
     if (!p.content && !p.embeds.length && !p.images.length) throw new Error('Add content, embed or image');
     st.textContent='Queuing…';
     await post('/api/composer/send', p);
@@ -5731,7 +5732,7 @@ $('btnLoad').onclick = async () => {
         images=[];
         (m.embeds||[]).forEach(e=>{ if(e.image&&e.image.url) images.push({type:'url',url:e.image.url}); });
         (m.attachments||[]).forEach(a=>{ if(a.url) images.push({type:'url',url:a.url,name:a.name}); });
-        if (m.channelId) $('channelId').value=m.channelId;
+        if (m.channelId && $('channelIds')) $('channelIds').value=m.channelId;
         renderImageList(); renderPreview();
         st.textContent='Loaded. Edit then Save edit.';
         return;
@@ -5752,22 +5753,31 @@ app.post('/api/composer/send', checkAuth, async (req, res) => {
     if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
     const data = db.getData();
     ensureHubStores(data);
-    const channelId = String(req.body.channelId || '').trim();
-    const roleId = String(req.body.roleId || '').trim();
-    const userIds = Array.isArray(req.body.userIds)
-        ? req.body.userIds.map(String).map(s => s.trim()).filter(s => /^\d+$/.test(s))
-        : String(req.body.userIds || '').split(/[,\\s]+/).map(s => s.trim()).filter(s => /^\d+$/.test(s));
-    if (channelId && !/^\d+$/.test(channelId)) return res.status(400).json({ error: 'Invalid channelId' });
-    if (roleId && !/^\d+$/.test(roleId)) return res.status(400).json({ error: 'Invalid roleId' });
-    if (!channelId && !roleId && !userIds.length) return res.status(400).json({ error: 'Need channel, user(s), or role' });
+    const parseIds = (v) => {
+        if (Array.isArray(v)) return v.map(String).map(s => s.trim()).filter(s => /^\d+$/.test(s));
+        return String(v || '').split(/[,\s]+/).map(s => s.trim()).filter(s => /^\d+$/.test(s));
+    };
+    const channelIds = parseIds(req.body.channelIds != null ? req.body.channelIds : req.body.channelId);
+    const roleIds = parseIds(req.body.roleIds != null ? req.body.roleIds : req.body.roleId);
+    const userIds = parseIds(req.body.userIds);
+    if (!channelIds.length && !roleIds.length && !userIds.length) {
+        return res.status(400).json({ error: 'Need channel(s), user(s), or role(s)' });
+    }
     const content = String(req.body.content || '');
     const embeds = Array.isArray(req.body.embeds) ? req.body.embeds : [];
-    const images = Array.isArray(req.body.images) ? req.body.images.slice(0, 10) : [];
+    const images = Array.isArray(req.body.images) ? req.body.images.slice(0, 8) : [];
+    let uploadBytes = 0;
+    for (const img of images) {
+        if (img && img.contentBase64) uploadBytes += Math.floor(String(img.contentBase64).length * 0.75);
+    }
+    if (uploadBytes > 20 * 1024 * 1024) {
+        return res.status(400).json({ error: 'Images too large (max ~20MB total uploads)' });
+    }
     if (!content && !embeds.length && !images.length) return res.status(400).json({ error: 'Empty message' });
     enqueueBotJob(data, 'discord_message_send', {
-        channelId: channelId || null,
+        channelIds,
         userIds,
-        roleId: roleId || null,
+        roleIds,
         content,
         embeds,
         images
