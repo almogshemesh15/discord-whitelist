@@ -108,9 +108,29 @@ function syncHubKeysForProduct(data, product, oldKeys) {
         }
     }
 }
+function ensureBlacklist(data) {
+    if (!Array.isArray(data.blacklist)) data.blacklist = [];
+}
+function isBlacklisted(data, opts) {
+    ensureBlacklist(data);
+    const dId = opts && opts.discordId != null ? String(opts.discordId).trim() : '';
+    const rId = opts && opts.robloxId != null ? String(opts.robloxId).trim() : '';
+    const dName = opts && opts.discordTag ? String(opts.discordTag).toLowerCase().replace(/^@/, '') : '';
+    const rName = opts && opts.robloxName ? String(opts.robloxName).toLowerCase() : '';
+    for (const e of data.blacklist) {
+        if (!e) continue;
+        if (dId && e.discordId && String(e.discordId) === dId) return e;
+        if (rId && e.robloxId && String(e.robloxId) === rId) return e;
+        if (dName && e.discordTag && String(e.discordTag).toLowerCase().replace(/^@/, '') === dName) return e;
+        if (rName && e.robloxName && String(e.robloxName).toLowerCase() === rName) return e;
+    }
+    return null;
+}
+
 function ensureHubStores(data) {
     if (!Array.isArray(data.hubProducts)) data.hubProducts = [];
     if (!Array.isArray(data.hubOwnerships)) data.hubOwnerships = [];
+    ensureBlacklist(data);
     if (!Array.isArray(data.pendingBotJobs)) data.pendingBotJobs = [];
     // never persist composer message loads
     if (data.composerLoadRequests) delete data.composerLoadRequests;
@@ -592,6 +612,7 @@ const DEFAULT_PANEL_MESSAGES = {
     tag_expired: 'This license has expired.\nRenew the license to restore access.',
     pending: 'Your request is pending approval.\nAccess has not been granted yet.',
     not_whitelisted: 'Not authorized for this place.\nContact the administrator for access.',
+    blacklisted: 'Access denied.\nYour account is blacklisted.',
     missing_ids: 'Missing creatorId or placeId.'
 };
 
@@ -604,6 +625,7 @@ const DEFAULT_PANEL_MESSAGES_HE = {
     tag_expired: 'תוקף הרישיון פג.\nיש לחדש את הרישיון כדי להמשיך.',
     pending: 'הבקשה ממתינה לאישור.\nהגישה טרם אושרה.',
     not_whitelisted: 'אין הרשאה למקום זה.\nפנה למנהל לקבלת גישה.',
+    blacklisted: 'הגישה נדחתה.\nהחשבון שלך ברשימה השחורה.',
     missing_ids: 'חסרים מזהים (creatorId / placeId).'
 };
 
@@ -1564,6 +1586,10 @@ app.post('/api/verify', async (req, res) => {
         return deny('maintenance', await msg('maintenance'));
     }
 
+    if (isBlacklisted(data, { robloxId: creatorId })) {
+        return deny('blacklisted', await msg('blacklisted'));
+    }
+
     if (licenseKey) {
         const keyObj = data.keys.find(k => k.key === licenseKey);
         if (!keyObj) {
@@ -1785,6 +1811,7 @@ app.get('/', checkAuth, (req, res) => {
                     </span>
                     <span style="font-size:12px;color:#94a3b8;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${req.session.userEmail}">${req.session.userEmail}</span>
                     ${isOwner ? `<button type="button" id="maint-btn" class="hdr-btn ${maintenanceOn ? 'btn-maint-on' : 'btn-maint-off'}" onclick="toggleMaintenance()">${maintenanceOn ? '🛠️ ' + tr('maintenanceOn') : '🛠️ ' + tr('maintenance')}</button>` : ''}
+                    <a href="/blacklist" class="btn-obfuscate-page" style="background:#9f1239;border-color:#be123c;">🚫 Blacklist</a>
                     <a href="/bot" class="btn-obfuscate-page" style="background:#6366f1;border-color:#4f46e5;">🤖 Bot</a>
                     <a href="/users" class="btn-obfuscate-page" style="background:#14b8a6;border-color:#0d9488;">👤 Users</a>
                     <a href="/hub" class="btn-obfuscate-page" style="background:#ec4899;border-color:#db2777;">🛒 Hub</a>
@@ -2398,6 +2425,7 @@ app.get('/messages', checkAuth, (req, res) => {
         { key: 'tag_expired' },
         { key: 'pending' },
         { key: 'not_whitelisted' },
+        { key: 'blacklisted' },
         { key: 'missing_ids' }
     ];
     const reasonFields = reasonMeta.map(r => `
@@ -5031,6 +5059,9 @@ app.get('/api/hub/catalog', checkBotAuth, (req, res) => {
     const data = db.getData();
     ensureHubStores(data);
     const robloxId = String(req.query.robloxId || '').trim();
+    if (robloxId && isBlacklisted(data, { robloxId })) {
+        return res.json({ products: [], ownedProductIds: [], blacklisted: true });
+    }
     const ownedSet = new Set();
     if (robloxId) {
         (data.hubOwnerships || []).forEach(o => {
@@ -5066,6 +5097,9 @@ app.post('/api/hub/purchase', checkBotAuth, async (req, res) => {
     const freeClaim = !!(req.body.freeClaim || req.body.free);
     if (!robloxId) {
         return res.status(400).json({ error: 'robloxId required' });
+    }
+    if (isBlacklisted(data, { robloxId, robloxName })) {
+        return res.status(403).json({ error: 'blacklisted', blacklisted: true });
     }
     let product = null;
     if (productId) {
@@ -5733,13 +5767,14 @@ function renderButtons(){
     '<div><label>Log user IDs</label><input data-bf="logUserIds" data-i="'+i+'" value="'+(b.logUserIds||'').toString().replace(/"/g,'&quot;')+'" placeholder="333"/></div></div>' +
     '<label>Log role IDs (DM everyone with role)</label>' +
     '<input data-bf="logRoleIds" data-i="'+i+'" value="'+(b.logRoleIds||'').toString().replace(/"/g,'&quot;')+'" placeholder="444, 555"/>' +
+    '<label style="display:flex;align-items:center;gap:8px;margin-top:10px"><input type="checkbox" data-bf="deleteOnSuccess" data-i="'+i+'" '+(b.deleteOnSuccess?'checked':'')+'/> Delete this message after success (DM only)</label>' +
     '<button type="button" class="btn danger" data-rm-btn="'+i+'" style="margin-top:8px">Remove</button></div>'
   ).join('');
   box.querySelectorAll('[data-bf]').forEach(el => {
     el.onchange = el.oninput = () => {
       const i = +el.getAttribute('data-i');
       const f = el.getAttribute('data-bf');
-      if (buttons[i]) buttons[i][f] = el.value;
+      if (buttons[i]) buttons[i][f] = (el.type === 'checkbox') ? !!el.checked : el.value;
     };
   });
   box.querySelectorAll('[data-rm-btn]').forEach(btn => {
@@ -5754,11 +5789,12 @@ function collectButtons(){
     value: String(b.value).trim(),
     logChannelIds: b.logChannelIds || '',
     logUserIds: b.logUserIds || '',
-    logRoleIds: b.logRoleIds || ''
+    logRoleIds: b.logRoleIds || '',
+    deleteOnSuccess: !!b.deleteOnSuccess
   })).slice(0, 25);
 }
 if ($('btnAddButton')) $('btnAddButton').onclick = () => {
-  buttons.push({ label: 'Button', style: 'Primary', action: 'role_add', value: '', logChannelIds: '', logUserIds: '', logRoleIds: '' });
+  buttons.push({ label: 'Button', style: 'Primary', action: 'role_add', value: '', logChannelIds: '', logUserIds: '', logRoleIds: '', deleteOnSuccess: false });
   renderButtons();
 };
 
@@ -5864,7 +5900,8 @@ $('btnLoad').onclick = async () => {
       value: b.value||'',
       logChannelIds: Array.isArray(b.logChannelIds) ? b.logChannelIds.join(', ') : (b.logChannelIds || ''),
       logUserIds: Array.isArray(b.logUserIds) ? b.logUserIds.join(', ') : (b.logUserIds || ''),
-      logRoleIds: Array.isArray(b.logRoleIds) ? b.logRoleIds.join(', ') : (b.logRoleIds || '')
+      logRoleIds: Array.isArray(b.logRoleIds) ? b.logRoleIds.join(', ') : (b.logRoleIds || ''),
+      deleteOnSuccess: !!b.deleteOnSuccess
     })) : [];
     if (m.channelId && $('channelIds')) $('channelIds').value=m.channelId;
     renderImageList(); renderButtons(); renderPreview();
@@ -5906,6 +5943,18 @@ app.post('/api/composer/status-channels', checkAuth, async (req, res) => {
     enqueueBotJob(data, 'status_message_sync', { force: true });
     await safeSave();
     res.json({ ok: true, channelIds: cfg.statusChannels });
+});
+
+app.get('/api/bot/blacklist-check', checkBotAuth, (req, res) => {
+    const data = db.getData();
+    ensureBlacklist(data);
+    const hit = isBlacklisted(data, {
+        discordId: req.query.discordId,
+        robloxId: req.query.robloxId,
+        discordTag: req.query.discordTag,
+        robloxName: req.query.robloxName
+    });
+    res.json({ blacklisted: !!hit, entry: hit || null });
 });
 
 app.post('/api/bot/verification-status', checkBotAuth, async (req, res) => {
@@ -6054,5 +6103,152 @@ app.post('/api/bot/composer-load-result', checkBotAuth, async (req, res) => {
 });
 
 
+
+
+app.get('/api/blacklist', checkAuth, (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
+    const data = db.getData();
+    ensureBlacklist(data);
+    res.json({ blacklist: data.blacklist || [] });
+});
+
+app.post('/api/blacklist', checkAuth, async (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
+    const data = db.getData();
+    ensureBlacklist(data);
+    const discordId = String(req.body.discordId || '').replace(/\D/g, '') || null;
+    const robloxId = String(req.body.robloxId || '').replace(/\D/g, '') || null;
+    let discordTag = String(req.body.discordTag || '').trim() || null;
+    let robloxName = String(req.body.robloxName || '').trim() || null;
+    const note = String(req.body.note || '').trim().slice(0, 200) || null;
+    // Resolve names from links if only id given
+    if (discordId && !robloxId) {
+        const link = (data.discordLinks || []).find(l => String(l.discordId) === discordId);
+        if (link) {
+            if (!robloxId && link.robloxId) { /* keep */ }
+            if (!robloxName && link.robloxName) robloxName = link.robloxName;
+            if (!discordTag && link.discordTag) discordTag = link.discordTag;
+            if (link.robloxId) {
+                // store both if linked
+            }
+        }
+    }
+    let resolvedRobloxId = robloxId;
+    let resolvedDiscordId = discordId;
+    if (discordId) {
+        const link = (data.discordLinks || []).find(l => String(l.discordId) === discordId);
+        if (link) {
+            if (!resolvedRobloxId) resolvedRobloxId = String(link.robloxId);
+            if (!robloxName) robloxName = link.robloxName || robloxName;
+            if (!discordTag) discordTag = link.discordTag || discordTag;
+        }
+    }
+    if (robloxId) {
+        const link = (data.discordLinks || []).find(l => String(l.robloxId) === String(robloxId));
+        if (link) {
+            if (!resolvedDiscordId) resolvedDiscordId = String(link.discordId);
+            if (!discordTag) discordTag = link.discordTag || discordTag;
+            if (!robloxName) robloxName = link.robloxName || robloxName;
+        }
+    }
+    if (!resolvedDiscordId && !resolvedRobloxId && !discordTag && !robloxName) {
+        return res.status(400).json({ error: 'Need Discord ID/tag or Roblox ID/name' });
+    }
+    // de-dupe
+    data.blacklist = data.blacklist.filter(e => {
+        if (resolvedDiscordId && e.discordId && String(e.discordId) === resolvedDiscordId) return false;
+        if (resolvedRobloxId && e.robloxId && String(e.robloxId) === resolvedRobloxId) return false;
+        return true;
+    });
+    data.blacklist.push({
+        id: newHubId(),
+        discordId: resolvedDiscordId || null,
+        discordTag: discordTag || null,
+        robloxId: resolvedRobloxId || null,
+        robloxName: robloxName || null,
+        note,
+        createdAt: Date.now()
+    });
+    await safeSave();
+    res.json({ ok: true, blacklist: data.blacklist });
+});
+
+app.delete('/api/blacklist/:id', checkAuth, async (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
+    const data = db.getData();
+    ensureBlacklist(data);
+    const before = data.blacklist.length;
+    data.blacklist = data.blacklist.filter(e => e.id !== req.params.id);
+    await safeSave();
+    res.json({ ok: true, removed: before - data.blacklist.length, blacklist: data.blacklist });
+});
+
+app.get('/blacklist', checkAuth, (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).send('Owner only');
+    res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Blacklist</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:20px}
+a{color:#38bdf8} .card{background:#1e293b;border-radius:12px;padding:16px;margin:12px 0;max-width:900px}
+input,button{padding:8px 12px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;margin:4px 0}
+button{background:#6366f1;border:none;cursor:pointer;font-weight:600}
+button.danger{background:#e11d48}
+table{width:100%;border-collapse:collapse;font-size:13px}
+td,th{padding:8px;border-bottom:1px solid #334155;text-align:left}
+.muted{color:#94a3b8;font-size:12px}
+</style></head><body>
+<div><a href="/">Dashboard</a> · <a href="/users">Users</a> · <a href="/hub">Hub</a> · <a href="/bot">Bot</a></div>
+<h1>🚫 Blacklist</h1>
+<p class="muted">Blacklisted users: no Hub products UI, cannot purchase, Discord commands blocked, license verify returns denied.</p>
+<div class="card">
+  <h3>Add entry</h3>
+  <label>Discord ID</label><input id="dId" placeholder="123..." style="width:100%"/>
+  <label>Discord username/tag (optional)</label><input id="dTag" placeholder="name" style="width:100%"/>
+  <label>Roblox ID</label><input id="rId" placeholder="456..." style="width:100%"/>
+  <label>Roblox username (optional)</label><input id="rName" placeholder="name" style="width:100%"/>
+  <label>Note</label><input id="note" placeholder="reason" style="width:100%"/>
+  <button type="button" id="btnAdd">Add to blacklist</button>
+  <div id="msg" class="muted"></div>
+</div>
+<div class="card">
+  <h3>Entries</h3>
+  <table><thead><tr><th>Discord</th><th>Roblox</th><th>Note</th><th></th></tr></thead>
+  <tbody id="tbody"></tbody></table>
+</div>
+<script>
+async function load(){
+  const r = await fetch('/api/blacklist');
+  const j = await r.json();
+  const tb = document.getElementById('tbody');
+  tb.innerHTML = (j.blacklist||[]).map(e => '<tr>'+
+    '<td>'+(e.discordTag||'—')+'<br/><code>'+(e.discordId||'')+'</code></td>'+
+    '<td>'+(e.robloxName||'—')+'<br/><code>'+(e.robloxId||'')+'</code></td>'+
+    '<td>'+(e.note||'')+'</td>'+
+    '<td><button class="danger" data-id="'+e.id+'">Remove</button></td></tr>').join('') || '<tr><td colspan="4">Empty</td></tr>';
+  tb.querySelectorAll('button[data-id]').forEach(b => b.onclick = async () => {
+    await fetch('/api/blacklist/'+b.getAttribute('data-id'),{method:'DELETE'});
+    load();
+  });
+}
+document.getElementById('btnAdd').onclick = async () => {
+  const msg = document.getElementById('msg');
+  try {
+    const r = await fetch('/api/blacklist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      discordId: document.getElementById('dId').value,
+      discordTag: document.getElementById('dTag').value,
+      robloxId: document.getElementById('rId').value,
+      robloxName: document.getElementById('rName').value,
+      note: document.getElementById('note').value
+    })});
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error||'failed');
+    msg.textContent = 'Added';
+    document.getElementById('dId').value=''; document.getElementById('rId').value='';
+    load();
+  } catch(e){ msg.textContent = e.message||e; }
+};
+load();
+</script></body></html>`);
+});
 
 app.listen(PORT, () => {});
