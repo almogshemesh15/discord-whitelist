@@ -112,7 +112,6 @@ function ensureHubStores(data) {
     if (!Array.isArray(data.hubProducts)) data.hubProducts = [];
     if (!Array.isArray(data.hubOwnerships)) data.hubOwnerships = [];
     if (!Array.isArray(data.pendingBotJobs)) data.pendingBotJobs = [];
-    if (!data.composerButtonActions || typeof data.composerButtonActions !== 'object') data.composerButtonActions = {};
     // never persist composer message loads
     if (data.composerLoadRequests) delete data.composerLoadRequests;
 }
@@ -129,45 +128,6 @@ function publicBaseUrl(req) {
 const composerLoadWaiters = new Map();
 
 
-function parseIdList(v) {
-    if (Array.isArray(v)) return v.map(String).map(s => s.trim()).filter(s => /^\d+$/.test(s));
-    return String(v || '').split(/[,\s]+/).map(s => s.trim()).filter(s => /^\d+$/.test(s));
-}
-function registerComposerButtons(data, buttons) {
-    ensureHubStores(data);
-    if (!data.composerButtonActions || typeof data.composerButtonActions !== 'object') data.composerButtonActions = {};
-    const out = [];
-    for (const b of (buttons || []).slice(0, 25)) {
-        if (!b || !b.label || !b.action || !b.value) continue;
-        const id = newHubId().replace(/[^a-zA-Z0-9]/g, '').slice(0, 12) || String(Date.now());
-        data.composerButtonActions[id] = {
-            action: String(b.action),
-            value: String(b.value).trim(),
-            label: String(b.label).slice(0, 80),
-            style: b.style || 'Primary',
-            logChannelIds: parseIdList(b.logChannelIds),
-            logUserIds: parseIdList(b.logUserIds),
-            logRoleIds: parseIdList(b.logRoleIds),
-            createdAt: Date.now()
-        };
-        out.push({
-            id,
-            label: data.composerButtonActions[id].label,
-            style: data.composerButtonActions[id].style,
-            action: data.composerButtonActions[id].action,
-            value: data.composerButtonActions[id].value,
-            logChannelIds: data.composerButtonActions[id].logChannelIds,
-            logUserIds: data.composerButtonActions[id].logUserIds,
-            logRoleIds: data.composerButtonActions[id].logRoleIds
-        });
-    }
-    // prune old (>30 days)
-    const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
-    for (const [k, v] of Object.entries(data.composerButtonActions)) {
-        if (v && v.createdAt && v.createdAt < cutoff) delete data.composerButtonActions[k];
-    }
-    return out;
-}
 
 function enqueueBotJob(data, type, payload) {
     ensureHubStores(data);
@@ -5961,14 +5921,6 @@ app.post('/api/bot/verification-status', checkBotAuth, async (req, res) => {
     res.json({ ok: true, verificationStatus: cfg.verificationStatus });
 });
 
-app.get('/api/bot/composer-button/:id', checkBotAuth, (req, res) => {
-    const data = db.getData();
-    ensureHubStores(data);
-    const row = (data.composerButtonActions || {})[req.params.id];
-    if (!row) return res.status(404).json({ error: 'not found' });
-    res.json({ button: row });
-});
-
 app.post('/api/bot/status-messages', checkBotAuth, async (req, res) => {
     const data = db.getData();
     const cfg = ensureBotConfig(data);
@@ -6006,8 +5958,7 @@ app.post('/api/composer/send', checkAuth, async (req, res) => {
         return res.status(400).json({ error: 'Images too large (max ~20MB total uploads)' });
     }
     if (!content && !embeds.length && !images.length) return res.status(400).json({ error: 'Empty message' });
-    const buttonsRaw = Array.isArray(req.body.buttons) ? req.body.buttons.slice(0, 25) : [];
-    const buttons = registerComposerButtons(data, buttonsRaw);
+    const buttons = Array.isArray(req.body.buttons) ? req.body.buttons.slice(0, 25) : [];
     enqueueBotJob(data, 'discord_message_send', {
         channelIds,
         userIds,
@@ -6040,7 +5991,7 @@ app.post('/api/composer/edit', checkAuth, async (req, res) => {
         content: String(req.body.content || ''),
         embeds: Array.isArray(req.body.embeds) ? req.body.embeds : [],
         images: Array.isArray(req.body.images) ? req.body.images.slice(0, 10) : [],
-        buttons: registerComposerButtons(data, Array.isArray(req.body.buttons) ? req.body.buttons.slice(0, 25) : [])
+        buttons: Array.isArray(req.body.buttons) ? req.body.buttons.slice(0, 25) : []
     });
     await safeSave();
     res.json({ ok: true, channelId, messageId });
