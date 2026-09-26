@@ -6526,7 +6526,10 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
     </div>
   </div>
 <script>
-let currentUserId = null, replyTo = null, editId = null, botId = null, pollTimer = null, pendingFiles = [];
+let currentUserId = null, replyTo = null, editId = null, botId = null;
+let pollTimer = null, pollBusy = false, pendingFiles = [];
+let lastMsgSig = '';
+
 function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
 async function post(url, body){
   const r = await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});
@@ -6546,67 +6549,50 @@ function readFileAsB64(file){
     fr.readAsDataURL(file);
   });
 }
+function renderFileChips(){
+  const box = document.getElementById('fileChips');
+  box.innerHTML = pendingFiles.map((f,i) =>
+    '<span>'+esc(f.name)+' <a href="#" data-rm="'+i+'" style="color:#f43f5e">×</a></span>').join('');
+  box.querySelectorAll('[data-rm]').forEach(a => {
+    a.onclick = (ev) => {
+      ev.preventDefault();
+      pendingFiles.splice(+a.getAttribute('data-rm'), 1);
+      renderFileChips();
+    };
+  });
+}
 document.getElementById('fileInput').onchange = async (e) => {
   const files = [...(e.target.files || [])];
   for (const f of files) {
     if (f.size > 8 * 1024 * 1024) { alert(f.name + ' too large (max 8MB)'); continue; }
     pendingFiles.push(await readFileAsB64(f));
   }
-  document.getElementById('fileChips').innerHTML = pendingFiles.map((f,i) =>
-    '<span>'+esc(f.name)+' <a href="#" data-rm="'+i+'" style="color:#f43f5e">×</a></span>').join('');
-  document.getElementById('fileChips').querySelectorAll('[data-rm]').forEach(a => a.onclick = (ev) => {
-    ev.preventDefault();
-    pendingFiles.splice(+a.getAttribute('data-rm'), 1);
-    document.getElementById('fileInput').onchange({ target: { files: [] } });
-    document.getElementById('fileChips').innerHTML = pendingFiles.map((f,i) =>
-      '<span>'+esc(f.name)+' <a href="#" data-rm="'+i+'" style="color:#f43f5e">×</a></span>').join('');
-    document.getElementById('fileChips').querySelectorAll('[data-rm]').forEach(a2 => a2.onclick = arguments.callee.bind(null));
-  });
+  renderFileChips();
   e.target.value = '';
 };
+
 async function loadList(){
   const list = document.getElementById('list');
+  const prev = currentUserId;
   list.innerHTML = '<div class="empty">Loading…</div>';
   try {
     const j = await post('/api/inbox/list', {});
     const ch = j.channels || [];
     if (!ch.length) { list.innerHTML = '<div class="empty">No chats yet. Open by user ID or link users in Hub.</div>'; return; }
-    list.innerHTML = ch.map(c => '<div class="item'+(c.userId===currentUserId?' active':'')+'" data-uid="'+c.userId+'">'+
+    list.innerHTML = ch.map(c => '<div class="item'+(c.userId===prev?' active':'')+'" data-uid="'+c.userId+'">'+
       '<div class="name">'+esc(c.tag||c.username||'User')+'</div>'+
       '<div class="id">'+esc(c.userId)+(c.robloxName ? (' · '+esc(c.robloxName)) : '')+'</div></div>').join('');
     list.querySelectorAll('.item').forEach(el => el.onclick = () => openChat(el.getAttribute('data-uid'), el.querySelector('.name').textContent));
   } catch(e){ list.innerHTML = '<div class="empty" style="color:#f43f5e">'+esc(e.message)+'</div>'; }
 }
-async function openChat(uid, title, silent){
-  currentUserId = uid;
-  if (!silent) {
-    replyTo = null; editId = null;
-    document.getElementById('replyBar').classList.remove('show');
-    document.getElementById('btnEditSave').style.display = 'none';
-    document.getElementById('btnSend').style.display = '';
-  }
-  document.getElementById('chatTitle').textContent = (title||'User') + ' · ' + uid;
-  document.getElementById('btnSend').disabled = false;
-  if (!silent) document.getElementById('chatStatus').textContent = 'Loading…';
-  document.querySelectorAll('.item').forEach(el => el.classList.toggle('active', el.getAttribute('data-uid')===uid));
-  try {
-    const j = await post('/api/inbox/messages', { userId: uid, limit: 80 });
-    botId = j.botId || botId;
-    if (j.user && j.user.tag) document.getElementById('chatTitle').textContent = j.user.tag + ' · ' + uid;
-    renderMsgs(j.messages || []);
-    document.getElementById('chatStatus').textContent = (j.messages||[]).length + ' msgs · auto-refresh';
-  } catch(e){
-    if (!silent) {
-      document.getElementById('msgs').innerHTML = '<div class="empty" style="color:#f43f5e">'+esc(e.message)+'</div>';
-      document.getElementById('chatStatus').textContent = '';
-    }
-  }
-  if (pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(() => { if (currentUserId) openChat(currentUserId, null, true); }, 5000);
+
+function msgSignature(messages){
+  return (messages || []).map(m => m.id + ':' + (m.editedAt||'') + ':' + (m.content||'').length).join('|');
 }
+
 function renderMsgs(messages){
   const box = document.getElementById('msgs');
-  const prevBottom = box.scrollHeight - box.scrollTop < box.clientHeight + 80;
+  const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 100;
   if (!messages.length) { box.innerHTML = '<div class="empty">No messages yet</div>'; return; }
   box.innerHTML = messages.map(m => {
     const mine = botId && m.authorId === botId;
@@ -6632,7 +6618,7 @@ function renderMsgs(messages){
       (mine?'<button type="button" data-edit="'+m.id+'">Edit</button><button type="button" class="danger" data-del="'+m.id+'">Delete</button>':'')+
       '</div></div>';
   }).join('');
-  if (!arguments[1] && prevBottom) box.scrollTop = box.scrollHeight;
+  if (nearBottom) box.scrollTop = box.scrollHeight;
   box.querySelectorAll('[data-reply]').forEach(b => b.onclick = () => {
     replyTo = b.getAttribute('data-reply'); editId = null;
     document.getElementById('replyText').textContent = 'Replying to '+replyTo;
@@ -6652,10 +6638,50 @@ function renderMsgs(messages){
   });
   box.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
     if (!confirm('Delete?')) return;
-    try { await post('/api/inbox/delete',{userId:currentUserId,messageId:b.getAttribute('data-del')}); openChat(currentUserId); }
+    try { await post('/api/inbox/delete',{userId:currentUserId,messageId:b.getAttribute('data-del')}); await refreshMessages(false); }
     catch(e){ alert(e.message); }
   });
 }
+
+async function refreshMessages(forceRender){
+  if (!currentUserId || pollBusy) return;
+  pollBusy = true;
+  try {
+    const j = await post('/api/inbox/messages', { userId: currentUserId, limit: 80 });
+    botId = j.botId || botId;
+    const messages = j.messages || [];
+    const sig = msgSignature(messages);
+    if (forceRender || sig !== lastMsgSig) {
+      lastMsgSig = sig;
+      renderMsgs(messages);
+    }
+    const st = document.getElementById('chatStatus');
+    if (st) st.textContent = messages.length + ' msgs';
+  } catch (e) {
+    // silent fail on background poll — do not clear the chat
+    if (forceRender) {
+      document.getElementById('msgs').innerHTML = '<div class="empty" style="color:#f43f5e">'+esc(e.message)+'</div>';
+    }
+  } finally {
+    pollBusy = false;
+  }
+}
+
+async function openChat(uid, title){
+  currentUserId = uid;
+  replyTo = null; editId = null; lastMsgSig = '';
+  document.getElementById('replyBar').classList.remove('show');
+  document.getElementById('btnEditSave').style.display = 'none';
+  document.getElementById('btnSend').style.display = '';
+  document.getElementById('chatTitle').textContent = (title||'User') + ' · ' + uid;
+  document.getElementById('btnSend').disabled = false;
+  document.getElementById('chatStatus').textContent = 'Loading…';
+  document.querySelectorAll('.item').forEach(el => el.classList.toggle('active', el.getAttribute('data-uid')===uid));
+  await refreshMessages(true);
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(() => refreshMessages(false), 12000);
+}
+
 document.getElementById('btnCancelReply').onclick = () => { replyTo=null; document.getElementById('replyBar').classList.remove('show'); };
 document.getElementById('btnList').onclick = loadList;
 document.getElementById('btnOpen').onclick = () => {
@@ -6680,10 +6706,11 @@ document.getElementById('btnSend').onclick = async () => {
     document.getElementById('embTitle').value = '';
     document.getElementById('embDesc').value = '';
     pendingFiles = [];
-    document.getElementById('fileChips').innerHTML = '';
+    renderFileChips();
     replyTo = null;
     document.getElementById('replyBar').classList.remove('show');
-    await openChat(currentUserId);
+    lastMsgSig = '';
+    await refreshMessages(true);
   } catch(e){ alert(e.message); }
   document.getElementById('btnSend').disabled = false;
 };
@@ -6701,11 +6728,12 @@ document.getElementById('btnEditSave').onclick = async () => {
     document.getElementById('embDesc').value = '';
     document.getElementById('btnEditSave').style.display = 'none';
     document.getElementById('btnSend').style.display = '';
-    await openChat(currentUserId);
+    lastMsgSig = '';
+    await refreshMessages(true);
   } catch(e){ alert(e.message); }
 };
 loadList();
-</script>
+</script></script>
 </body></html>`);
 });
 
