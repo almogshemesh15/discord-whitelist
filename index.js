@@ -125,14 +125,8 @@ function publicBaseUrl(req) {
     }
     return 'https://discord-whitelist-ow56.onrender.com';
 }
-/** In-memory only — never persisted to DB */
-const composerLoadMemory = new Map();
-function pruneComposerLoadMemory() {
-    const cutoff = Date.now() - 10 * 60 * 1000;
-    for (const [k, v] of composerLoadMemory) {
-        if (!v || (v.createdAt || 0) < cutoff) composerLoadMemory.delete(k);
-    }
-}
+/** Live waiters for Composer load — resolved when bot fetches Discord message; nothing kept after response */
+const composerLoadWaiters = new Map();
 
 
 function parseIdList(v) {
@@ -5888,44 +5882,33 @@ $('btnLoad').onclick = async () => {
   try {
     const link=$('messageLink').value.trim();
     if (!link) throw new Error('Paste message link');
-    st.textContent='Loading…';
+    st.textContent='Fetching from Discord via bot…';
     const j = await post('/api/composer/load',{ messageLink: link });
-    const id = j.requestId;
-    for (let i=0;i<25;i++){
-      await new Promise(r=>setTimeout(r,1000));
-      const r = await fetch('/api/composer/load/'+encodeURIComponent(id));
-      const data = await r.json();
-      if (data.status==='pending'){ st.textContent='Waiting for bot…'; continue; }
-      if (data.status==='error') throw new Error(data.error||'failed');
-      if (data.status==='ok' && data.message){
-        const m=data.message;
-        loadedMessage={ channelId:m.channelId, messageId:m.messageId };
-        $('content').value=m.content||'';
-        const emb=(m.embeds&&m.embeds[0])||{};
-        $('embTitle').value=emb.title||'';
-        $('embDesc').value=emb.description||'';
-        $('embFooter').value=(emb.footer&&emb.footer.text)||'';
-        if (emb.color!=null) $('embColor').value='#'+Number(emb.color).toString(16).padStart(6,'0');
-        if ($('embThumb')) $('embThumb').value=(emb.thumbnail&&emb.thumbnail.url)||'';
-        images=[];
-        (m.embeds||[]).forEach(e=>{ if(e.image&&e.image.url) images.push({type:'url',url:e.image.url}); });
-        (m.attachments||[]).forEach(a=>{ if(a.url) images.push({type:'url',url:a.url,name:a.name}); });
-        buttons = Array.isArray(m.buttons) ? m.buttons.map(b => ({
-          label: b.label||'Button',
-          style: b.style||'Primary',
-          action: b.action||'role_add',
-          value: b.value||'',
-          logChannelIds: (b.logChannelIds||[]).toString?.() || b.logChannelIds || '',
-          logUserIds: (b.logUserIds||[]).toString?.() || b.logUserIds || '',
-          logRoleIds: (b.logRoleIds||[]).toString?.() || b.logRoleIds || ''
-        })) : [];
-        if (m.channelId && $('channelIds')) $('channelIds').value=m.channelId;
-        renderImageList(); renderButtons(); renderPreview();
-        st.textContent='Loaded (incl. buttons). Edit then Save edit.';
-        return;
-      }
-    }
-    throw new Error('Timeout — is the bot online?');
+    if (!j || j.status !== 'ok' || !j.message) throw new Error((j && j.error) || 'Load failed');
+    const m = j.message;
+    loadedMessage={ channelId:m.channelId, messageId:m.messageId };
+    $('content').value=m.content||'';
+    const emb=(m.embeds&&m.embeds[0])||{};
+    $('embTitle').value=emb.title||'';
+    $('embDesc').value=emb.description||'';
+    $('embFooter').value=(emb.footer&&emb.footer.text)||'';
+    if (emb.color!=null) $('embColor').value='#'+Number(emb.color).toString(16).padStart(6,'0');
+    if ($('embThumb')) $('embThumb').value=(emb.thumbnail&&emb.thumbnail.url)||'';
+    images=[];
+    (m.embeds||[]).forEach(e=>{ if(e.image&&e.image.url) images.push({type:'url',url:e.image.url}); });
+    (m.attachments||[]).forEach(a=>{ if(a.url) images.push({type:'url',url:a.url,name:a.name}); });
+    buttons = Array.isArray(m.buttons) ? m.buttons.map(b => ({
+      label: b.label||'Button',
+      style: b.style||'Primary',
+      action: b.action||'role_add',
+      value: b.value||'',
+      logChannelIds: Array.isArray(b.logChannelIds) ? b.logChannelIds.join(', ') : (b.logChannelIds || ''),
+      logUserIds: Array.isArray(b.logUserIds) ? b.logUserIds.join(', ') : (b.logUserIds || ''),
+      logRoleIds: Array.isArray(b.logRoleIds) ? b.logRoleIds.join(', ') : (b.logRoleIds || '')
+    })) : [];
+    if (m.channelId && $('channelIds')) $('channelIds').value=m.channelId;
+    renderImageList(); renderButtons(); renderPreview();
+    st.textContent='Imported from Discord (not stored). Edit then Save edit.';
   } catch(e){ st.textContent=e.message||e; }
 };
 
@@ -6063,64 +6046,62 @@ app.post('/api/composer/edit', checkAuth, async (req, res) => {
     res.json({ ok: true, channelId, messageId });
 });
 
+
 app.post('/api/composer/load', checkAuth, async (req, res) => {
     if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
-    pruneComposerLoadMemory();
     const data = db.getData();
     ensureHubStores(data);
     const link = String(req.body.messageLink || '').trim();
     const m = link.match(/channels\/(\d+)\/(\d+)\/(\d+)/);
     if (!m) return res.status(400).json({ error: 'Invalid message link' });
     const requestId = newHubId();
-    composerLoadMemory.set(requestId, {
-        status: 'pending',
-        channelId: m[2],
-        messageId: m[3],
-        createdAt: Date.now()
-    });
-    // Job payload only — no message body stored in DB
-    enqueueBotJob(data, 'discord_message_load', { requestId, channelId: m[2], messageId: m[3] });
-    await safeSave(); // only for job queue
-    res.json({ ok: true, requestId });
-});
 
-app.get('/api/composer/load/:id', checkAuth, (req, res) => {
-    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
-    pruneComposerLoadMemory();
-    const row = composerLoadMemory.get(req.params.id);
-    if (!row) return res.status(404).json({ error: 'not found' });
-    const out = { ...row };
-    // one-time read for completed results — free memory
-    if (row.status === 'ok' || row.status === 'error') {
-        composerLoadMemory.delete(req.params.id);
+    const timeoutMs = 28000;
+    const resultPromise = new Promise((resolve) => {
+        const timer = setTimeout(() => {
+            composerLoadWaiters.delete(requestId);
+            resolve({ status: 'error', error: 'Timeout waiting for bot. Is the bot online?' });
+        }, timeoutMs);
+        composerLoadWaiters.set(requestId, (payload) => {
+            clearTimeout(timer);
+            composerLoadWaiters.delete(requestId);
+            resolve(payload);
+        });
+    });
+
+    // Job only carries Discord IDs — bot imports live from Discord
+    enqueueBotJob(data, 'discord_message_load', {
+        requestId,
+        channelId: m[2],
+        messageId: m[3]
+    });
+    await safeSave();
+
+    const result = await resultPromise;
+    if (result.status === 'ok') {
+        return res.json({ ok: true, status: 'ok', message: result.message });
     }
-    res.json(out);
+    return res.status(result.status === 'error' ? 504 : 400).json({
+        ok: false,
+        status: result.status || 'error',
+        error: result.error || 'Load failed'
+    });
 });
 
 app.post('/api/bot/composer-load-result', checkBotAuth, async (req, res) => {
-    pruneComposerLoadMemory();
     const requestId = String(req.body.requestId || '');
-    if (!requestId || !composerLoadMemory.has(requestId)) {
-        // still accept late results into memory
-        if (!requestId) return res.status(400).json({ error: 'requestId required' });
+    const waiter = composerLoadWaiters.get(requestId);
+    if (waiter) {
+        if (req.body.error) {
+            waiter({ status: 'error', error: String(req.body.error) });
+        } else {
+            waiter({ status: 'ok', message: req.body.message || null });
+        }
     }
-    const prev = composerLoadMemory.get(requestId) || { createdAt: Date.now() };
-    if (req.body.error) {
-        composerLoadMemory.set(requestId, {
-            ...prev,
-            status: 'error',
-            error: String(req.body.error)
-        });
-    } else {
-        composerLoadMemory.set(requestId, {
-            ...prev,
-            status: 'ok',
-            message: req.body.message || null
-        });
-    }
-    // never safeSave message content
+    // nothing stored
     res.json({ ok: true });
 });
+
 
 
 app.listen(PORT, () => {});
