@@ -3720,6 +3720,9 @@ app.get('/api/bot/config', checkBotAuth, (req, res) => {
         commands: cfg.commands,
         robloxGameUrl: cfg.robloxGameUrl || '',
         updatedAt: cfg.updatedAt || null,
+        statusChannels: cfg.statusChannels || [],
+        statusMessages: cfg.statusMessages || {},
+        verificationStatus: cfg.verificationStatus || null,
         status: getBotDashboardStatus()
     });
 });
@@ -5941,9 +5944,13 @@ app.post('/api/composer/status-channels', checkAuth, async (req, res) => {
     cfg.updatedAt = Date.now();
     data.botConfig = cfg;
     ensureHubStores(data);
-    enqueueBotJob(data, 'status_message_sync', { force: true });
+    // Pass channelIds in job so bot does not wait for next heartbeat
+    enqueueBotJob(data, 'status_message_sync', {
+        force: true,
+        channelIds: cfg.statusChannels.slice()
+    });
     await safeSave();
-    res.json({ ok: true, channelIds: cfg.statusChannels });
+    res.json({ ok: true, channelIds: cfg.statusChannels, statusMessages: cfg.statusMessages || {} });
 });
 
 app.get('/api/bot/blacklist-check', checkBotAuth, (req, res) => {
