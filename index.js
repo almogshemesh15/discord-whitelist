@@ -6185,70 +6185,148 @@ app.delete('/api/blacklist/:id', checkAuth, async (req, res) => {
 
 app.get('/blacklist', checkAuth, (req, res) => {
     if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).send('Owner only');
-    res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+    res.send(`<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Blacklist</title>
 <style>
-body{font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:20px}
-a{color:#38bdf8} .card{background:#1e293b;border-radius:12px;padding:16px;margin:12px 0;max-width:900px}
-input,button{padding:8px 12px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;margin:4px 0}
-button{background:#6366f1;border:none;cursor:pointer;font-weight:600}
-button.danger{background:#e11d48}
-table{width:100%;border-collapse:collapse;font-size:13px}
-td,th{padding:8px;border-bottom:1px solid #334155;text-align:left}
-.muted{color:#94a3b8;font-size:12px}
-</style></head><body>
-<div><a href="/">Dashboard</a> · <a href="/users">Users</a> · <a href="/hub">Hub</a> · <a href="/bot">Bot</a></div>
-<h1>🚫 Blacklist</h1>
-<p class="muted">Blacklisted users: no Hub products UI, cannot purchase, Discord commands blocked, license verify returns denied.</p>
+body{font-family:system-ui,sans-serif;background:#0b0f19;color:#f1f5f9;margin:0;padding:24px;}
+.wrap{max-width:1100px;margin:0 auto;}
+a{color:#38bdf8;text-decoration:none;}
+a:hover{text-decoration:underline;}
+.card{background:#111827;border:1px solid #1e293b;border-radius:10px;padding:20px;margin-bottom:16px;}
+h1{margin:0 0 8px;color:#f87171;font-size:22px;}
+h3{margin:0 0 12px;color:#e2e8f0;font-size:16px;}
+table{width:100%;border-collapse:collapse;font-size:13px;}
+th,td{padding:10px 8px;border-bottom:1px solid #1e293b;text-align:left;vertical-align:top;}
+th{color:#94a3b8;background:#1f2937;}
+label{display:block;font-size:12px;color:#94a3b8;margin:10px 0 4px;}
+input[type=text], input:not([type]){width:100%;padding:10px;background:#1f2937;border:1px solid #374151;border-radius:6px;color:#fff;box-sizing:border-box;}
+button{background:#4f46e5;color:#fff;border:none;padding:10px 16px;border-radius:6px;font-weight:bold;cursor:pointer;}
+button:hover{filter:brightness(1.08);}
+button.danger{background:#e11d48;}
+button.secondary{background:#374151;}
+.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+@media(max-width:700px){.grid2{grid-template-columns:1fr;}}
+.hint{font-size:12px;color:#64748b;margin:8px 0 0;line-height:1.5;}
+code{font-size:12px;color:#94a3b8;}
+.nav a{margin-right:12px;font-size:13px;}
+#msg{margin-top:10px;font-size:13px;color:#10b981;}
+#msg.err{color:#f43f5e;}
+</style></head><body><div class="wrap">
+<div class="row" style="justify-content:space-between;margin-bottom:16px;">
+  <h1>🚫 Blacklist</h1>
+  <div class="nav">
+    <a href="/">Dashboard</a>
+    <a href="/users">Users</a>
+    <a href="/hub">Hub</a>
+    <a href="/bot">Bot</a>
+    <a href="/composer">Composer</a>
+  </div>
+</div>
+<p class="hint" style="margin-top:-8px;margin-bottom:16px;">Blacklisted accounts: Hub shows no products, cannot buy, Discord commands blocked, license verify returns denied.</p>
+
 <div class="card">
   <h3>Add entry</h3>
-  <label>Discord ID</label><input id="dId" placeholder="123..." style="width:100%"/>
-  <label>Discord username/tag (optional)</label><input id="dTag" placeholder="name" style="width:100%"/>
-  <label>Roblox ID</label><input id="rId" placeholder="456..." style="width:100%"/>
-  <label>Roblox username (optional)</label><input id="rName" placeholder="name" style="width:100%"/>
-  <label>Note</label><input id="note" placeholder="reason" style="width:100%"/>
-  <button type="button" id="btnAdd">Add to blacklist</button>
-  <div id="msg" class="muted"></div>
+  <div class="grid2">
+    <div>
+      <label>Discord ID</label>
+      <input type="text" id="dId" placeholder="123456789012345678"/>
+    </div>
+    <div>
+      <label>Discord username / tag (optional)</label>
+      <input type="text" id="dTag" placeholder="username"/>
+    </div>
+    <div>
+      <label>Roblox ID</label>
+      <input type="text" id="rId" placeholder="123456789"/>
+    </div>
+    <div>
+      <label>Roblox username (optional)</label>
+      <input type="text" id="rName" placeholder="RobloxName"/>
+    </div>
+  </div>
+  <label>Note (optional)</label>
+  <input type="text" id="note" placeholder="Reason…"/>
+  <div class="row" style="margin-top:14px;">
+    <button type="button" id="btnAdd">Add to blacklist</button>
+    <span id="msg"></span>
+  </div>
 </div>
+
 <div class="card">
-  <h3>Entries</h3>
-  <table><thead><tr><th>Discord</th><th>Roblox</th><th>Note</th><th></th></tr></thead>
-  <tbody id="tbody"></tbody></table>
+  <div class="row" style="justify-content:space-between;margin-bottom:8px;">
+    <h3 style="margin:0;">Entries</h3>
+    <button type="button" class="secondary" id="btnRefresh">Refresh</button>
+  </div>
+  <table>
+    <thead><tr><th>Discord</th><th>Roblox</th><th>Note</th><th style="width:100px;"></th></tr></thead>
+    <tbody id="tbody"><tr><td colspan="4" class="hint">Loading…</td></tr></tbody>
+  </table>
 </div>
 <script>
 async function load(){
-  const r = await fetch('/api/blacklist');
-  const j = await r.json();
   const tb = document.getElementById('tbody');
-  tb.innerHTML = (j.blacklist||[]).map(e => '<tr>'+
-    '<td>'+(e.discordTag||'—')+'<br/><code>'+(e.discordId||'')+'</code></td>'+
-    '<td>'+(e.robloxName||'—')+'<br/><code>'+(e.robloxId||'')+'</code></td>'+
-    '<td>'+(e.note||'')+'</td>'+
-    '<td><button class="danger" data-id="'+e.id+'">Remove</button></td></tr>').join('') || '<tr><td colspan="4">Empty</td></tr>';
-  tb.querySelectorAll('button[data-id]').forEach(b => b.onclick = async () => {
-    await fetch('/api/blacklist/'+b.getAttribute('data-id'),{method:'DELETE'});
-    load();
-  });
+  try {
+    const r = await fetch('/api/blacklist');
+    const j = await r.json();
+    const list = j.blacklist || [];
+    if (!list.length) {
+      tb.innerHTML = '<tr><td colspan="4" style="color:#64748b;">No entries yet.</td></tr>';
+      return;
+    }
+    tb.innerHTML = list.map(e => '<tr>'+
+      '<td><div>'+(e.discordTag ? String(e.discordTag).replace(/</g,'&lt;') : '—')+'</div><code>'+(e.discordId||'')+'</code></td>'+
+      '<td><div>'+(e.robloxName ? String(e.robloxName).replace(/</g,'&lt;') : '—')+'</div><code>'+(e.robloxId||'')+'</code></td>'+
+      '<td>'+(e.note ? String(e.note).replace(/</g,'&lt;') : '—')+'</td>'+
+      '<td><button type="button" class="danger" data-id="'+e.id+'">Remove</button></td></tr>').join('');
+    tb.querySelectorAll('button[data-id]').forEach(b => {
+      b.onclick = async () => {
+        if (!confirm('Remove from blacklist?')) return;
+        await fetch('/api/blacklist/'+encodeURIComponent(b.getAttribute('data-id')), { method: 'DELETE' });
+        load();
+      };
+    });
+  } catch (e) {
+    tb.innerHTML = '<tr><td colspan="4" style="color:#f43f5e;">Failed to load</td></tr>';
+  }
 }
+document.getElementById('btnRefresh').onclick = load;
 document.getElementById('btnAdd').onclick = async () => {
   const msg = document.getElementById('msg');
+  msg.className = '';
+  msg.textContent = 'Saving…';
   try {
-    const r = await fetch('/api/blacklist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-      discordId: document.getElementById('dId').value,
-      discordTag: document.getElementById('dTag').value,
-      robloxId: document.getElementById('rId').value,
-      robloxName: document.getElementById('rName').value,
-      note: document.getElementById('note').value
-    })});
+    const r = await fetch('/api/blacklist', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        discordId: document.getElementById('dId').value,
+        discordTag: document.getElementById('dTag').value,
+        robloxId: document.getElementById('rId').value,
+        robloxName: document.getElementById('rName').value,
+        note: document.getElementById('note').value
+      })
+    });
     const j = await r.json();
-    if (!r.ok) throw new Error(j.error||'failed');
+    if (!r.ok) throw new Error(j.error || 'failed');
     msg.textContent = 'Added';
-    document.getElementById('dId').value=''; document.getElementById('rId').value='';
+    document.getElementById('dId').value = '';
+    document.getElementById('dTag').value = '';
+    document.getElementById('rId').value = '';
+    document.getElementById('rName').value = '';
+    document.getElementById('note').value = '';
     load();
-  } catch(e){ msg.textContent = e.message||e; }
+  } catch (e) {
+    msg.className = 'err';
+    msg.textContent = e.message || e;
+  }
 };
 load();
-</script></body></html>`);
+</script>
+</div></body></html>`);
 });
+
 
 app.listen(PORT, () => {});
