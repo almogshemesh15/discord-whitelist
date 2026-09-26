@@ -1812,6 +1812,7 @@ app.get('/', checkAuth, (req, res) => {
                     <span style="font-size:12px;color:#94a3b8;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${req.session.userEmail}">${req.session.userEmail}</span>
                     ${isOwner ? `<button type="button" id="maint-btn" class="hdr-btn ${maintenanceOn ? 'btn-maint-on' : 'btn-maint-off'}" onclick="toggleMaintenance()">${maintenanceOn ? '🛠️ ' + tr('maintenanceOn') : '🛠️ ' + tr('maintenance')}</button>` : ''}
                     <a href="/blacklist" class="btn-obfuscate-page" style="background:#9f1239;border-color:#be123c;">🚫 Blacklist</a>
+                    <a href="/inbox" class="btn-obfuscate-page" style="background:#0e7490;border-color:#0891b2;">💬 DM Inbox</a>
                     <a href="/bot" class="btn-obfuscate-page" style="background:#6366f1;border-color:#4f46e5;">🤖 Bot</a>
                     <a href="/users" class="btn-obfuscate-page" style="background:#14b8a6;border-color:#0d9488;">👤 Users</a>
                     <a href="/hub" class="btn-obfuscate-page" style="background:#ec4899;border-color:#db2777;">🛒 Hub</a>
@@ -6116,29 +6117,33 @@ app.post('/api/blacklist', checkAuth, async (req, res) => {
     if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
     const data = db.getData();
     ensureBlacklist(data);
-    const discordId = String(req.body.discordId || '').replace(/\D/g, '') || null;
-    const robloxId = String(req.body.robloxId || '').replace(/\D/g, '') || null;
+    let discordId = String(req.body.discordId || '').replace(/\D/g, '') || null;
+    let robloxId = String(req.body.robloxId || '').replace(/\D/g, '') || null;
     let discordTag = String(req.body.discordTag || '').trim() || null;
-    let robloxName = String(req.body.robloxName || '').trim() || null;
+    let robloxName = String(req.body.robloxName || req.body.robloxUsername || '').trim() || null;
     const note = String(req.body.note || '').trim().slice(0, 200) || null;
-    // Resolve names from links if only id given
-    if (discordId && !robloxId) {
-        const link = (data.discordLinks || []).find(l => String(l.discordId) === discordId);
-        if (link) {
-            if (!robloxId && link.robloxId) { /* keep */ }
-            if (!robloxName && link.robloxName) robloxName = link.robloxName;
-            if (!discordTag && link.discordTag) discordTag = link.discordTag;
-            if (link.robloxId) {
-                // store both if linked
-            }
+
+    // Resolve Roblox username → id
+    if (robloxName && !robloxId) {
+        try {
+            const r = await axios.post('https://users.roblox.com/v1/usernames/users', {
+                usernames: [robloxName],
+                excludeBannedUsers: false
+            }, { timeout: 10000 });
+            const u = (r.data && r.data.data && r.data.data[0]) || null;
+            if (!u || !u.id) return res.status(404).json({ error: 'Roblox username not found' });
+            robloxId = String(u.id);
+            robloxName = u.name || robloxName;
+        } catch (e) {
+            return res.status(502).json({ error: 'Roblox lookup failed: ' + (e.message || e) });
         }
     }
-    let resolvedRobloxId = robloxId;
-    let resolvedDiscordId = discordId;
+
+    // Fill from discordLinks
     if (discordId) {
         const link = (data.discordLinks || []).find(l => String(l.discordId) === discordId);
         if (link) {
-            if (!resolvedRobloxId) resolvedRobloxId = String(link.robloxId);
+            if (!robloxId) robloxId = String(link.robloxId);
             if (!robloxName) robloxName = link.robloxName || robloxName;
             if (!discordTag) discordTag = link.discordTag || discordTag;
         }
@@ -6146,25 +6151,26 @@ app.post('/api/blacklist', checkAuth, async (req, res) => {
     if (robloxId) {
         const link = (data.discordLinks || []).find(l => String(l.robloxId) === String(robloxId));
         if (link) {
-            if (!resolvedDiscordId) resolvedDiscordId = String(link.discordId);
+            if (!discordId) discordId = String(link.discordId);
             if (!discordTag) discordTag = link.discordTag || discordTag;
             if (!robloxName) robloxName = link.robloxName || robloxName;
         }
     }
-    if (!resolvedDiscordId && !resolvedRobloxId && !discordTag && !robloxName) {
-        return res.status(400).json({ error: 'Need Discord ID/tag or Roblox ID/name' });
+
+    if (!discordId && !robloxId && !discordTag && !robloxName) {
+        return res.status(400).json({ error: 'Need Discord ID/tag or Roblox ID/username' });
     }
-    // de-dupe
+
     data.blacklist = data.blacklist.filter(e => {
-        if (resolvedDiscordId && e.discordId && String(e.discordId) === resolvedDiscordId) return false;
-        if (resolvedRobloxId && e.robloxId && String(e.robloxId) === resolvedRobloxId) return false;
+        if (discordId && e.discordId && String(e.discordId) === discordId) return false;
+        if (robloxId && e.robloxId && String(e.robloxId) === robloxId) return false;
         return true;
     });
     data.blacklist.push({
         id: newHubId(),
-        discordId: resolvedDiscordId || null,
+        discordId: discordId || null,
         discordTag: discordTag || null,
-        robloxId: resolvedRobloxId || null,
+        robloxId: robloxId || null,
         robloxName: robloxName || null,
         note,
         createdAt: Date.now()
@@ -6187,83 +6193,75 @@ app.get('/blacklist', checkAuth, (req, res) => {
     if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).send('Owner only');
     res.send(`<!DOCTYPE html>
 <html lang="en"><head>
-<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Blacklist</title>
+<meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Blacklist — Whitelist Hub</title>
 <style>
-body{font-family:system-ui,sans-serif;background:#0b0f19;color:#f1f5f9;margin:0;padding:24px;}
-.wrap{max-width:1100px;margin:0 auto;}
-a{color:#38bdf8;text-decoration:none;}
-a:hover{text-decoration:underline;}
-.card{background:#111827;border:1px solid #1e293b;border-radius:10px;padding:20px;margin-bottom:16px;}
-h1{margin:0 0 8px;color:#f87171;font-size:22px;}
-h3{margin:0 0 12px;color:#e2e8f0;font-size:16px;}
-table{width:100%;border-collapse:collapse;font-size:13px;}
-th,td{padding:10px 8px;border-bottom:1px solid #1e293b;text-align:left;vertical-align:top;}
-th{color:#94a3b8;background:#1f2937;}
-label{display:block;font-size:12px;color:#94a3b8;margin:10px 0 4px;}
-input[type=text], input:not([type]){width:100%;padding:10px;background:#1f2937;border:1px solid #374151;border-radius:6px;color:#fff;box-sizing:border-box;}
-button{background:#4f46e5;color:#fff;border:none;padding:10px 16px;border-radius:6px;font-weight:bold;cursor:pointer;}
-button:hover{filter:brightness(1.08);}
-button.danger{background:#e11d48;}
-button.secondary{background:#374151;}
-.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
-@media(max-width:700px){.grid2{grid-template-columns:1fr;}}
-.hint{font-size:12px;color:#64748b;margin:8px 0 0;line-height:1.5;}
-code{font-size:12px;color:#94a3b8;}
-.nav a{margin-right:12px;font-size:13px;}
-#msg{margin-top:10px;font-size:13px;color:#10b981;}
-#msg.err{color:#f43f5e;}
-</style></head><body><div class="wrap">
-<div class="row" style="justify-content:space-between;margin-bottom:16px;">
-  <h1>🚫 Blacklist</h1>
-  <div class="nav">
-    <a href="/">Dashboard</a>
-    <a href="/users">Users</a>
-    <a href="/hub">Hub</a>
-    <a href="/bot">Bot</a>
-    <a href="/composer">Composer</a>
-  </div>
-</div>
-<p class="hint" style="margin-top:-8px;margin-bottom:16px;">Blacklisted accounts: Hub shows no products, cannot buy, Discord commands blocked, license verify returns denied.</p>
-
-<div class="card">
-  <h3>Add entry</h3>
-  <div class="grid2">
-    <div>
-      <label>Discord ID</label>
-      <input type="text" id="dId" placeholder="123456789012345678"/>
-    </div>
-    <div>
-      <label>Discord username / tag (optional)</label>
-      <input type="text" id="dTag" placeholder="username"/>
-    </div>
-    <div>
-      <label>Roblox ID</label>
-      <input type="text" id="rId" placeholder="123456789"/>
-    </div>
-    <div>
-      <label>Roblox username (optional)</label>
-      <input type="text" id="rName" placeholder="RobloxName"/>
+body { font-family: system-ui, sans-serif; background: #0b0f19; color: #f1f5f9; margin: 0; padding: 30px; }
+.container { max-width: 1200px; margin: 0 auto; }
+.header { display: flex; flex-direction: row; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 15px; margin-bottom: 25px; gap: 16px; width: 100%; box-sizing: border-box; }
+.header-left { flex: 1 1 auto; min-width: 0; }
+.header-left h1 { margin: 0; font-size: 22px; }
+.header-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; margin-left: auto; }
+.btn-refresh, .hdr-btn {
+  display: inline-block; padding: 8px 12px; border-radius: 6px; font-size: 12px; font-weight: 600;
+  text-decoration: none; cursor: pointer; border: 1px solid #374151; background: #1f2937; color: #94a3b8;
+}
+.btn-refresh:hover, .hdr-btn:hover { background: #374151; color: #fff; }
+.card { background: #111827; border: 1px solid #1e293b; border-radius: 10px; padding: 20px; margin-bottom: 20px; }
+.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 10px; }
+.card-header h3 { margin: 0; color: #e2e8f0; font-size: 16px; }
+label { display: block; font-size: 12px; color: #94a3b8; margin: 10px 0 4px; }
+input[type=text] { width: 100%; padding: 10px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: #fff; box-sizing: border-box; }
+button.primary { background: #4f46e5; color: #fff; border: none; padding: 10px 16px; border-radius: 6px; font-weight: bold; cursor: pointer; }
+button.danger { background: #e11d48; color: #fff; border: none; padding: 8px 12px; border-radius: 6px; font-weight: bold; cursor: pointer; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 700px) { .grid2 { grid-template-columns: 1fr; } }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { padding: 10px 8px; border-bottom: 1px solid #1e293b; text-align: left; vertical-align: top; }
+th { color: #94a3b8; background: #1f2937; }
+code { font-size: 12px; color: #64748b; }
+.hint { font-size: 12px; color: #64748b; line-height: 1.5; }
+#msg { margin-left: 12px; font-size: 13px; color: #10b981; }
+#msg.err { color: #f43f5e; }
+</style></head><body>
+<div class="container">
+  <div class="header">
+    <div class="header-left"><h1>🚫 Blacklist</h1></div>
+    <div class="header-actions">
+      <a href="/" class="btn-refresh">Dashboard</a>
+      <a href="/users" class="btn-refresh">Users</a>
+      <a href="/hub" class="btn-refresh">Hub</a>
+      <a href="/inbox" class="btn-refresh">DM Inbox</a>
+      <a href="/bot" class="btn-refresh">Bot</a>
+      <a href="/composer" class="btn-refresh">Composer</a>
     </div>
   </div>
-  <label>Note (optional)</label>
-  <input type="text" id="note" placeholder="Reason…"/>
-  <div class="row" style="margin-top:14px;">
-    <button type="button" id="btnAdd">Add to blacklist</button>
-    <span id="msg"></span>
+  <p class="hint" style="margin-top:-10px;margin-bottom:20px;">Blocked users cannot use Hub, purchase, Discord commands, or pass license verify. Add by Roblox username alone — linked Discord/Roblox IDs are filled automatically when known.</p>
+  <div class="card">
+    <div class="card-header"><h3>➕ Add entry</h3></div>
+    <div class="grid2">
+      <div><label>Roblox username (optional — resolves ID)</label><input type="text" id="rName" placeholder="e.g. Builderman"/></div>
+      <div><label>Roblox ID (optional)</label><input type="text" id="rId" placeholder="123456789"/></div>
+      <div><label>Discord ID (optional)</label><input type="text" id="dId" placeholder="123456789012345678"/></div>
+      <div><label>Discord username (optional)</label><input type="text" id="dTag" placeholder="username"/></div>
+    </div>
+    <label>Note</label>
+    <input type="text" id="note" placeholder="Reason…"/>
+    <div style="margin-top:14px;display:flex;align-items:center;">
+      <button type="button" class="primary" id="btnAdd">Add to blacklist</button>
+      <span id="msg"></span>
+    </div>
   </div>
-</div>
-
-<div class="card">
-  <div class="row" style="justify-content:space-between;margin-bottom:8px;">
-    <h3 style="margin:0;">Entries</h3>
-    <button type="button" class="secondary" id="btnRefresh">Refresh</button>
+  <div class="card">
+    <div class="card-header">
+      <h3>📋 Entries</h3>
+      <button type="button" class="btn-refresh" id="btnRefresh">🔄 Refresh</button>
+    </div>
+    <table>
+      <thead><tr><th>Discord</th><th>Roblox</th><th>Note</th><th style="width:90px;"></th></tr></thead>
+      <tbody id="tbody"><tr><td colspan="4" class="hint">Loading…</td></tr></tbody>
+    </table>
   </div>
-  <table>
-    <thead><tr><th>Discord</th><th>Roblox</th><th>Note</th><th style="width:100px;"></th></tr></thead>
-    <tbody id="tbody"><tr><td colspan="4" class="hint">Loading…</td></tr></tbody>
-  </table>
 </div>
 <script>
 async function load(){
@@ -6272,60 +6270,320 @@ async function load(){
     const r = await fetch('/api/blacklist');
     const j = await r.json();
     const list = j.blacklist || [];
-    if (!list.length) {
-      tb.innerHTML = '<tr><td colspan="4" style="color:#64748b;">No entries yet.</td></tr>';
-      return;
-    }
+    if (!list.length) { tb.innerHTML = '<tr><td colspan="4" class="hint">No entries yet.</td></tr>'; return; }
     tb.innerHTML = list.map(e => '<tr>'+
-      '<td><div>'+(e.discordTag ? String(e.discordTag).replace(/</g,'&lt;') : '—')+'</div><code>'+(e.discordId||'')+'</code></td>'+
-      '<td><div>'+(e.robloxName ? String(e.robloxName).replace(/</g,'&lt;') : '—')+'</div><code>'+(e.robloxId||'')+'</code></td>'+
-      '<td>'+(e.note ? String(e.note).replace(/</g,'&lt;') : '—')+'</td>'+
+      '<td><div>'+esc(e.discordTag||'—')+'</div><code>'+esc(e.discordId||'')+'</code></td>'+
+      '<td><div>'+esc(e.robloxName||'—')+'</div><code>'+esc(e.robloxId||'')+'</code></td>'+
+      '<td>'+esc(e.note||'—')+'</td>'+
       '<td><button type="button" class="danger" data-id="'+e.id+'">Remove</button></td></tr>').join('');
-    tb.querySelectorAll('button[data-id]').forEach(b => {
-      b.onclick = async () => {
-        if (!confirm('Remove from blacklist?')) return;
-        await fetch('/api/blacklist/'+encodeURIComponent(b.getAttribute('data-id')), { method: 'DELETE' });
-        load();
-      };
+    tb.querySelectorAll('button[data-id]').forEach(b => b.onclick = async () => {
+      if (!confirm('Remove?')) return;
+      await fetch('/api/blacklist/'+encodeURIComponent(b.getAttribute('data-id')),{method:'DELETE'});
+      load();
     });
-  } catch (e) {
-    tb.innerHTML = '<tr><td colspan="4" style="color:#f43f5e;">Failed to load</td></tr>';
-  }
+  } catch(e){ tb.innerHTML = '<tr><td colspan="4" style="color:#f43f5e">Failed</td></tr>'; }
 }
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
 document.getElementById('btnRefresh').onclick = load;
 document.getElementById('btnAdd').onclick = async () => {
   const msg = document.getElementById('msg');
-  msg.className = '';
-  msg.textContent = 'Saving…';
+  msg.className = ''; msg.textContent = 'Saving…';
   try {
-    const r = await fetch('/api/blacklist', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        discordId: document.getElementById('dId').value,
-        discordTag: document.getElementById('dTag').value,
-        robloxId: document.getElementById('rId').value,
-        robloxName: document.getElementById('rName').value,
-        note: document.getElementById('note').value
-      })
-    });
+    const r = await fetch('/api/blacklist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      discordId: dId.value, discordTag: dTag.value, robloxId: rId.value, robloxName: rName.value, note: note.value
+    })});
     const j = await r.json();
-    if (!r.ok) throw new Error(j.error || 'failed');
-    msg.textContent = 'Added';
-    document.getElementById('dId').value = '';
-    document.getElementById('dTag').value = '';
-    document.getElementById('rId').value = '';
-    document.getElementById('rName').value = '';
-    document.getElementById('note').value = '';
+    if (!r.ok) throw new Error(j.error||'failed');
+    msg.textContent = 'Added' + (j.blacklist && j.blacklist.length ? '' : '');
+    dId.value=dTag.value=rId.value=rName.value=note.value='';
     load();
-  } catch (e) {
-    msg.className = 'err';
-    msg.textContent = e.message || e;
-  }
+  } catch(e){ msg.className='err'; msg.textContent=e.message||e; }
 };
 load();
 </script>
-</div></body></html>`);
+</body></html>`);
+});
+
+/** ---- Bot DM Inbox (live via bot jobs + waiters) ---- */
+const inboxWaiters = new Map();
+function waitInbox(requestId, timeoutMs) {
+    return new Promise((resolve) => {
+        const timer = setTimeout(() => {
+            inboxWaiters.delete(requestId);
+            resolve({ status: 'error', error: 'Timeout — is the bot online?' });
+        }, timeoutMs || 28000);
+        inboxWaiters.set(requestId, (payload) => {
+            clearTimeout(timer);
+            inboxWaiters.delete(requestId);
+            resolve(payload);
+        });
+    });
+}
+
+app.post('/api/bot/inbox-result', checkBotAuth, (req, res) => {
+    const requestId = String(req.body.requestId || '');
+    const waiter = inboxWaiters.get(requestId);
+    if (waiter) {
+        if (req.body.error) waiter({ status: 'error', error: String(req.body.error) });
+        else waiter({ status: 'ok', ...(req.body.data || {}), data: req.body.data });
+    }
+    res.json({ ok: true });
+});
+
+app.post('/api/inbox/list', checkAuth, async (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
+    const data = db.getData();
+    ensureHubStores(data);
+    const requestId = newHubId();
+    enqueueBotJob(data, 'inbox_list', { requestId });
+    await safeSave();
+    const result = await waitInbox(requestId);
+    if (result.status !== 'ok') return res.status(504).json(result);
+    res.json({ ok: true, channels: (result.data && result.data.channels) || result.channels || [] });
+});
+
+app.post('/api/inbox/messages', checkAuth, async (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
+    const userId = String(req.body.userId || '').replace(/\D/g, '');
+    if (!userId) return res.status(400).json({ error: 'userId required' });
+    const data = db.getData();
+    ensureHubStores(data);
+    const requestId = newHubId();
+    enqueueBotJob(data, 'inbox_messages', { requestId, userId, limit: Math.min(50, Number(req.body.limit) || 40) });
+    await safeSave();
+    const result = await waitInbox(requestId);
+    if (result.status !== 'ok') return res.status(504).json(result);
+    res.json({ ok: true, ...(result.data || result) });
+});
+
+app.post('/api/inbox/send', checkAuth, async (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
+    const userId = String(req.body.userId || '').replace(/\D/g, '');
+    if (!userId) return res.status(400).json({ error: 'userId required' });
+    const data = db.getData();
+    ensureHubStores(data);
+    const requestId = newHubId();
+    enqueueBotJob(data, 'inbox_send', {
+        requestId,
+        userId,
+        content: String(req.body.content || '').slice(0, 2000),
+        title: String(req.body.title || '').slice(0, 200),
+        description: String(req.body.description || '').slice(0, 4000),
+        color: req.body.color || null,
+        replyTo: req.body.replyTo ? String(req.body.replyTo) : null
+    });
+    await safeSave();
+    const result = await waitInbox(requestId);
+    if (result.status !== 'ok') return res.status(504).json(result);
+    res.json({ ok: true, ...(result.data || result) });
+});
+
+app.post('/api/inbox/delete', checkAuth, async (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
+    const userId = String(req.body.userId || '').replace(/\D/g, '');
+    const messageId = String(req.body.messageId || '').replace(/\D/g, '');
+    if (!userId || !messageId) return res.status(400).json({ error: 'userId and messageId required' });
+    const data = db.getData();
+    ensureHubStores(data);
+    const requestId = newHubId();
+    enqueueBotJob(data, 'inbox_delete', { requestId, userId, messageId });
+    await safeSave();
+    const result = await waitInbox(requestId);
+    if (result.status !== 'ok') return res.status(504).json(result);
+    res.json({ ok: true });
+});
+
+app.get('/inbox', checkAuth, (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).send('Owner only');
+    res.send(`<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>DM Inbox — Whitelist Hub</title>
+<style>
+body { font-family: system-ui, sans-serif; background: #0b0f19; color: #f1f5f9; margin: 0; padding: 0; height: 100vh; overflow: hidden; }
+.container { max-width: 1200px; margin: 0 auto; height: 100%; display: flex; flex-direction: column; padding: 20px 30px; box-sizing: border-box; }
+.header { display: flex; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 12px; margin-bottom: 12px; gap: 12px; }
+.header h1 { margin: 0; font-size: 20px; flex: 1; }
+.header-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.btn-refresh {
+  display: inline-block; padding: 8px 12px; border-radius: 6px; font-size: 12px; font-weight: 600;
+  text-decoration: none; cursor: pointer; border: 1px solid #374151; background: #1f2937; color: #94a3b8;
+}
+.btn-refresh:hover { background: #374151; color: #fff; }
+.layout { display: grid; grid-template-columns: 280px 1fr; gap: 12px; flex: 1; min-height: 0; }
+@media (max-width: 800px) { .layout { grid-template-columns: 1fr; } }
+.panel { background: #111827; border: 1px solid #1e293b; border-radius: 10px; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.panel-h { padding: 12px 14px; border-bottom: 1px solid #1e293b; font-weight: 600; font-size: 14px; display: flex; gap: 8px; align-items: center; }
+.panel-h input { flex: 1; padding: 8px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: #fff; font-size: 12px; }
+.list { overflow-y: auto; flex: 1; }
+.item { padding: 12px 14px; border-bottom: 1px solid #1e293b; cursor: pointer; }
+.item:hover, .item.active { background: #1e293b; }
+.item .name { font-weight: 600; font-size: 13px; }
+.item .id { font-size: 11px; color: #64748b; }
+.chat { display: flex; flex-direction: column; min-height: 0; }
+.msgs { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+.bubble { max-width: 85%; padding: 10px 12px; border-radius: 10px; font-size: 13px; line-height: 1.45; position: relative; }
+.bubble.them { background: #1f2937; align-self: flex-start; border: 1px solid #374151; }
+.bubble.me { background: #312e81; align-self: flex-end; border: 1px solid #4338ca; }
+.bubble .meta { font-size: 10px; color: #94a3b8; margin-bottom: 4px; }
+.bubble .emb { margin-top: 6px; padding: 8px; border-left: 3px solid #5865f2; background: #0f172a; border-radius: 4px; }
+.bubble .acts { margin-top: 6px; display: flex; gap: 6px; }
+.bubble .acts button { font-size: 11px; padding: 4px 8px; border-radius: 4px; border: none; cursor: pointer; background: #374151; color: #e2e8f0; }
+.bubble .acts button.danger { background: #9f1239; }
+.composer { border-top: 1px solid #1e293b; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.composer input, .composer textarea { width: 100%; box-sizing: border-box; padding: 10px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: #fff; font-family: inherit; font-size: 13px; }
+.composer textarea { min-height: 60px; resize: vertical; }
+.composer .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+button.primary { background: #4f46e5; color: #fff; border: none; padding: 10px 16px; border-radius: 6px; font-weight: bold; cursor: pointer; }
+.reply-bar { font-size: 12px; color: #94a3b8; background: #1e293b; padding: 6px 10px; border-radius: 6px; display: none; }
+.reply-bar.show { display: flex; justify-content: space-between; align-items: center; }
+.empty { color: #64748b; text-align: center; padding: 40px 20px; font-size: 13px; }
+.status { font-size: 12px; color: #64748b; }
+</style></head><body>
+<div class="container">
+  <div class="header">
+    <h1>💬 Bot DM Inbox</h1>
+    <div class="header-actions">
+      <a href="/" class="btn-refresh">Dashboard</a>
+      <a href="/blacklist" class="btn-refresh">Blacklist</a>
+      <a href="/bot" class="btn-refresh">Bot</a>
+      <a href="/composer" class="btn-refresh">Composer</a>
+    </div>
+  </div>
+  <div class="layout">
+    <div class="panel">
+      <div class="panel-h">
+        <input id="openId" placeholder="Open DM by Discord user ID"/>
+        <button type="button" class="btn-refresh" id="btnOpen">Open</button>
+      </div>
+      <div class="panel-h" style="border-bottom:none;padding-top:0;">
+        <button type="button" class="btn-refresh" id="btnList" style="width:100%">🔄 Refresh chats</button>
+      </div>
+      <div class="list" id="list"><div class="empty">Load chats…</div></div>
+    </div>
+    <div class="panel chat">
+      <div class="panel-h"><span id="chatTitle">Select a conversation</span><span class="status" id="chatStatus"></span></div>
+      <div class="msgs" id="msgs"><div class="empty">No conversation selected</div></div>
+      <div class="composer">
+        <div class="reply-bar" id="replyBar"><span id="replyText"></span><button type="button" class="btn-refresh" id="btnCancelReply">Cancel</button></div>
+        <input id="embTitle" placeholder="Embed title (optional)"/>
+        <textarea id="embDesc" placeholder="Message / embed description…"></textarea>
+        <div class="row">
+          <input id="embColor" type="text" placeholder="#5865F2" style="width:110px"/>
+          <button type="button" class="primary" id="btnSend" disabled>Send embed</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+let currentUserId = null;
+let replyTo = null;
+let botId = null;
+function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
+async function post(url, body){
+  const r = await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});
+  const j = await r.json().catch(()=>({}));
+  if (!r.ok) throw new Error(j.error || j.message || ('HTTP '+r.status));
+  return j;
+}
+async function loadList(){
+  const list = document.getElementById('list');
+  list.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    const j = await post('/api/inbox/list', {});
+    const ch = j.channels || [];
+    if (!ch.length) { list.innerHTML = '<div class="empty">No DM channels yet. Open by user ID.</div>'; return; }
+    list.innerHTML = ch.map(c => '<div class="item'+(c.userId===currentUserId?' active':'')+'" data-uid="'+c.userId+'">'+
+      '<div class="name">'+esc(c.tag||c.username||'User')+'</div>'+
+      '<div class="id">'+esc(c.userId)+'</div></div>').join('');
+    list.querySelectorAll('.item').forEach(el => el.onclick = () => openChat(el.getAttribute('data-uid'), el.querySelector('.name').textContent));
+  } catch(e){ list.innerHTML = '<div class="empty" style="color:#f43f5e">'+esc(e.message)+'</div>'; }
+}
+async function openChat(uid, title){
+  currentUserId = uid;
+  replyTo = null;
+  document.getElementById('replyBar').classList.remove('show');
+  document.getElementById('chatTitle').textContent = (title||'User') + ' · ' + uid;
+  document.getElementById('btnSend').disabled = false;
+  document.getElementById('chatStatus').textContent = 'Loading…';
+  document.querySelectorAll('.item').forEach(el => el.classList.toggle('active', el.getAttribute('data-uid')===uid));
+  try {
+    const j = await post('/api/inbox/messages', { userId: uid });
+    botId = j.botId || botId;
+    renderMsgs(j.messages || []);
+    document.getElementById('chatStatus').textContent = (j.messages||[]).length + ' messages';
+  } catch(e){
+    document.getElementById('msgs').innerHTML = '<div class="empty" style="color:#f43f5e">'+esc(e.message)+'</div>';
+    document.getElementById('chatStatus').textContent = '';
+  }
+}
+function renderMsgs(messages){
+  const box = document.getElementById('msgs');
+  if (!messages.length) { box.innerHTML = '<div class="empty">No messages</div>'; return; }
+  box.innerHTML = messages.map(m => {
+    const mine = botId && m.authorId === botId;
+    let body = esc(m.content||'');
+    if (m.embeds && m.embeds.length) {
+      body += m.embeds.map(e => '<div class="emb"><b>'+esc(e.title||'')+'</b><div>'+esc(e.description||'')+'</div></div>').join('');
+    }
+    if (!body) body = '<i style="color:#64748b">(empty)</i>';
+    return '<div class="bubble '+(mine?'me':'them')+'" data-mid="'+m.id+'">'+
+      '<div class="meta">'+esc(m.authorTag||m.authorId)+' · '+esc(m.createdAt||'')+(m.referenceId?' · reply':'')+'</div>'+
+      '<div>'+body+'</div>'+
+      '<div class="acts">'+
+        '<button type="button" data-reply="'+m.id+'">Reply</button>'+
+        (mine ? '<button type="button" class="danger" data-del="'+m.id+'">Delete</button>' : '')+
+      '</div></div>';
+  }).join('');
+  box.scrollTop = box.scrollHeight;
+  box.querySelectorAll('[data-reply]').forEach(b => b.onclick = () => {
+    replyTo = b.getAttribute('data-reply');
+    document.getElementById('replyText').textContent = 'Replying to ' + replyTo;
+    document.getElementById('replyBar').classList.add('show');
+  });
+  box.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
+    if (!confirm('Delete this message?')) return;
+    try {
+      await post('/api/inbox/delete', { userId: currentUserId, messageId: b.getAttribute('data-del') });
+      openChat(currentUserId, document.getElementById('chatTitle').textContent.split(' · ')[0]);
+    } catch(e){ alert(e.message); }
+  });
+}
+document.getElementById('btnCancelReply').onclick = () => {
+  replyTo = null;
+  document.getElementById('replyBar').classList.remove('show');
+};
+document.getElementById('btnList').onclick = loadList;
+document.getElementById('btnOpen').onclick = () => {
+  const id = document.getElementById('openId').value.replace(/\\D/g,'');
+  if (!id) return alert('Enter Discord user ID');
+  openChat(id, 'User');
+};
+document.getElementById('btnSend').onclick = async () => {
+  if (!currentUserId) return;
+  const title = document.getElementById('embTitle').value.trim();
+  const description = document.getElementById('embDesc').value.trim();
+  if (!title && !description) return alert('Write a title or description');
+  document.getElementById('btnSend').disabled = true;
+  try {
+    await post('/api/inbox/send', {
+      userId: currentUserId,
+      title, description,
+      color: document.getElementById('embColor').value.trim() || null,
+      replyTo
+    });
+    document.getElementById('embTitle').value = '';
+    document.getElementById('embDesc').value = '';
+    replyTo = null;
+    document.getElementById('replyBar').classList.remove('show');
+    await openChat(currentUserId, document.getElementById('chatTitle').textContent.split(' · ')[0]);
+  } catch(e){ alert(e.message); }
+  document.getElementById('btnSend').disabled = false;
+};
+loadList();
+</script>
+</body></html>`);
 });
 
 
