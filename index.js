@@ -112,6 +112,7 @@ function ensureHubStores(data) {
     if (!Array.isArray(data.hubProducts)) data.hubProducts = [];
     if (!Array.isArray(data.hubOwnerships)) data.hubOwnerships = [];
     if (!Array.isArray(data.pendingBotJobs)) data.pendingBotJobs = [];
+    if (!data.composerButtonActions || typeof data.composerButtonActions !== 'object') data.composerButtonActions = {};
     // never persist composer message loads
     if (data.composerLoadRequests) delete data.composerLoadRequests;
 }
@@ -131,6 +132,47 @@ function pruneComposerLoadMemory() {
     for (const [k, v] of composerLoadMemory) {
         if (!v || (v.createdAt || 0) < cutoff) composerLoadMemory.delete(k);
     }
+}
+
+
+function parseIdList(v) {
+    if (Array.isArray(v)) return v.map(String).map(s => s.trim()).filter(s => /^\d+$/.test(s));
+    return String(v || '').split(/[,\s]+/).map(s => s.trim()).filter(s => /^\d+$/.test(s));
+}
+function registerComposerButtons(data, buttons) {
+    ensureHubStores(data);
+    if (!data.composerButtonActions || typeof data.composerButtonActions !== 'object') data.composerButtonActions = {};
+    const out = [];
+    for (const b of (buttons || []).slice(0, 25)) {
+        if (!b || !b.label || !b.action || !b.value) continue;
+        const id = newHubId().replace(/[^a-zA-Z0-9]/g, '').slice(0, 12) || String(Date.now());
+        data.composerButtonActions[id] = {
+            action: String(b.action),
+            value: String(b.value).trim(),
+            label: String(b.label).slice(0, 80),
+            style: b.style || 'Primary',
+            logChannelIds: parseIdList(b.logChannelIds),
+            logUserIds: parseIdList(b.logUserIds),
+            logRoleIds: parseIdList(b.logRoleIds),
+            createdAt: Date.now()
+        };
+        out.push({
+            id,
+            label: data.composerButtonActions[id].label,
+            style: data.composerButtonActions[id].style,
+            action: data.composerButtonActions[id].action,
+            value: data.composerButtonActions[id].value,
+            logChannelIds: data.composerButtonActions[id].logChannelIds,
+            logUserIds: data.composerButtonActions[id].logUserIds,
+            logRoleIds: data.composerButtonActions[id].logRoleIds
+        });
+    }
+    // prune old (>30 days)
+    const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    for (const [k, v] of Object.entries(data.composerButtonActions)) {
+        if (v && v.createdAt && v.createdAt < cutoff) delete data.composerButtonActions[k];
+    }
+    return out;
 }
 
 function enqueueBotJob(data, type, payload) {
@@ -5732,6 +5774,11 @@ function renderButtons(){
       '<option value="'+a[0]+'"'+(b.action===a[0]?' selected':'')+'>'+a[1]+'</option>').join('') +
     '</select></div>' +
     '<div><label>Role ID / Product name</label><input data-bf="value" data-i="'+i+'" value="'+(b.value||'').replace(/"/g,'&quot;')+'" placeholder="role id or product name"/></div></div>' +
+    '<label>Log targets (on click) — combine any, comma-separated IDs</label>' +
+    '<div class="row"><div><label>Log channel IDs</label><input data-bf="logChannelIds" data-i="'+i+'" value="'+(b.logChannelIds||'').toString().replace(/"/g,'&quot;')+'" placeholder="111, 222"/></div>' +
+    '<div><label>Log user IDs</label><input data-bf="logUserIds" data-i="'+i+'" value="'+(b.logUserIds||'').toString().replace(/"/g,'&quot;')+'" placeholder="333"/></div></div>' +
+    '<label>Log role IDs (DM everyone with role)</label>' +
+    '<input data-bf="logRoleIds" data-i="'+i+'" value="'+(b.logRoleIds||'').toString().replace(/"/g,'&quot;')+'" placeholder="444, 555"/>' +
     '<button type="button" class="btn danger" data-rm-btn="'+i+'" style="margin-top:8px">Remove</button></div>'
   ).join('');
   box.querySelectorAll('[data-bf]').forEach(el => {
@@ -5750,11 +5797,14 @@ function collectButtons(){
     label: String(b.label).slice(0,80),
     style: b.style || 'Primary',
     action: b.action,
-    value: String(b.value).trim()
+    value: String(b.value).trim(),
+    logChannelIds: b.logChannelIds || '',
+    logUserIds: b.logUserIds || '',
+    logRoleIds: b.logRoleIds || ''
   })).slice(0, 25);
 }
 if ($('btnAddButton')) $('btnAddButton').onclick = () => {
-  buttons.push({ label: 'Button', style: 'Primary', action: 'role_add', value: '' });
+  buttons.push({ label: 'Button', style: 'Primary', action: 'role_add', value: '', logChannelIds: '', logUserIds: '', logRoleIds: '' });
   renderButtons();
 };
 
@@ -5864,7 +5914,10 @@ $('btnLoad').onclick = async () => {
           label: b.label||'Button',
           style: b.style||'Primary',
           action: b.action||'role_add',
-          value: b.value||''
+          value: b.value||'',
+          logChannelIds: (b.logChannelIds||[]).toString?.() || b.logChannelIds || '',
+          logUserIds: (b.logUserIds||[]).toString?.() || b.logUserIds || '',
+          logRoleIds: (b.logRoleIds||[]).toString?.() || b.logRoleIds || ''
         })) : [];
         if (m.channelId && $('channelIds')) $('channelIds').value=m.channelId;
         renderImageList(); renderButtons(); renderPreview();
@@ -5925,6 +5978,14 @@ app.post('/api/bot/verification-status', checkBotAuth, async (req, res) => {
     res.json({ ok: true, verificationStatus: cfg.verificationStatus });
 });
 
+app.get('/api/bot/composer-button/:id', checkBotAuth, (req, res) => {
+    const data = db.getData();
+    ensureHubStores(data);
+    const row = (data.composerButtonActions || {})[req.params.id];
+    if (!row) return res.status(404).json({ error: 'not found' });
+    res.json({ button: row });
+});
+
 app.post('/api/bot/status-messages', checkBotAuth, async (req, res) => {
     const data = db.getData();
     const cfg = ensureBotConfig(data);
@@ -5962,7 +6023,8 @@ app.post('/api/composer/send', checkAuth, async (req, res) => {
         return res.status(400).json({ error: 'Images too large (max ~20MB total uploads)' });
     }
     if (!content && !embeds.length && !images.length) return res.status(400).json({ error: 'Empty message' });
-    const buttons = Array.isArray(req.body.buttons) ? req.body.buttons.slice(0, 25) : [];
+    const buttonsRaw = Array.isArray(req.body.buttons) ? req.body.buttons.slice(0, 25) : [];
+    const buttons = registerComposerButtons(data, buttonsRaw);
     enqueueBotJob(data, 'discord_message_send', {
         channelIds,
         userIds,
@@ -5995,7 +6057,7 @@ app.post('/api/composer/edit', checkAuth, async (req, res) => {
         content: String(req.body.content || ''),
         embeds: Array.isArray(req.body.embeds) ? req.body.embeds : [],
         images: Array.isArray(req.body.images) ? req.body.images.slice(0, 10) : [],
-        buttons: Array.isArray(req.body.buttons) ? req.body.buttons.slice(0, 25) : []
+        buttons: registerComposerButtons(data, Array.isArray(req.body.buttons) ? req.body.buttons.slice(0, 25) : [])
     });
     await safeSave();
     res.json({ ok: true, channelId, messageId });
