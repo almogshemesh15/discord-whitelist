@@ -68,6 +68,8 @@ let botRuntime = {
     version: null
 };
 
+
+
 const DEFAULT_BOT_COMMANDS = [
     { id: 'wl-link', name: 'link', description: 'Link Discord to Roblox with an in-game code', enabled: true, roleIds: ['ALL'] },
     { id: 'wl-switchaccount', name: 'switchaccount', description: 'Switch linked Roblox or Discord account', enabled: true, roleIds: ['ALL'] },
@@ -75,8 +77,7 @@ const DEFAULT_BOT_COMMANDS = [
     { id: 'wl-hub', name: 'hub', description: 'Show Hub store products and game link', enabled: true, roleIds: ['ALL'] },
     { id: 'wl-retrieve', name: 'retrieve', description: 'DM your product delivery (files/links/text)', enabled: true, roleIds: ['ALL'] },
     { id: 'wl-sendproduct', name: 'sendproduct', description: 'DM product delivery to another Discord user', enabled: true, roleIds: [] },
-    { id: 'wl-delete', name: 'delete', description: 'Delete bot DMs or channel messages', enabled: true, roleIds: [] },
-    { id: 'wl-verificationstatus', name: 'verificationstatus', description: 'Toggle auto role verification loop (True/False)', enabled: true, roleIds: [] }
+    { id: 'wl-delete', name: 'delete', description: 'Delete bot DMs or channel messages', enabled: true, roleIds: [] }
 ];
 
 
@@ -301,7 +302,7 @@ function ensureBotConfig(data) {
     if (typeof data.botConfig.robloxGameUrl !== 'string') data.botConfig.robloxGameUrl = data.botConfig.robloxGameUrl || '';
     if (!Array.isArray(data.botConfig.commands)) data.botConfig.commands = [];
     if (!data.botConfig.verificationStatus || typeof data.botConfig.verificationStatus !== 'object') {
-        data.botConfig.verificationStatus = { enabled: false, role1: '', role2: '', intervalSec: 20 };
+        data.botConfig.verificationStatus = { enabled: false, role1: '', role2: '', intervalSec: 5 };
     }
     if (!Array.isArray(data.botConfig.statusChannels)) data.botConfig.statusChannels = [];
     if (!data.botConfig.statusMessages || typeof data.botConfig.statusMessages !== 'object') data.botConfig.statusMessages = {};
@@ -320,7 +321,7 @@ function ensureBotConfig(data) {
             roleIds
         };
     });
-    data.botConfig.commands = merged;
+    data.botConfig.commands = merged.filter(c => c && c.id !== 'wl-verificationstatus' && c.name !== 'verificationstatus');
     return data.botConfig;
 }
 
@@ -353,7 +354,8 @@ function getBotDashboardStatus() {
         secretConfigured: !!BOT_API_SECRET,
         botEnabled: !!cfg.enabled,
         commands: cfg.commands,
-        configUpdatedAt: cfg.updatedAt || null
+        configUpdatedAt: cfg.updatedAt || null,
+        verificationStatus: cfg.verificationStatus || { enabled: false, role1: '', role2: '', intervalSec: 5 }
     };
 }
 
@@ -3706,6 +3708,14 @@ app.post('/api/bot/config', checkAuth, async (req, res) => {
     if (body.robloxGameUrl != null) {
         cfg.robloxGameUrl = String(body.robloxGameUrl).trim().slice(0, 300);
     }
+    if (body.verificationStatus && typeof body.verificationStatus === 'object') {
+        const vs = body.verificationStatus;
+        if (!cfg.verificationStatus) cfg.verificationStatus = { enabled: false, role1: '', role2: '', intervalSec: 5 };
+        if (vs.enabled != null) cfg.verificationStatus.enabled = !!vs.enabled;
+        if (vs.role1 != null) cfg.verificationStatus.role1 = String(vs.role1).replace(/\D/g, '');
+        if (vs.role2 != null) cfg.verificationStatus.role2 = String(vs.role2).replace(/\D/g, '');
+        cfg.verificationStatus.intervalSec = 5;
+    }
     if (Array.isArray(body.commands)) {
         const byId = {};
         body.commands.forEach(c => { if (c && c.id) byId[c.id] = c; });
@@ -3778,7 +3788,18 @@ button.secondary{background:#374151;}
   <div style="margin-top:14px;">
     <label style="font-size:13px;color:#94a3b8;">Roblox game URL (for /link button)</label>
     <input id="roblox-url" type="text" value="${(cfg.robloxGameUrl || '').replace(/"/g, '&quot;')}" placeholder="https://www.roblox.com/games/..." style="margin-top:6px;"/>
-
+  <div style="margin-top:18px;padding-top:14px;border-top:1px solid #1e293b;">
+    <h3 style="margin:0 0 8px;color:#a78bfa;">Role verification loop</h3>
+    <p class="hint">Every 5 seconds: has <b>Role 1</b> → remove Role 2; missing Role 1 → add Role 2. Requires Server Members Intent.</p>
+    <div id="verif-live" style="margin:8px 0;font-weight:bold;">Status: —</div>
+    <label style="display:flex;align-items:center;gap:8px;margin:10px 0;">
+      <input type="checkbox" id="verif-enabled" ${(cfg.verificationStatus && cfg.verificationStatus.enabled) ? 'checked' : ''}/> Loop enabled
+    </label>
+    <label style="font-size:13px;color:#94a3b8;">Role 1 ID (verified)</label>
+    <input id="verif-role1" type="text" value="${((cfg.verificationStatus && cfg.verificationStatus.role1) || '').replace(/"/g, '&quot;')}" placeholder="1234567890" style="margin-top:4px;margin-bottom:10px;"/>
+    <label style="font-size:13px;color:#94a3b8;">Role 2 ID (unverified)</label>
+    <input id="verif-role2" type="text" value="${((cfg.verificationStatus && cfg.verificationStatus.role2) || '').replace(/"/g, '&quot;')}" placeholder="1234567890" style="margin-top:4px;"/>
+  </div>
   </div>
 </div>
 <div class="card">
@@ -3799,6 +3820,13 @@ async function refreshLive(){
     const on = s.online ? '<span class="badge-on">● ONLINE</span>' : '<span class="badge-off">● OFFLINE</span>';
     el.innerHTML = on + (s.tag ? (' · ' + s.tag) : '') + (s.pingMs != null ? (' · ' + s.pingMs + 'ms') : '') +
       (s.lastSeenAgoSec != null ? (' · heartbeat ' + s.lastSeenAgoSec + 's ago') : '');
+    const vl = document.getElementById('verif-live');
+    if (vl && s.verificationStatus) {
+      const v = s.verificationStatus;
+      vl.innerHTML = v.enabled
+        ? '<span class="badge-on">● RUNNING</span> · every 5s · role1 <code>' + (v.role1||'—') + '</code> · role2 <code>' + (v.role2||'—') + '</code>'
+        : '<span class="badge-off">● STOPPED</span>';
+    }
   }catch(e){}
 }
 async function saveAll(){
@@ -3812,7 +3840,13 @@ async function saveAll(){
   const body = {
     enabled: document.getElementById('bot-enabled').checked,
     robloxGameUrl: (document.getElementById('roblox-url') || {}).value || '',
-    commands
+    commands,
+    verificationStatus: {
+      enabled: !!(document.getElementById('verif-enabled') || {}).checked,
+      role1: (document.getElementById('verif-role1') || {}).value || '',
+      role2: (document.getElementById('verif-role2') || {}).value || '',
+      intervalSec: 5
+    }
   };
   const r = await fetch('/api/bot/config', {
     method: 'POST',
@@ -5884,7 +5918,7 @@ app.post('/api/bot/verification-status', checkBotAuth, async (req, res) => {
     if (req.body.enabled != null) cfg.verificationStatus.enabled = !!req.body.enabled;
     if (req.body.role1 != null) cfg.verificationStatus.role1 = String(req.body.role1).replace(/\D/g, '');
     if (req.body.role2 != null) cfg.verificationStatus.role2 = String(req.body.role2).replace(/\D/g, '');
-    if (req.body.intervalSec != null) cfg.verificationStatus.intervalSec = Math.max(10, Number(req.body.intervalSec) || 20);
+    if (req.body.intervalSec != null) cfg.verificationStatus.intervalSec = 5;
     cfg.updatedAt = Date.now();
     data.botConfig = cfg;
     await safeSave();
