@@ -6339,7 +6339,22 @@ app.post('/api/inbox/list', checkAuth, async (req, res) => {
     await safeSave();
     const result = await waitInbox(requestId);
     if (result.status !== 'ok') return res.status(504).json(result);
-    res.json({ ok: true, channels: (result.data && result.data.channels) || result.channels || [] });
+    const fromBot = (result.data && result.data.channels) || result.channels || [];
+    const seen = new Set(fromBot.map(c => String(c.userId)));
+    // Also show linked Hub users so the list is never empty
+    for (const l of (data.discordLinks || [])) {
+        const uid = String(l.discordId || '');
+        if (!uid || seen.has(uid)) continue;
+        seen.add(uid);
+        fromBot.push({
+            userId: uid,
+            tag: l.discordTag || uid,
+            username: l.discordTag || uid,
+            robloxName: l.robloxName || null,
+            robloxId: l.robloxId || null
+        });
+    }
+    res.json({ ok: true, channels: fromBot });
 });
 
 app.post('/api/inbox/messages', checkAuth, async (req, res) => {
@@ -6363,14 +6378,18 @@ app.post('/api/inbox/send', checkAuth, async (req, res) => {
     const data = db.getData();
     ensureHubStores(data);
     const requestId = newHubId();
+    const files = Array.isArray(req.body.files) ? req.body.files.slice(0, 8).map(f => ({
+        name: String(f.name || 'file.bin').slice(0, 80),
+        contentBase64: String(f.contentBase64 || '').slice(0, 12 * 1024 * 1024)
+    })).filter(f => f.contentBase64) : [];
     enqueueBotJob(data, 'inbox_send', {
         requestId,
         userId,
-        content: String(req.body.content || '').slice(0, 2000),
         title: String(req.body.title || '').slice(0, 200),
         description: String(req.body.description || '').slice(0, 4000),
         color: req.body.color || null,
-        replyTo: req.body.replyTo ? String(req.body.replyTo) : null
+        replyTo: req.body.replyTo ? String(req.body.replyTo) : null,
+        files
     });
     await safeSave();
     const result = await waitInbox(requestId);
@@ -6421,225 +6440,203 @@ app.get('/inbox', checkAuth, (req, res) => {
     res.send(`<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>DM Inbox</title>
+<title>DM Inbox — Whitelist Hub</title>
 <style>
-:root {
-  --bg: #313338; --bg2: #2b2d31; --bg3: #1e1f22; --bg4: #232428;
-  --text: #dbdee1; --muted: #949ba4; --link: #00a8fc; --accent: #5865f2;
-  --green: #23a559; --danger: #da373c; --me: #5865f2;
+body { font-family: system-ui, sans-serif; background: #0b0f19; color: #f1f5f9; margin: 0; padding: 20px 30px; height: 100vh; box-sizing: border-box; display: flex; flex-direction: column; }
+.header { display: flex; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 12px; margin-bottom: 12px; gap: 12px; }
+.header h1 { margin: 0; font-size: 20px; flex: 1; color: #67e8f9; }
+.header-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.btn-refresh {
+  display: inline-block; padding: 8px 12px; border-radius: 6px; font-size: 12px; font-weight: 600;
+  text-decoration: none; cursor: pointer; border: 1px solid #374151; background: #1f2937; color: #94a3b8;
 }
-* { box-sizing: border-box; }
-body { margin: 0; font-family: "gg sans","Segoe UI",system-ui,sans-serif; background: var(--bg3); color: var(--text); height: 100vh; overflow: hidden; }
-.app { display: grid; grid-template-columns: 72px 240px 1fr; height: 100vh; }
-.rail { background: var(--bg3); display: flex; flex-direction: column; align-items: center; padding: 12px 0; gap: 8px; }
-.rail a { width: 48px; height: 48px; border-radius: 50%; background: var(--bg2); color: var(--text); display: flex; align-items: center; justify-content: center; text-decoration: none; font-size: 18px; transition: border-radius .15s, background .15s; }
-.rail a:hover, .rail a.on { border-radius: 16px; background: var(--accent); }
-.sidebar { background: var(--bg2); display: flex; flex-direction: column; border-right: 1px solid #1a1b1e; }
-.side-head { padding: 12px; font-weight: 700; font-size: 16px; box-shadow: 0 1px 0 rgba(0,0,0,.2); }
-.side-search { padding: 8px 12px; display: flex; gap: 6px; }
-.side-search input { flex: 1; background: var(--bg3); border: none; border-radius: 4px; padding: 8px; color: var(--text); font-size: 13px; }
-.side-search button { background: var(--accent); border: none; color: #fff; border-radius: 4px; padding: 0 10px; cursor: pointer; font-weight: 600; font-size: 12px; }
-.conv-list { overflow-y: auto; flex: 1; }
-.conv { display: flex; gap: 10px; align-items: center; padding: 8px 12px; margin: 1px 8px; border-radius: 8px; cursor: pointer; }
-.conv:hover, .conv.active { background: #35373c; }
-.av { width: 32px; height: 32px; border-radius: 50%; background: var(--accent); display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; flex-shrink: 0; object-fit: cover; }
-.conv .meta .n { font-size: 14px; font-weight: 500; }
-.conv .meta .s { font-size: 11px; color: var(--muted); }
-.main { background: var(--bg); display: flex; flex-direction: column; min-width: 0; }
-.top { height: 48px; padding: 0 16px; display: flex; align-items: center; gap: 10px; box-shadow: 0 1px 0 rgba(0,0,0,.2); font-weight: 600; }
-.top .sub { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px; }
-.messages { flex: 1; overflow-y: auto; padding: 16px 0; }
-.msg { display: grid; grid-template-columns: 40px 1fr; gap: 12px; padding: 4px 16px; position: relative; }
-.msg:hover { background: rgba(0,0,0,.06); }
-.msg .av { width: 40px; height: 40px; margin-top: 2px; }
-.msg .head { font-size: 14px; }
-.msg .head .name { font-weight: 600; color: #fff; margin-right: 8px; }
-.msg .head .time { font-size: 11px; color: var(--muted); }
-.msg .body { font-size: 15px; line-height: 1.375; white-space: pre-wrap; word-break: break-word; color: var(--text); }
-.msg .body a { color: var(--link); }
-.embed { margin-top: 6px; max-width: 520px; border-left: 4px solid var(--accent); background: #2b2d31; border-radius: 4px; padding: 8px 12px 10px; }
-.embed .et { font-weight: 600; color: #fff; margin-bottom: 4px; }
-.embed .ed { color: var(--text); font-size: 14px; white-space: pre-wrap; }
-.embed img.thumb { max-width: 100%; max-height: 300px; border-radius: 4px; margin-top: 8px; }
-.atts { margin-top: 6px; display: flex; flex-direction: column; gap: 6px; }
-.att { display: flex; align-items: center; gap: 10px; background: #2b2d31; border: 1px solid #1e1f22; border-radius: 8px; padding: 8px 10px; max-width: 420px; }
-.att img { max-width: 400px; max-height: 300px; border-radius: 4px; }
-.att a { color: var(--link); font-size: 13px; text-decoration: none; }
-.att a:hover { text-decoration: underline; }
-.msg .actions { display: none; position: absolute; right: 16px; top: -12px; background: var(--bg2); border: 1px solid #1e1f22; border-radius: 4px; overflow: hidden; }
-.msg:hover .actions { display: flex; }
-.msg .actions button { background: transparent; border: none; color: var(--muted); padding: 6px 10px; cursor: pointer; font-size: 12px; }
-.msg .actions button:hover { background: #35373c; color: #fff; }
-.msg .actions button.danger:hover { color: var(--danger); }
-.composer { padding: 0 16px 24px; }
-.reply-bar { display: none; background: var(--bg2); border-radius: 8px 8px 0 0; padding: 8px 12px; font-size: 12px; color: var(--muted); justify-content: space-between; align-items: center; }
-.reply-bar.on { display: flex; }
-.box { background: #383a40; border-radius: 8px; padding: 10px 12px; }
-.box.replying { border-radius: 0 0 8px 8px; }
-.box input, .box textarea { width: 100%; background: transparent; border: none; color: var(--text); font-family: inherit; font-size: 14px; outline: none; resize: none; }
-.box textarea { min-height: 44px; max-height: 160px; }
-.box .tools { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; align-items: center; }
-.box .tools input[type=text] { width: auto; flex: 1; min-width: 80px; background: var(--bg3); border-radius: 4px; padding: 6px 8px; font-size: 12px; }
-.box .tools button { background: var(--accent); color: #fff; border: none; border-radius: 4px; padding: 8px 14px; font-weight: 600; cursor: pointer; font-size: 13px; }
-.box .tools button.sec { background: #4e5058; }
-.empty { color: var(--muted); text-align: center; padding: 48px 16px; font-size: 14px; }
-.edited { font-size: 10px; color: var(--muted); margin-left: 4px; }
-@media (max-width: 900px) {
-  .app { grid-template-columns: 0 200px 1fr; }
-  .rail { display: none; }
-}
+.btn-refresh:hover { background: #374151; color: #fff; }
+.layout { display: grid; grid-template-columns: 300px 1fr; gap: 12px; flex: 1; min-height: 0; }
+@media (max-width: 800px) { .layout { grid-template-columns: 1fr; } }
+.panel { background: #111827; border: 1px solid #1e293b; border-radius: 10px; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.panel-h { padding: 12px 14px; border-bottom: 1px solid #1e293b; font-weight: 600; font-size: 14px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.panel-h input { flex: 1; min-width: 100px; padding: 8px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: #fff; font-size: 12px; }
+.list { overflow-y: auto; flex: 1; }
+.item { padding: 12px 14px; border-bottom: 1px solid #1e293b; cursor: pointer; }
+.item:hover, .item.active { background: #1e293b; }
+.item .name { font-weight: 600; font-size: 13px; }
+.item .id { font-size: 11px; color: #64748b; }
+.chat { display: flex; flex-direction: column; min-height: 0; }
+.msgs { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.bubble { max-width: 88%; padding: 10px 12px; border-radius: 10px; font-size: 13px; line-height: 1.45; position: relative; }
+.bubble.them { background: #1f2937; align-self: flex-start; border: 1px solid #374151; }
+.bubble.me { background: #312e81; align-self: flex-end; border: 1px solid #4338ca; }
+.bubble .meta { font-size: 10px; color: #94a3b8; margin-bottom: 4px; }
+.bubble .emb { margin-top: 6px; padding: 8px; border-left: 3px solid #5865f2; background: #0f172a; border-radius: 4px; }
+.bubble .emb img { max-width: 100%; max-height: 280px; border-radius: 4px; margin-top: 6px; }
+.bubble .att { margin-top: 6px; padding: 8px; background: #0f172a; border-radius: 6px; border: 1px solid #334155; }
+.bubble .att a { color: #38bdf8; }
+.bubble .att img { max-width: 100%; max-height: 280px; border-radius: 4px; }
+.bubble .acts { margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap; }
+.bubble .acts button { font-size: 11px; padding: 4px 8px; border-radius: 4px; border: none; cursor: pointer; background: #374151; color: #e2e8f0; }
+.bubble .acts button.danger { background: #9f1239; }
+.composer { border-top: 1px solid #1e293b; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.composer input, .composer textarea { width: 100%; box-sizing: border-box; padding: 10px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: #fff; font-family: inherit; font-size: 13px; }
+.composer textarea { min-height: 64px; resize: vertical; }
+.composer .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+button.primary { background: #4f46e5; color: #fff; border: none; padding: 10px 16px; border-radius: 6px; font-weight: bold; cursor: pointer; }
+button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.reply-bar { font-size: 12px; color: #94a3b8; background: #1e293b; padding: 6px 10px; border-radius: 6px; display: none; justify-content: space-between; align-items: center; }
+.reply-bar.show { display: flex; }
+.empty { color: #64748b; text-align: center; padding: 40px 20px; font-size: 13px; }
+.status { font-size: 12px; color: #64748b; margin-left: auto; }
+.file-chips { display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px; color: #94a3b8; }
+.file-chips span { background: #1e293b; padding: 4px 8px; border-radius: 4px; }
 </style></head><body>
-<div class="app">
-  <div class="rail">
-    <a href="/" title="Dashboard">🛡</a>
-    <a href="/inbox" class="on" title="DM Inbox">💬</a>
-    <a href="/blacklist" title="Blacklist">🚫</a>
-    <a href="/bot" title="Bot">🤖</a>
-    <a href="/composer" title="Composer">📝</a>
-    <a href="/hub" title="Hub">🛒</a>
-  </div>
-  <div class="sidebar">
-    <div class="side-head">Direct Messages</div>
-    <div class="side-search">
-      <input id="openId" placeholder="User ID…"/>
-      <button type="button" id="btnOpen">Open</button>
+  <div class="header">
+    <h1>💬 Bot DM Inbox</h1>
+    <div class="header-actions">
+      <a href="/" class="btn-refresh">Dashboard</a>
+      <a href="/blacklist" class="btn-refresh">Blacklist</a>
+      <a href="/bot" class="btn-refresh">Bot</a>
+      <a href="/composer" class="btn-refresh">Composer</a>
     </div>
-    <div class="side-search" style="padding-top:0">
-      <button type="button" id="btnList" style="width:100%;background:#4e5058">Refresh</button>
-    </div>
-    <div class="conv-list" id="list"><div class="empty">Loading…</div></div>
   </div>
-  <div class="main">
-    <div class="top"><span id="chatTitle">Select a conversation</span><span class="sub" id="chatStatus"></span></div>
-    <div class="messages" id="msgs"><div class="empty">Open a DM from the left, or paste a Discord user ID.</div></div>
-    <div class="composer">
-      <div class="reply-bar" id="replyBar"><span id="replyText"></span><button type="button" id="btnCancelReply" style="background:transparent;border:none;color:var(--muted);cursor:pointer">✕</button></div>
-      <div class="box" id="composeBox">
-        <input id="embTitle" placeholder="Embed title (optional)"/>
-        <textarea id="embDesc" placeholder="Message @ Discord… (description or plain text)"></textarea>
-        <div class="tools">
-          <input type="text" id="embColor" placeholder="#5865F2" style="max-width:100px"/>
-          <label style="font-size:11px;color:var(--muted);display:flex;gap:4px;align-items:center"><input type="checkbox" id="asPlain"/> Plain text only</label>
-          <button type="button" class="sec" id="btnEditSave" style="display:none">Save edit</button>
-          <button type="button" id="btnSend" disabled>Send</button>
+  <div class="layout">
+    <div class="panel">
+      <div class="panel-h">
+        <input id="openId" placeholder="Open by Discord user ID"/>
+        <button type="button" class="btn-refresh" id="btnOpen">Open</button>
+      </div>
+      <div class="panel-h" style="border-bottom:none;padding-top:0;">
+        <button type="button" class="btn-refresh" id="btnList" style="width:100%">🔄 Refresh chats</button>
+      </div>
+      <div class="list" id="list"><div class="empty">Loading chats…</div></div>
+    </div>
+    <div class="panel chat">
+      <div class="panel-h"><span id="chatTitle">Select a conversation</span><span class="status" id="chatStatus"></span></div>
+      <div class="msgs" id="msgs"><div class="empty">No conversation selected</div></div>
+      <div class="composer">
+        <div class="reply-bar" id="replyBar"><span id="replyText"></span><button type="button" class="btn-refresh" id="btnCancelReply">Cancel</button></div>
+        <input id="embTitle" placeholder="Embed title"/>
+        <textarea id="embDesc" placeholder="Embed description…"></textarea>
+        <div class="row">
+          <input id="embColor" type="text" placeholder="#5865F2" style="width:110px"/>
+          <input type="file" id="fileInput" multiple accept="*/*" style="font-size:12px;color:#94a3b8"/>
+          <button type="button" class="primary" id="btnEditSave" style="display:none">Save edit</button>
+          <button type="button" class="primary" id="btnSend" disabled>Send embed</button>
         </div>
+        <div class="file-chips" id="fileChips"></div>
       </div>
     </div>
   </div>
-</div>
 <script>
-let currentUserId = null, replyTo = null, editId = null, botId = null, pollTimer = null, currentUser = null;
+let currentUserId = null, replyTo = null, editId = null, botId = null, pollTimer = null, pendingFiles = [];
 function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
-function linkify(t){
-  return esc(t).replace(/(https?:\\/\\/[^\\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
-}
 async function post(url, body){
   const r = await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});
   const j = await r.json().catch(()=>({}));
   if (!r.ok) throw new Error(j.error || j.message || ('HTTP '+r.status));
   return j;
 }
-function letterAv(name){
-  const n = (name||'?').trim();
-  return (n[0]||'?').toUpperCase();
+function readFileAsB64(file){
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => {
+      const s = String(fr.result || '');
+      const i = s.indexOf(',');
+      resolve({ name: file.name, contentBase64: i >= 0 ? s.slice(i+1) : s });
+    };
+    fr.onerror = reject;
+    fr.readAsDataURL(file);
+  });
 }
+document.getElementById('fileInput').onchange = async (e) => {
+  const files = [...(e.target.files || [])];
+  for (const f of files) {
+    if (f.size > 8 * 1024 * 1024) { alert(f.name + ' too large (max 8MB)'); continue; }
+    pendingFiles.push(await readFileAsB64(f));
+  }
+  document.getElementById('fileChips').innerHTML = pendingFiles.map((f,i) =>
+    '<span>'+esc(f.name)+' <a href="#" data-rm="'+i+'" style="color:#f43f5e">×</a></span>').join('');
+  document.getElementById('fileChips').querySelectorAll('[data-rm]').forEach(a => a.onclick = (ev) => {
+    ev.preventDefault();
+    pendingFiles.splice(+a.getAttribute('data-rm'), 1);
+    document.getElementById('fileInput').onchange({ target: { files: [] } });
+    document.getElementById('fileChips').innerHTML = pendingFiles.map((f,i) =>
+      '<span>'+esc(f.name)+' <a href="#" data-rm="'+i+'" style="color:#f43f5e">×</a></span>').join('');
+    document.getElementById('fileChips').querySelectorAll('[data-rm]').forEach(a2 => a2.onclick = arguments.callee.bind(null));
+  });
+  e.target.value = '';
+};
 async function loadList(){
   const list = document.getElementById('list');
   list.innerHTML = '<div class="empty">Loading…</div>';
   try {
     const j = await post('/api/inbox/list', {});
     const ch = j.channels || [];
-    if (!ch.length) { list.innerHTML = '<div class="empty">No open DMs yet.<br/>Open by user ID.</div>'; return; }
-    list.innerHTML = ch.map(c => {
-      const name = c.tag || c.username || 'User';
-      return '<div class="conv'+(c.userId===currentUserId?' active':'')+'" data-uid="'+c.userId+'" data-name="'+esc(name)+'">'+
-        (c.avatar ? '<img class="av" src="'+esc(c.avatar)+'"/>' : '<div class="av">'+letterAv(name)+'</div>')+
-        '<div class="meta"><div class="n">'+esc(name)+'</div><div class="s">'+esc(c.userId)+'</div></div></div>';
-    }).join('');
-    list.querySelectorAll('.conv').forEach(el => el.onclick = () => openChat(el.getAttribute('data-uid'), el.getAttribute('data-name')));
-  } catch(e){ list.innerHTML = '<div class="empty" style="color:#f23f43">'+esc(e.message)+'</div>'; }
+    if (!ch.length) { list.innerHTML = '<div class="empty">No chats yet. Open by user ID or link users in Hub.</div>'; return; }
+    list.innerHTML = ch.map(c => '<div class="item'+(c.userId===currentUserId?' active':'')+'" data-uid="'+c.userId+'">'+
+      '<div class="name">'+esc(c.tag||c.username||'User')+'</div>'+
+      '<div class="id">'+esc(c.userId)+(c.robloxName ? (' · '+esc(c.robloxName)) : '')+'</div></div>').join('');
+    list.querySelectorAll('.item').forEach(el => el.onclick = () => openChat(el.getAttribute('data-uid'), el.querySelector('.name').textContent));
+  } catch(e){ list.innerHTML = '<div class="empty" style="color:#f43f5e">'+esc(e.message)+'</div>'; }
 }
 async function openChat(uid, title, silent){
   currentUserId = uid;
   if (!silent) {
     replyTo = null; editId = null;
-    document.getElementById('replyBar').classList.remove('on');
+    document.getElementById('replyBar').classList.remove('show');
     document.getElementById('btnEditSave').style.display = 'none';
     document.getElementById('btnSend').style.display = '';
   }
-  document.getElementById('chatTitle').textContent = title || 'User';
+  document.getElementById('chatTitle').textContent = (title||'User') + ' · ' + uid;
   document.getElementById('btnSend').disabled = false;
   if (!silent) document.getElementById('chatStatus').textContent = 'Loading…';
-  document.querySelectorAll('.conv').forEach(el => el.classList.toggle('active', el.getAttribute('data-uid')===uid));
+  document.querySelectorAll('.item').forEach(el => el.classList.toggle('active', el.getAttribute('data-uid')===uid));
   try {
     const j = await post('/api/inbox/messages', { userId: uid, limit: 80 });
     botId = j.botId || botId;
-    currentUser = j.user || { id: uid, tag: title };
-    if (j.user && j.user.tag) document.getElementById('chatTitle').textContent = j.user.tag;
+    if (j.user && j.user.tag) document.getElementById('chatTitle').textContent = j.user.tag + ' · ' + uid;
     renderMsgs(j.messages || []);
-    document.getElementById('chatStatus').textContent = (j.messages||[]).length + ' messages';
+    document.getElementById('chatStatus').textContent = (j.messages||[]).length + ' msgs · auto-refresh';
   } catch(e){
     if (!silent) {
-      document.getElementById('msgs').innerHTML = '<div class="empty" style="color:#f23f43">'+esc(e.message)+'</div>';
+      document.getElementById('msgs').innerHTML = '<div class="empty" style="color:#f43f5e">'+esc(e.message)+'</div>';
       document.getElementById('chatStatus').textContent = '';
     }
   }
   if (pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(() => { if (currentUserId) openChat(currentUserId, document.getElementById('chatTitle').textContent, true); }, 8000);
-}
-function renderEmbed(e){
-  const color = e.color != null ? ('#'+Number(e.color).toString(16).padStart(6,'0')) : 'var(--accent)';
-  let h = '<div class="embed" style="border-left-color:'+color+'">';
-  if (e.title) h += '<div class="et">'+esc(e.title)+'</div>';
-  if (e.description) h += '<div class="ed">'+linkify(e.description)+'</div>';
-  if (e.fields && e.fields.length) {
-    h += e.fields.map(f => '<div style="margin-top:6px"><b>'+esc(f.name)+'</b><div>'+linkify(f.value)+'</div></div>').join('');
-  }
-  if (e.image && e.image.url) h += '<img class="thumb" src="'+esc(e.image.url)+'" alt=""/>';
-  else if (e.thumbnail && e.thumbnail.url) h += '<img class="thumb" src="'+esc(e.thumbnail.url)+'" alt="" style="max-height:80px"/>';
-  h += '</div>';
-  return h;
-}
-function renderAtt(a){
-  const isImg = (a.contentType||'').startsWith('image/') || /\\.(png|jpe?g|gif|webp)$/i.test(a.name||'');
-  if (isImg && a.url) {
-    return '<div class="atts"><a href="'+esc(a.url)+'" target="_blank" rel="noopener"><img src="'+esc(a.proxyURL||a.url)+'" alt="'+esc(a.name)+'"/></a></div>';
-  }
-  return '<div class="att"><div style="flex:1"><div style="font-weight:600;font-size:13px">'+esc(a.name||'file')+'</div>'+
-    (a.size ? '<div style="font-size:11px;color:var(--muted)">'+(Math.round(a.size/1024))+' KB</div>' : '')+
-    '</div><a href="'+esc(a.url)+'" target="_blank" rel="noopener" download>Download</a></div>';
+  pollTimer = setInterval(() => { if (currentUserId) openChat(currentUserId, null, true); }, 5000);
 }
 function renderMsgs(messages){
   const box = document.getElementById('msgs');
-  if (!messages.length) { box.innerHTML = '<div class="empty">No messages in this DM yet.</div>'; return; }
+  const prevBottom = box.scrollHeight - box.scrollTop < box.clientHeight + 80;
+  if (!messages.length) { box.innerHTML = '<div class="empty">No messages yet</div>'; return; }
   box.innerHTML = messages.map(m => {
     const mine = botId && m.authorId === botId;
-    const av = m.authorAvatar
-      ? '<img class="av" src="'+esc(m.authorAvatar)+'"/>'
-      : '<div class="av">'+letterAv(m.authorTag)+'</div>';
     let body = '';
-    if (m.content) body += '<div class="body">'+linkify(m.content)+'</div>';
-    if (m.embeds && m.embeds.length) body += m.embeds.map(renderEmbed).join('');
-    if (m.attachments && m.attachments.length) body += '<div class="atts">'+m.attachments.map(renderAtt).join('')+'</div>';
-    if (m.stickers && m.stickers.length) body += m.stickers.map(s => s.url ? '<img src="'+esc(s.url)+'" style="max-height:120px;border-radius:4px;margin-top:6px"/>' : '').join('');
-    if (!body) body = '<div class="body" style="color:var(--muted)">(no content)</div>';
-    const time = m.createdAt ? new Date(m.createdAt).toLocaleString() : '';
-    const acts = '<div class="actions">'+
-      '<button type="button" data-reply="'+m.id+'">Reply</button>'+
-      (mine ? '<button type="button" data-edit="'+m.id+'">Edit</button><button type="button" class="danger" data-del="'+m.id+'">Delete</button>' : '')+
-      '</div>';
-    return '<div class="msg" data-mid="'+m.id+'">'+av+
-      '<div><div class="head"><span class="name">'+esc(m.authorTag||m.authorId)+'</span><span class="time">'+esc(time)+'</span>'+
-      (m.editedAt ? '<span class="edited">(edited)</span>' : '')+
-      (m.referenceId ? '<span class="edited"> · replied</span>' : '')+
-      '</div>'+body+'</div>'+acts+'</div>';
+    if (m.content) body += '<div>'+esc(m.content)+'</div>';
+    (m.embeds||[]).forEach(e => {
+      body += '<div class="emb"><b>'+esc(e.title||'')+'</b><div>'+esc(e.description||'')+'</div>';
+      if (e.image && e.image.url) body += '<img src="'+esc(e.image.url)+'" alt=""/>';
+      body += '</div>';
+    });
+    (m.attachments||[]).forEach(a => {
+      const isImg = (a.contentType||'').startsWith('image/') || /\\.(png|jpe?g|gif|webp)$/i.test(a.name||'');
+      body += '<div class="att">';
+      if (isImg && a.url) body += '<a href="'+esc(a.url)+'" target="_blank"><img src="'+esc(a.proxyURL||a.url)+'" alt="'+esc(a.name)+'"/></a>';
+      else body += '<a href="'+esc(a.url)+'" target="_blank" rel="noopener">'+esc(a.name||'file')+' — Download</a>';
+      body += '</div>';
+    });
+    if (!body) body = '<i style="color:#64748b">(empty)</i>';
+    return '<div class="bubble '+(mine?'me':'them')+'">'+
+      '<div class="meta">'+esc(m.authorTag||m.authorId)+' · '+esc(m.createdAt ? new Date(m.createdAt).toLocaleString() : '')+(m.editedAt?' · edited':'')+'</div>'+
+      body+
+      '<div class="acts"><button type="button" data-reply="'+m.id+'">Reply</button>'+
+      (mine?'<button type="button" data-edit="'+m.id+'">Edit</button><button type="button" class="danger" data-del="'+m.id+'">Delete</button>':'')+
+      '</div></div>';
   }).join('');
-  box.scrollTop = box.scrollHeight;
+  if (!arguments[1] && prevBottom) box.scrollTop = box.scrollHeight;
   box.querySelectorAll('[data-reply]').forEach(b => b.onclick = () => {
     replyTo = b.getAttribute('data-reply'); editId = null;
-    document.getElementById('replyText').textContent = 'Replying to message '+replyTo;
-    document.getElementById('replyBar').classList.add('on');
-    document.getElementById('composeBox').classList.add('replying');
+    document.getElementById('replyText').textContent = 'Replying to '+replyTo;
+    document.getElementById('replyBar').classList.add('show');
     document.getElementById('btnEditSave').style.display = 'none';
     document.getElementById('btnSend').style.display = '';
   });
@@ -6647,25 +6644,19 @@ function renderMsgs(messages){
     const mid = b.getAttribute('data-edit');
     const m = messages.find(x => x.id === mid);
     editId = mid; replyTo = null;
-    document.getElementById('replyBar').classList.remove('on');
-    document.getElementById('embDesc').value = (m && m.content) || (m && m.embeds && m.embeds[0] && m.embeds[0].description) || '';
+    document.getElementById('replyBar').classList.remove('show');
     document.getElementById('embTitle').value = (m && m.embeds && m.embeds[0] && m.embeds[0].title) || '';
+    document.getElementById('embDesc').value = (m && m.embeds && m.embeds[0] && m.embeds[0].description) || (m && m.content) || '';
     document.getElementById('btnEditSave').style.display = '';
     document.getElementById('btnSend').style.display = 'none';
   });
   box.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
-    if (!confirm('Delete this message?')) return;
-    try {
-      await post('/api/inbox/delete', { userId: currentUserId, messageId: b.getAttribute('data-del') });
-      openChat(currentUserId, document.getElementById('chatTitle').textContent);
-    } catch(e){ alert(e.message); }
+    if (!confirm('Delete?')) return;
+    try { await post('/api/inbox/delete',{userId:currentUserId,messageId:b.getAttribute('data-del')}); openChat(currentUserId); }
+    catch(e){ alert(e.message); }
   });
 }
-document.getElementById('btnCancelReply').onclick = () => {
-  replyTo = null;
-  document.getElementById('replyBar').classList.remove('on');
-  document.getElementById('composeBox').classList.remove('replying');
-};
+document.getElementById('btnCancelReply').onclick = () => { replyTo=null; document.getElementById('replyBar').classList.remove('show'); };
 document.getElementById('btnList').onclick = loadList;
 document.getElementById('btnOpen').onclick = () => {
   const id = document.getElementById('openId').value.replace(/\\D/g,'');
@@ -6676,39 +6667,33 @@ document.getElementById('btnSend').onclick = async () => {
   if (!currentUserId) return;
   const title = document.getElementById('embTitle').value.trim();
   const description = document.getElementById('embDesc').value.trim();
-  const asPlain = document.getElementById('asPlain').checked;
-  if (!title && !description) return alert('Write a message');
+  if (!title && !description && !pendingFiles.length) return alert('Write title/description or attach files');
   document.getElementById('btnSend').disabled = true;
   try {
     await post('/api/inbox/send', {
       userId: currentUserId,
-      title: asPlain ? '' : title,
-      description: asPlain ? '' : description,
-      content: asPlain ? description : '',
+      title, description,
       color: document.getElementById('embColor').value.trim() || null,
-      replyTo
+      replyTo,
+      files: pendingFiles
     });
     document.getElementById('embTitle').value = '';
     document.getElementById('embDesc').value = '';
+    pendingFiles = [];
+    document.getElementById('fileChips').innerHTML = '';
     replyTo = null;
-    document.getElementById('replyBar').classList.remove('on');
-    document.getElementById('composeBox').classList.remove('replying');
-    await openChat(currentUserId, document.getElementById('chatTitle').textContent);
+    document.getElementById('replyBar').classList.remove('show');
+    await openChat(currentUserId);
   } catch(e){ alert(e.message); }
   document.getElementById('btnSend').disabled = false;
 };
 document.getElementById('btnEditSave').onclick = async () => {
   if (!currentUserId || !editId) return;
-  const title = document.getElementById('embTitle').value.trim();
-  const description = document.getElementById('embDesc').value.trim();
-  const asPlain = document.getElementById('asPlain').checked;
   try {
     await post('/api/inbox/edit', {
-      userId: currentUserId,
-      messageId: editId,
-      title: asPlain ? '' : title,
-      description: asPlain ? '' : description,
-      content: asPlain ? description : (description || ''),
+      userId: currentUserId, messageId: editId,
+      title: document.getElementById('embTitle').value.trim(),
+      description: document.getElementById('embDesc').value.trim(),
       color: document.getElementById('embColor').value.trim() || null
     });
     editId = null;
@@ -6716,7 +6701,7 @@ document.getElementById('btnEditSave').onclick = async () => {
     document.getElementById('embDesc').value = '';
     document.getElementById('btnEditSave').style.display = 'none';
     document.getElementById('btnSend').style.display = '';
-    await openChat(currentUserId, document.getElementById('chatTitle').textContent);
+    await openChat(currentUserId);
   } catch(e){ alert(e.message); }
 };
 loadList();
