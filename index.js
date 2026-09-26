@@ -75,7 +75,8 @@ const DEFAULT_BOT_COMMANDS = [
     { id: 'wl-hub', name: 'hub', description: 'Show Hub store products and game link', enabled: true, roleIds: ['ALL'] },
     { id: 'wl-retrieve', name: 'retrieve', description: 'DM your product delivery (files/links/text)', enabled: true, roleIds: ['ALL'] },
     { id: 'wl-sendproduct', name: 'sendproduct', description: 'DM product delivery to another Discord user', enabled: true, roleIds: [] },
-    { id: 'wl-delete', name: 'delete', description: 'Delete bot DMs or channel messages', enabled: true, roleIds: [] }
+    { id: 'wl-delete', name: 'delete', description: 'Delete bot DMs or channel messages', enabled: true, roleIds: [] },
+    { id: 'wl-verificationstatus', name: 'verificationstatus', description: 'Toggle auto role verification loop (True/False)', enabled: true, roleIds: [] }
 ];
 
 
@@ -299,6 +300,11 @@ function ensureBotConfig(data) {
     if (typeof data.botConfig.enabled !== 'boolean') data.botConfig.enabled = true;
     if (typeof data.botConfig.robloxGameUrl !== 'string') data.botConfig.robloxGameUrl = data.botConfig.robloxGameUrl || '';
     if (!Array.isArray(data.botConfig.commands)) data.botConfig.commands = [];
+    if (!data.botConfig.verificationStatus || typeof data.botConfig.verificationStatus !== 'object') {
+        data.botConfig.verificationStatus = { enabled: false, role1: '', role2: '', intervalSec: 20 };
+    }
+    if (!Array.isArray(data.botConfig.statusChannels)) data.botConfig.statusChannels = [];
+    if (!data.botConfig.statusMessages || typeof data.botConfig.statusMessages !== 'object') data.botConfig.statusMessages = {};
     const byId = {};
     data.botConfig.commands.forEach(c => { if (c && c.id) byId[c.id] = c; });
     const merged = DEFAULT_BOT_COMMANDS.map(def => {
@@ -3841,6 +3847,9 @@ app.post('/api/bot/heartbeat', checkBotAuth, (req, res) => {
         configUpdatedAt: cfg.updatedAt || null,
         commands: cfg.commands,
         robloxGameUrl: cfg.robloxGameUrl || '',
+        verificationStatus: cfg.verificationStatus || { enabled: false, role1: '', role2: '', intervalSec: 20 },
+        statusChannels: cfg.statusChannels || [],
+        statusMessages: cfg.statusMessages || {},
         status: getBotDashboardStatus()
     });
 });
@@ -5528,6 +5537,17 @@ button.sec{background:#334155}button.green{background:#059669}button.danger{back
   <label>Role IDs (optional — DM everyone with these roles, comma-separated)</label>
   <input id="roleIds" placeholder="333, 444"/>
   <p class="muted">Combine freely. Large image uploads are OK up to ~20MB total. Role DMs need the bot in that server.</p>
+</div>
+<div class="card">
+  <h3>Live bot status message</h3>
+  <p class="muted">Posts/updates an embed showing bot online status (live timestamp). Choose channels below.</p>
+  <label>Status channel IDs (comma-separated)</label>
+  <input id="statusChannelsInput" placeholder="111, 222"/>
+  <button type="button" class="btn green" id="btnStatusDeploy">Deploy / refresh status messages</button>
+  <div id="statusDeployHint" class="muted" style="margin-top:8px"></div>
+</div>
+<div class="card">
+  <h3>Compose message</h3>
   <label>Load existing message (paste link)</label>
   <div class="row">
     <div><input id="messageLink" placeholder="https://discord.com/channels/guild/channel/message"/></div>
@@ -5824,9 +5844,63 @@ $('btnLoad').onclick = async () => {
 
 $('btnUnix').onclick=()=>{ $('unixNow').textContent=String(Math.floor(Date.now()/1000)); };
 $('btnUnix').click();
+if ($('btnStatusDeploy')) {
+  $('btnStatusDeploy').onclick = async () => {
+    const st = $('statusDeployHint');
+    try {
+      const ids = String(($('statusChannelsInput')||{}).value||'').split(/[,\s]+/).map(s=>s.trim()).filter(Boolean);
+      st.textContent = 'Saving…';
+      await post('/api/composer/status-channels', { channelIds: ids });
+      st.textContent = 'Saved. Bot will post/update status embeds shortly.';
+    } catch (e) { st.textContent = e.message || e; }
+  };
+}
 renderImageList(); renderButtons(); renderPreview();
 </script>
 </div></body></html>`);
+});
+
+
+app.post('/api/composer/status-channels', checkAuth, async (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
+    const data = db.getData();
+    const cfg = ensureBotConfig(data);
+    const parseIds = (v) => {
+        if (Array.isArray(v)) return v.map(String).map(s => s.trim()).filter(s => /^\d+$/.test(s));
+        return String(v || '').split(/[,\s]+/).map(s => s.trim()).filter(s => /^\d+$/.test(s));
+    };
+    cfg.statusChannels = parseIds(req.body.channelIds);
+    cfg.updatedAt = Date.now();
+    data.botConfig = cfg;
+    ensureHubStores(data);
+    enqueueBotJob(data, 'status_message_sync', { force: true });
+    await safeSave();
+    res.json({ ok: true, channelIds: cfg.statusChannels });
+});
+
+app.post('/api/bot/verification-status', checkBotAuth, async (req, res) => {
+    const data = db.getData();
+    const cfg = ensureBotConfig(data);
+    if (req.body.enabled != null) cfg.verificationStatus.enabled = !!req.body.enabled;
+    if (req.body.role1 != null) cfg.verificationStatus.role1 = String(req.body.role1).replace(/\D/g, '');
+    if (req.body.role2 != null) cfg.verificationStatus.role2 = String(req.body.role2).replace(/\D/g, '');
+    if (req.body.intervalSec != null) cfg.verificationStatus.intervalSec = Math.max(10, Number(req.body.intervalSec) || 20);
+    cfg.updatedAt = Date.now();
+    data.botConfig = cfg;
+    await safeSave();
+    res.json({ ok: true, verificationStatus: cfg.verificationStatus });
+});
+
+app.post('/api/bot/status-messages', checkBotAuth, async (req, res) => {
+    const data = db.getData();
+    const cfg = ensureBotConfig(data);
+    if (req.body.statusMessages && typeof req.body.statusMessages === 'object') {
+        cfg.statusMessages = req.body.statusMessages;
+    }
+    cfg.updatedAt = Date.now();
+    data.botConfig = cfg;
+    await safeSave();
+    res.json({ ok: true });
 });
 
 app.post('/api/composer/send', checkAuth, async (req, res) => {
