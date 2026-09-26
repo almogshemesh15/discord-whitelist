@@ -116,7 +116,7 @@ async function ensureTables(client) {
         );
         CREATE TABLE IF NOT EXISTS hub_ownerships (
             id TEXT PRIMARY KEY,
-            product_id TEXT NOT NULL REFERENCES hub_products(id) ON DELETE CASCADE,
+            product_id TEXT NOT NULL,
             roblox_id TEXT NOT NULL,
             roblox_name TEXT,
             purchase_id TEXT,
@@ -125,7 +125,48 @@ async function ensureTables(client) {
         );
         CREATE INDEX IF NOT EXISTS idx_hub_own_roblox ON hub_ownerships (roblox_id);
         CREATE INDEX IF NOT EXISTS idx_hub_own_product ON hub_ownerships (product_id);
+        CREATE TABLE IF NOT EXISTS hub_owners (
+            roblox_id TEXT PRIMARY KEY,
+            roblox_name TEXT,
+            products JSONB NOT NULL DEFAULT '[]'::jsonb,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
     `);
+    // Migrate flat rows → one row per user (once)
+    try {
+        const cO = await client.query('SELECT COUNT(*)::int AS n FROM hub_owners');
+        const cF = await client.query('SELECT COUNT(*)::int AS n FROM hub_ownerships');
+        if (cO.rows[0].n === 0 && cF.rows[0].n > 0) {
+            console.log('[DB] Migrating hub_ownerships → hub_owners…');
+            const rows = await client.query('SELECT * FROM hub_ownerships');
+            const by = new Map();
+            for (const r of rows.rows) {
+                const rid = String(r.roblox_id);
+                if (!by.has(rid)) by.set(rid, { name: r.roblox_name, products: [] });
+                const e = by.get(rid);
+                if (r.roblox_name) e.name = r.roblox_name;
+                const meta = r.meta && typeof r.meta === 'object' ? r.meta : {};
+                e.products.push({
+                    id: r.id,
+                    productId: r.product_id,
+                    purchaseId: r.purchase_id || null,
+                    purchasedAt: r.purchased_at ? new Date(r.purchased_at).getTime() : Date.now(),
+                    manual: !!meta.manual
+                });
+            }
+            for (const [rid, e] of by) {
+                await client.query(
+                    `INSERT INTO hub_owners (roblox_id, roblox_name, products, updated_at)
+                     VALUES ($1,$2,$3::jsonb,NOW()) ON CONFLICT (roblox_id) DO UPDATE SET
+                     roblox_name=EXCLUDED.roblox_name, products=EXCLUDED.products, updated_at=NOW()`,
+                    [rid, e.name || null, JSON.stringify(e.products)]
+                );
+            }
+            console.log('[DB] hub_owners rows:', by.size);
+        }
+    } catch (e) {
+        console.warn('[DB] owners migrate:', e.message || e);
+    }
 }
 
 function coreStateOnly(full) {
@@ -141,7 +182,59 @@ function coreStateOnly(full) {
 async function loadSideTables(client) {
     const links = await client.query('SELECT * FROM discord_links ORDER BY linked_at DESC');
     const products = await client.query('SELECT * FROM hub_products ORDER BY created_at DESC');
-    const owns = await client.query('SELECT * FROM hub_ownerships ORDER BY purchased_at DESC');
+    let hubOwnershipsFlat = [];
+    try {
+        const owners = await client.query('SELECT * FROM hub_owners');
+        if (owners.rows.length) {
+            for (const r of owners.rows) {
+                let products = r.products;
+                if (typeof products === 'string') {
+                    try { products = JSON.parse(products); } catch (_) { products = []; }
+                }
+                if (!Array.isArray(products)) products = [];
+                for (const pr of products) {
+                    hubOwnershipsFlat.push({
+                        id: pr.id || (String(r.roblox_id) + '_' + String(pr.productId)),
+                        productId: pr.productId,
+                        robloxId: String(r.roblox_id),
+                        robloxName: r.roblox_name || '',
+                        purchaseId: pr.purchaseId || null,
+                        purchasedAt: pr.purchasedAt || null,
+                        manual: !!pr.manual
+                    });
+                }
+            }
+        } else {
+            const owns = await client.query('SELECT * FROM hub_ownerships ORDER BY purchased_at DESC');
+            hubOwnershipsFlat = owns.rows.map(r => {
+                const meta = (r.meta && typeof r.meta === 'object') ? r.meta : {};
+                return {
+                    id: r.id,
+                    productId: r.product_id,
+                    robloxId: String(r.roblox_id),
+                    robloxName: r.roblox_name || '',
+                    purchaseId: r.purchase_id,
+                    purchasedAt: r.purchased_at ? new Date(r.purchased_at).getTime() : null,
+                    manual: !!meta.manual
+                };
+            });
+        }
+    } catch (e) {
+        console.warn('[DB] load hub_owners:', e.message || e);
+        const owns = await client.query('SELECT * FROM hub_ownerships ORDER BY purchased_at DESC');
+        hubOwnershipsFlat = owns.rows.map(r => {
+            const meta = (r.meta && typeof r.meta === 'object') ? r.meta : {};
+            return {
+                id: r.id,
+                productId: r.product_id,
+                robloxId: String(r.roblox_id),
+                robloxName: r.roblox_name || '',
+                purchaseId: r.purchase_id,
+                purchasedAt: r.purchased_at ? new Date(r.purchased_at).getTime() : null,
+                manual: !!meta.manual
+            };
+        });
+    }
     return {
         discordLinks: links.rows.map(r => ({
             discordId: r.discord_id,
@@ -176,18 +269,7 @@ async function loadSideTables(client) {
                 testPlaceId: meta.testPlaceId || null
             };
         }),
-        hubOwnerships: owns.rows.map(r => {
-            const meta = (r.meta && typeof r.meta === 'object') ? r.meta : {};
-            return {
-                id: r.id,
-                productId: r.product_id,
-                robloxId: r.roblox_id,
-                robloxName: r.roblox_name,
-                purchaseId: r.purchase_id,
-                purchasedAt: r.purchased_at ? new Date(r.purchased_at).getTime() : null,
-                manual: !!meta.manual
-            };
-        })
+        hubOwnerships: hubOwnershipsFlat
     };
 }
 
@@ -245,23 +327,35 @@ async function persistSideTables(client, full) {
         );
     }
 
+    // Collapse to one row per Roblox user in hub_owners
     const owns = full.hubOwnerships || [];
-    const keepO = owns.map(o => o.id);
-    if (keepO.length) {
-        await client.query(`DELETE FROM hub_ownerships WHERE id <> ALL($1::text[])`, [keepO]);
-    } else {
-        await client.query('DELETE FROM hub_ownerships');
-    }
+    const byUser = new Map();
     for (const o of owns) {
-        const meta = { manual: !!o.manual };
+        const rid = String(o.robloxId);
+        if (!byUser.has(rid)) byUser.set(rid, { robloxName: o.robloxName || '', products: [] });
+        const e = byUser.get(rid);
+        if (o.robloxName) e.robloxName = o.robloxName;
+        e.products.push({
+            id: o.id,
+            productId: o.productId,
+            purchaseId: o.purchaseId || null,
+            purchasedAt: o.purchasedAt || Date.now(),
+            manual: !!o.manual
+        });
+    }
+    const keepR = [...byUser.keys()];
+    if (keepR.length) {
+        await client.query(`DELETE FROM hub_owners WHERE roblox_id <> ALL($1::text[])`, [keepR]);
+    } else {
+        await client.query('DELETE FROM hub_owners');
+    }
+    for (const [rid, e] of byUser) {
         await client.query(
-            `INSERT INTO hub_ownerships (id, product_id, roblox_id, roblox_name, purchase_id, meta, purchased_at)
-             VALUES ($1,$2,$3,$4,$5,$6::jsonb, to_timestamp($7/1000.0))
-             ON CONFLICT (id) DO UPDATE SET
-               product_id=EXCLUDED.product_id, roblox_id=EXCLUDED.roblox_id,
-               roblox_name=EXCLUDED.roblox_name, purchase_id=EXCLUDED.purchase_id, meta=EXCLUDED.meta`,
-            [o.id, o.productId, String(o.robloxId), o.robloxName || null, o.purchaseId || null,
-             JSON.stringify(meta), o.purchasedAt || Date.now()]
+            `INSERT INTO hub_owners (roblox_id, roblox_name, products, updated_at)
+             VALUES ($1,$2,$3::jsonb,NOW())
+             ON CONFLICT (roblox_id) DO UPDATE SET
+               roblox_name=EXCLUDED.roblox_name, products=EXCLUDED.products, updated_at=NOW()`,
+            [rid, e.robloxName || null, JSON.stringify(e.products)]
         );
     }
 }
