@@ -114,17 +114,6 @@ async function ensureTables(client) {
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
-        CREATE TABLE IF NOT EXISTS hub_ownerships (
-            id TEXT PRIMARY KEY,
-            product_id TEXT NOT NULL,
-            roblox_id TEXT NOT NULL,
-            roblox_name TEXT,
-            purchase_id TEXT,
-            meta JSONB NOT NULL DEFAULT '{}'::jsonb,
-            purchased_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-        CREATE INDEX IF NOT EXISTS idx_hub_own_roblox ON hub_ownerships (roblox_id);
-        CREATE INDEX IF NOT EXISTS idx_hub_own_product ON hub_ownerships (product_id);
         CREATE TABLE IF NOT EXISTS hub_owners (
             roblox_id TEXT PRIMARY KEY,
             roblox_name TEXT,
@@ -139,10 +128,12 @@ async function ensureTables(client) {
         await client.query(`ALTER TABLE hub_owners ADD COLUMN IF NOT EXISTS discord_id TEXT`);
         await client.query(`ALTER TABLE hub_owners ADD COLUMN IF NOT EXISTS discord_tag TEXT`);
     } catch (_) {}
-    // Migrate flat hub_ownerships → hub_owners once, then we stop writing to hub_ownerships
+    // One-time migrate legacy hub_ownerships if it still exists, then DROP it
     try {
-        const cF = await client.query(`SELECT COUNT(*)::int AS n FROM hub_ownerships`);
-        if (cF.rows[0].n > 0) {
+        const exists = await client.query(`SELECT to_regclass('public.hub_ownerships') AS t`);
+        if (exists.rows[0] && exists.rows[0].t) {
+            const cF = await client.query(`SELECT COUNT(*)::int AS n FROM hub_ownerships`);
+            if (cF.rows[0].n > 0) {
             console.log('[DB] Merging hub_ownerships into hub_owners…');
             const rows = await client.query('SELECT * FROM hub_ownerships');
             const by = new Map();
@@ -203,6 +194,11 @@ async function ensureTables(client) {
             }
             await client.query('DELETE FROM hub_ownerships');
             console.log('[DB] hub_owners merged; hub_ownerships cleared');
+            }
+            try {
+                await client.query('DROP TABLE IF EXISTS hub_ownerships CASCADE');
+                console.log('[DB] dropped legacy hub_ownerships table');
+            } catch (_) {}
         }
     } catch (e) {
         console.warn('[DB] owners migrate:', e.message || e);
@@ -395,8 +391,6 @@ async function persistSideTables(client, full) {
             [rid, e.robloxName || null, e.discordId || null, e.discordTag || null, JSON.stringify(e.products)]
         );
     }
-    // Legacy table no longer used — keep empty
-    try { await client.query('DELETE FROM hub_ownerships'); } catch (_) {}
 }
 
 async function migrateFromLegacyJson(client, incoming) {
