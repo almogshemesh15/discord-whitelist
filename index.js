@@ -4495,6 +4495,14 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
       <div><label>Test Place ID</label><input id="pTest"/></div>
       <div><label>Image (rbxassetid)</label><input id="pImg"/></div>
     </div>
+    <div class="row">
+      <div><label>StacyPilot support</label>
+        <select id="pStacy"><option value="0">No</option><option value="1">Yes</option></select>
+      </div>
+      <div><label>Layout order (lower = first)</label>
+        <input id="pLayout" type="number" placeholder="0"/>
+      </div>
+    </div>
     <label>Description</label><textarea id="pDesc" rows="2"></textarea>
     <label>Discord role IDs (comma-separated)</label><input id="pRoles"/>
     <label>Delivery includes (combine any)</label>
@@ -4630,6 +4638,8 @@ function editProduct(p){
   $('pDisc').value = p.discountPercent == null ? '' : p.discountPercent;
   $('pSale').value = p.onSale ? '1' : '0';
   $('pTest').value = p.testPlaceId || '';
+  if ($('pStacy')) $('pStacy').value = p.stacyPilot ? '1' : '0';
+  if ($('pLayout')) $('pLayout').value = p.layoutOrder != null ? p.layoutOrder : '';
   $('pRoles').value = (p.discordRoleIds || []).join(', ');
   const inc = Array.isArray(p.deliveryIncludes) && p.deliveryIncludes.length
     ? p.deliveryIncludes
@@ -4749,6 +4759,8 @@ function renderProducts(){
     const stock = p.stock == null ? '∞' : p.stock;
     return '<div class="pc"><b>' + (p.name || '') + '</b> <code>' + p.id + '</code>' +
       '<div class="muted">Dev: ' + (p.developerProductId||'') + ' · Stock: ' + stock +
+        (p.stacyPilot ? ' · <span style="color:#38bdf8">StacyPilot</span>' : '') +
+        (p.layoutOrder != null ? ' · order ' + p.layoutOrder : '') +
       ' · Delivery: ' + ((p.deliveryIncludes||[]).join('+')||'none') +
       ' · Keys: ' + ((p.keyNames||[]).join(', ')||'—') +
       ' · Files: ' + ((p.files||[]).length) + '</div>' +
@@ -4914,6 +4926,8 @@ $('btnSave').addEventListener('click', async () => {
     discountPercent: $('pDisc').value,
     onSale: $('pSale').value === '1',
     testPlaceId: $('pTest').value.trim(),
+    stacyPilot: $('pStacy') && $('pStacy').value === '1',
+    layoutOrder: $('pLayout') ? $('pLayout').value : '',
     deliveryIncludes: collectIncludes(),
     links: collectLinks(),
     deliveryText: $('pText').value
@@ -4995,6 +5009,15 @@ app.post('/api/hub/products', checkAuth, async (req, res) => {
         row.discountPercent = discountPercent;
         row.onSale = onSale && discountPercent != null && discountPercent > 0;
         row.testPlaceId = testPlaceId;
+        row.stacyPilot = b.stacyPilot === true || b.stacyPilot === '1' || b.stacyPilot === 1;
+        {
+            const lo = b.layoutOrder;
+            if (lo === '' || lo == null) row.layoutOrder = 0;
+            else {
+                const n = Number(lo);
+                row.layoutOrder = isNaN(n) ? 0 : n;
+            }
+        }
         row.discordRoleIds = Array.isArray(b.discordRoleIds)
             ? b.discordRoleIds.map(String).map(s => s.trim()).filter(Boolean)
             : String(b.discordRoleIds || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
@@ -5024,6 +5047,13 @@ app.post('/api/hub/products', checkAuth, async (req, res) => {
             discountPercent,
             onSale: onSale && discountPercent != null && discountPercent > 0,
             testPlaceId,
+            stacyPilot: b.stacyPilot === true || b.stacyPilot === '1' || b.stacyPilot === 1,
+            layoutOrder: (function(){
+                const lo = b.layoutOrder;
+                if (lo === '' || lo == null) return 0;
+                const n = Number(lo);
+                return isNaN(n) ? 0 : n;
+            })(),
             discordRoleIds: Array.isArray(b.discordRoleIds)
                 ? b.discordRoleIds.map(String).map(s => s.trim()).filter(Boolean)
                 : String(b.discordRoleIds || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean),
@@ -5084,8 +5114,16 @@ app.get('/api/hub/catalog', checkBotAuth, (req, res) => {
         discountPercent: p.discountPercent != null ? Number(p.discountPercent) : null,
         onSale: !!(p.onSale && p.discountPercent),
         testPlaceId: p.testPlaceId || null,
+        stacyPilot: !!p.stacyPilot,
+        layoutOrder: p.layoutOrder != null ? Number(p.layoutOrder) : 0,
         isFree: !p.developerProductId || String(p.developerProductId).trim() === '' || String(p.developerProductId).trim() === '0'
     }));
+    list.sort((a, b) => {
+        const ao = a.layoutOrder != null ? a.layoutOrder : 0;
+        const bo = b.layoutOrder != null ? b.layoutOrder : 0;
+        if (ao !== bo) return ao - bo;
+        return String(a.name || '').localeCompare(String(b.name || ''));
+    });
     res.json({ products: list, ownedProductIds: [...ownedSet] });
 });
 
