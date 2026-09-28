@@ -275,7 +275,9 @@ async function loadSideTables(client) {
                 files: meta.files || [],
                 discountPercent: meta.discountPercent != null ? meta.discountPercent : null,
                 onSale: !!meta.onSale,
-                testPlaceId: meta.testPlaceId || null
+                testPlaceId: meta.testPlaceId || null,
+                stacyPilot: !!meta.stacyPilot,
+                layoutOrder: meta.layoutOrder != null ? Number(meta.layoutOrder) : 0
             };
         }),
         hubOwnerships: hubOwnershipsFlat
@@ -320,7 +322,9 @@ async function persistSideTables(client, full) {
             files: p.files || [],
             discountPercent: p.discountPercent != null ? p.discountPercent : null,
             onSale: !!p.onSale,
-            testPlaceId: p.testPlaceId || null
+            testPlaceId: p.testPlaceId || null,
+            stacyPilot: !!p.stacyPilot,
+            layoutOrder: p.layoutOrder != null ? Number(p.layoutOrder) : 0
         };
         await client.query(
             `INSERT INTO hub_products (id, name, description, image_url, developer_product_id, key_names, stock, available, meta, updated_at)
