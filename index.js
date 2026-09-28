@@ -4556,8 +4556,9 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
 <div id="panel-grant" class="panel">
   <div class="card">
     <h3>Grant product</h3>
-    <p class="muted">Target must already be Discord-linked in Hub.</p>
-    <label>Product</label><select id="gProduct"></select>
+    <p class="muted">Target must already be Discord-linked in Hub. Select one or more products (already owned are skipped).</p>
+    <label>Products (Ctrl/Cmd multi-select)</label>
+    <select id="gProduct" multiple size="6" style="min-height:120px"></select>
     <label>Lookup type</label>
     <select id="gType">
       <option value="robloxId">Roblox user ID</option>
@@ -4566,6 +4567,10 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
     </select>
     <label id="gValueLabel">Roblox user ID</label>
     <input id="gValue"/>
+    <label style="display:flex;align-items:center;gap:8px;margin:12px 0;color:#e2e8f0">
+      <input type="checkbox" id="gNotify" checked/>
+      Send product delivery to user DM
+    </label>
     <button type="button" class="btn green" id="btnGrant">Grant</button>
   </div>
 </div>
@@ -4861,7 +4866,12 @@ function renderHistory(){
 }
 
 function renderGrant(){
-  $('gProduct').innerHTML = PRODUCTS.map(p => '<option value="' + p.id + '">' + p.name + '</option>').join('');
+  const sel = $('gProduct');
+  if (!sel) return;
+  const prev = new Set([...sel.selectedOptions].map(o => o.value));
+  sel.innerHTML = PRODUCTS.map(p =>
+    '<option value="' + p.id + '"' + (prev.has(p.id) ? ' selected' : '') + '>' + p.name + '</option>'
+  ).join('');
 }
 
 async function refreshState(forceRender){
@@ -4953,13 +4963,24 @@ $('btnSave').addEventListener('click', async () => {
 $('btnGrant').addEventListener('click', async () => {
   const type = $('gType').value;
   const val = $('gValue').value.trim();
-  const body = { productId: $('gProduct').value };
+  if (!val) return alert('Enter a target');
+  const productIds = [...$('gProduct').selectedOptions].map(o => o.value);
+  if (!productIds.length) return alert('Select at least one product');
+  const body = {
+    productIds,
+    notifyDm: !!($('gNotify') && $('gNotify').checked)
+  };
   if (type === 'robloxId') body.robloxId = val;
   else if (type === 'robloxUsername') body.robloxUsername = val;
   else body.discordId = val;
   const r = await fetch('/api/hub/grant', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) { alert(j.error || 'Failed'); return; }
+  const parts = [];
+  if (j.granted && j.granted.length) parts.push('Granted: ' + j.granted.join(', '));
+  if (j.skipped && j.skipped.length) parts.push('Skipped (already owned): ' + j.skipped.join(', '));
+  if (j.failed && j.failed.length) parts.push('Failed: ' + j.failed.join(', '));
+  alert(parts.join('\n') || 'Done');
   $('gValue').value = '';
   await refreshState(true);
 });
@@ -5246,16 +5267,20 @@ app.post('/api/hub/grant', checkAuth, async (req, res) => {
     const data = db.getData();
     ensureHubStores(data);
     ensureLinkStores(data);
-    const productId = String(req.body.productId || '').trim();
-    const product = data.hubProducts.find(p => p.id === productId);
-    if (!product) return res.status(404).json({ error: 'product not found' });
+
+    // productIds[] preferred; legacy productId still works
+    let productIds = [];
+    if (Array.isArray(req.body.productIds)) productIds = req.body.productIds.map(String).map(s => s.trim()).filter(Boolean);
+    else if (req.body.productId) productIds = [String(req.body.productId).trim()].filter(Boolean);
+    if (!productIds.length) return res.status(400).json({ error: 'Select at least one product' });
+
+    const notifyDm = req.body.notifyDm !== false && req.body.notifyDm !== '0' && req.body.notifyDm !== 0;
 
     let robloxId = String(req.body.robloxId || '').trim();
     let robloxName = String(req.body.robloxName || '').trim() || null;
     const discordIdIn = String(req.body.discordId || '').trim();
     const robloxUsername = String(req.body.robloxUsername || req.body.username || '').trim();
 
-    // Resolve target → must be Discord-linked
     let link = null;
     if (discordIdIn) {
         link = (data.discordLinks || []).find(l => String(l.discordId) === discordIdIn);
@@ -5285,42 +5310,69 @@ app.post('/api/hub/grant', checkAuth, async (req, res) => {
         return res.status(400).json({ error: 'Provide robloxId, robloxUsername, or discordId' });
     }
 
-    if (data.hubOwnerships.some(o => o.productId === productId && String(o.robloxId) === String(robloxId))) {
-        return res.status(409).json({ error: 'Player already owns this product' });
-    }
     if (!robloxName) {
         try {
             const u = await axios.get('https://users.roblox.com/v1/users/' + robloxId, { timeout: 8000 });
             if (u.data && u.data.name) robloxName = u.data.name;
         } catch (_) {}
     }
-    data.hubOwnerships.push({
-        id: newHubId(),
-        productId,
-        robloxId: String(robloxId),
-        robloxName,
-        purchaseId: 'manual-' + Date.now(),
-        purchasedAt: Date.now(),
-        manual: true
-    });
-    const keyNames = product.keyNames || [];
-    if (keyNames.length) {
-        let creator = data.whitelist.creators.find(c => String(c.id) === String(robloxId));
-        if (!creator) {
-            creator = { id: Number(robloxId) || robloxId, name: robloxName || String(robloxId), keys: [], groups: null };
-            data.whitelist.creators.push(creator);
+
+    const granted = [];
+    const skipped = [];
+    const failed = [];
+    const base = publicBaseUrl(req);
+
+    for (const productId of productIds) {
+        const product = data.hubProducts.find(p => p.id === productId);
+        if (!product) {
+            failed.push(productId);
+            continue;
         }
-        if (!Array.isArray(creator.keys)) creator.keys = [];
-        if (robloxName) creator.name = robloxName;
-        for (const kn of keyNames) {
-            const existing = creator.keys.find(k => k.key === kn);
-            if (!existing) creator.keys.push({ key: kn, expiresAt: null, fromHub: true, hubProductId: product.id });
-            else { existing.fromHub = true; existing.hubProductId = product.id; }
+        if (data.hubOwnerships.some(o => o.productId === productId && String(o.robloxId) === String(robloxId))) {
+            skipped.push(product.name || productId);
+            continue;
         }
+        data.hubOwnerships.push({
+            id: newHubId(),
+            productId,
+            robloxId: String(robloxId),
+            robloxName,
+            purchaseId: 'manual-' + Date.now() + '-' + productId,
+            purchasedAt: Date.now(),
+            manual: true
+        });
+        const keyNames = product.keyNames || [];
+        if (keyNames.length) {
+            let creator = data.whitelist.creators.find(c => String(c.id) === String(robloxId));
+            if (!creator) {
+                creator = { id: Number(robloxId) || robloxId, name: robloxName || String(robloxId), keys: [], groups: null };
+                data.whitelist.creators.push(creator);
+            }
+            if (!Array.isArray(creator.keys)) creator.keys = [];
+            if (robloxName) creator.name = robloxName;
+            for (const kn of keyNames) {
+                const existing = creator.keys.find(k => k.key === kn);
+                if (!existing) creator.keys.push({ key: kn, expiresAt: null, fromHub: true, hubProductId: product.id });
+                else { existing.fromHub = true; existing.hubProductId = product.id; }
+            }
+        }
+        if (notifyDm) {
+            notifyProductGranted(data, product, robloxId, robloxName, base);
+        }
+        granted.push(product.name || productId);
     }
-    notifyProductGranted(data, product, robloxId, robloxName, publicBaseUrl(req));
+
     await safeSave();
-    res.json({ ok: true, robloxId, robloxName, discordId: link.discordId });
+    res.json({
+        ok: true,
+        robloxId,
+        robloxName,
+        discordId: link.discordId,
+        notifyDm,
+        granted,
+        skipped,
+        failed
+    });
 });
 
 app.post('/api/hub/revoke', checkAuth, async (req, res) => {
@@ -5586,6 +5638,54 @@ app.get('/api/bot/retrieve-for', checkBotAuth, (req, res) => {
     });
 });
 
+
+app.get('/api/bot/retrieve-multi', checkBotAuth, (req, res) => {
+    const data = db.getData();
+    ensureHubStores(data);
+    ensureLinkStores(data);
+    const discordId = String(req.query.discordId || '').trim();
+    const raw = String(req.query.products || req.query.product || '').trim();
+    if (!discordId || !raw) return res.status(400).json({ error: 'discordId and products required' });
+    const link = (data.discordLinks || []).find(l => String(l.discordId) === discordId);
+    if (!link) return res.status(404).json({ error: 'Discord not linked to Roblox' });
+    const ownedIds = new Set(
+        (data.hubOwnerships || [])
+            .filter(o => String(o.robloxId) === String(link.robloxId))
+            .map(o => o.productId)
+    );
+    const base = publicBaseUrl(req);
+    const allProducts = data.hubProducts || [];
+    let targets = [];
+    if (raw.toLowerCase() === 'all') {
+        targets = allProducts.filter(p => ownedIds.has(p.id));
+    } else {
+        const tokens = raw.split(/[,;]+/).map(s => s.trim()).filter(Boolean);
+        for (const tok of tokens) {
+            const low = tok.toLowerCase();
+            const product = allProducts.find(p => String(p.id) === tok)
+                || allProducts.find(p => String(p.name || '').toLowerCase() === low)
+                || allProducts.find(p => String(p.name || '').toLowerCase().includes(low));
+            if (product && ownedIds.has(product.id) && !targets.some(x => x.id === product.id)) {
+                targets.push(product);
+            }
+        }
+    }
+    const items = targets.map(product => {
+        const includes = Array.isArray(product.deliveryIncludes) && product.deliveryIncludes.length
+            ? product.deliveryIncludes.map(String)
+            : ['files', 'links', 'text'];
+        return {
+            productId: product.id,
+            productName: product.name,
+            deliveryIncludes: includes,
+            files: includes.includes('files') ? fileMetaList(product, base) : [],
+            links: includes.includes('links') ? normalizeLinks(product.links) : [],
+            deliveryText: includes.includes('text') ? String(product.deliveryText || '') : ''
+        };
+    });
+    res.json({ items, count: items.length });
+});
+
 app.get('/api/bot/retrieve', checkBotAuth, (req, res) => {
     const data = db.getData();
     ensureHubStores(data);
@@ -5819,7 +5919,7 @@ function renderButtons(){
     [['role_add','Give role'],['role_remove','Remove role'],['product_file','Send product files']].map(a =>
       '<option value="'+a[0]+'"'+(b.action===a[0]?' selected':'')+'>'+a[1]+'</option>').join('') +
     '</select></div>' +
-    '<div><label>Role ID / Product name</label><input data-bf="value" data-i="'+i+'" value="'+(b.value||'').replace(/"/g,'&quot;')+'" placeholder="role id or product name"/></div></div>' +
+    '<div><label>Role ID / Product(s)</label><input data-bf="value" data-i="'+i+'" value="'+(b.value||'').replace(/"/g,'&quot;')+'" placeholder="role id · or product1, product2 · or All"/></div></div>' +
     '<label>Log targets (on click) — combine any, comma-separated IDs</label>' +
     '<div class="row"><div><label>Log channel IDs</label><input data-bf="logChannelIds" data-i="'+i+'" value="'+(b.logChannelIds||'').toString().replace(/"/g,'&quot;')+'" placeholder="111, 222"/></div>' +
     '<div><label>Log user IDs</label><input data-bf="logUserIds" data-i="'+i+'" value="'+(b.logUserIds||'').toString().replace(/"/g,'&quot;')+'" placeholder="333"/></div></div>' +
