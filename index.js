@@ -4755,7 +4755,13 @@ async function uploadPending(productId){
 function renderProducts(){
   const box = $('productList');
   if (!PRODUCTS.length) { box.innerHTML = '<p class="muted">No products yet</p>'; return; }
-  box.innerHTML = PRODUCTS.map(p => {
+  const sorted = PRODUCTS.slice().sort((a, b) => {
+    const ao = a.layoutOrder != null ? Number(a.layoutOrder) : 0;
+    const bo = b.layoutOrder != null ? Number(b.layoutOrder) : 0;
+    if (ao !== bo) return ao - bo;
+    return String(a.name || '').localeCompare(String(b.name || ''));
+  });
+  box.innerHTML = sorted.map(p => {
     const stock = p.stock == null ? '∞' : p.stock;
     return '<div class="pc"><b>' + (p.name || '') + '</b> <code>' + p.id + '</code>' +
       '<div class="muted">Dev: ' + (p.developerProductId||'') + ' · Stock: ' + stock +
@@ -5534,9 +5540,17 @@ app.get('/api/bot/hub-catalog', checkBotAuth, (req, res) => {
                 soldOut,
                 available: p.available !== false,
                 isFree: !p.developerProductId || String(p.developerProductId) === '0',
-                developerProductId: p.developerProductId
+                developerProductId: p.developerProductId,
+                stacyPilot: !!p.stacyPilot,
+                layoutOrder: p.layoutOrder != null ? Number(p.layoutOrder) : 0
             };
         });
+    list.sort((a, b) => {
+        const ao = a.layoutOrder != null ? a.layoutOrder : 0;
+        const bo = b.layoutOrder != null ? b.layoutOrder : 0;
+        if (ao !== bo) return ao - bo;
+        return String(a.name || '').localeCompare(String(b.name || ''));
+    });
     res.json({
         products: list,
         robloxGameUrl: cfg.robloxGameUrl || ''
