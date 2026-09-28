@@ -5381,6 +5381,8 @@ app.get('/api/hub/state', checkAuth, (req, res) => {
         discountPercent: p.discountPercent,
         onSale: !!p.onSale,
         testPlaceId: p.testPlaceId || '',
+        stacyPilot: !!p.stacyPilot,
+        layoutOrder: p.layoutOrder != null ? Number(p.layoutOrder) : 0,
         discordRoleIds: p.discordRoleIds || [],
         deliveryMode: p.deliveryMode || 'mixed',
         deliveryIncludes: Array.isArray(p.deliveryIncludes) ? p.deliveryIncludes : ['files','links','text'],
