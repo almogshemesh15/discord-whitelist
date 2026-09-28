@@ -56,7 +56,6 @@ function parseLocalTime(inputString) {
 
 const OWNER_EMAIL = 'almogshemesh11@gmail.com';
 const BOT_API_SECRET = process.env.BOT_API_SECRET || '';
-const SUPPORT_BOT_SECRET = process.env.SUPPORT_BOT_SECRET || process.env.BOT_API_SECRET || '';
 
 /** Live status from Mac bot heartbeats (in-memory on Render) */
 let botRuntime = {
@@ -340,18 +339,6 @@ function ensureBotConfig(data) {
     });
     data.botConfig.commands = merged.filter(c => c && c.id !== 'wl-verificationstatus' && c.name !== 'verificationstatus');
     return data.botConfig;
-}
-
-function checkSupportAuth(req, res, next) {
-    // Read-only support bot — accepts SUPPORT_BOT_SECRET or same BOT_API_SECRET
-    const secret = req.headers['x-support-secret'] || req.headers['x-bot-secret'] || '';
-    if (!SUPPORT_BOT_SECRET) {
-        return res.status(503).json({ error: 'SUPPORT_BOT_SECRET not configured' });
-    }
-    if (!secret || secret !== SUPPORT_BOT_SECRET) {
-        return res.status(401).json({ error: 'unauthorized' });
-    }
-    next();
 }
 
 function checkBotAuth(req, res, next) {
@@ -6813,114 +6800,5 @@ loadList();
 
 
 
-// ========== Support bot (READ-ONLY) ==========
-app.get('/api/support/health', checkSupportAuth, (req, res) => {
-    res.json({ ok: true, mode: 'read-only' });
-});
-
-app.get('/api/support/user-context', checkSupportAuth, (req, res) => {
-    const data = db.getData();
-    ensureHubStores(data);
-    ensureLinkStores(data);
-    ensureBlacklist(data);
-    const discordId = String(req.query.discordId || '').replace(/\D/g, '');
-    if (!discordId) return res.status(400).json({ error: 'discordId required' });
-    const link = (data.discordLinks || []).find(l => String(l.discordId) === discordId);
-    const bl = isBlacklisted(data, {
-        discordId,
-        robloxId: link ? link.robloxId : null,
-        discordTag: link ? link.discordTag : null
-    });
-    let products = [];
-    if (link) {
-        const owns = (data.hubOwnerships || []).filter(o => String(o.robloxId) === String(link.robloxId));
-        products = owns.map(o => {
-            const p = (data.hubProducts || []).find(x => x.id === o.productId);
-            return {
-                productId: o.productId,
-                name: p ? p.name : o.productId,
-                stacyPilot: !!(p && p.stacyPilot)
-            };
-        });
-    }
-    const keys = [];
-    if (link) {
-        const creator = (data.whitelist && data.whitelist.creators || []).find(c => String(c.id) === String(link.robloxId));
-        if (creator && Array.isArray(creator.keys)) {
-            creator.keys.forEach(k => keys.push(typeof k === 'string' ? k : k.key));
-        }
-    }
-    res.json({
-        discordId,
-        linked: !!link,
-        robloxId: link ? String(link.robloxId) : null,
-        robloxName: link ? (link.robloxName || null) : null,
-        discordTag: link ? (link.discordTag || null) : null,
-        blacklisted: !!bl,
-        products,
-        licenseKeys: keys,
-        maintenanceMode: !!data.maintenanceMode
-    });
-});
-
-app.get('/api/support/products', checkSupportAuth, (req, res) => {
-    const data = db.getData();
-    ensureHubStores(data);
-    const list = (data.hubProducts || [])
-        .filter(p => p.available !== false)
-        .map(p => ({
-            id: p.id,
-            name: p.name,
-            description: (p.description || '').slice(0, 300),
-            isFree: !p.developerProductId || String(p.developerProductId) === '0',
-            stock: p.stock == null ? null : Number(p.stock),
-            stacyPilot: !!p.stacyPilot,
-            layoutOrder: p.layoutOrder != null ? Number(p.layoutOrder) : 0
-        }))
-        .sort((a, b) => (a.layoutOrder - b.layoutOrder) || String(a.name).localeCompare(String(b.name)));
-    res.json({ products: list });
-});
-
-app.get('/api/support/knowledge', checkSupportAuth, (req, res) => {
-    res.json({
-        topics: [
-            {
-                id: 'link',
-                title: 'Discord ↔ Roblox linking',
-                body: 'Users link accounts with /link: open the Roblox link game, copy the code, paste it in Discord. /switchaccount changes linked Roblox or Discord while keeping Hub ownership data.'
-            },
-            {
-                id: 'hub',
-                title: 'Hub store',
-                body: 'The Hub is a Roblox place where linked users browse and buy products (Developer Products or free). Owned products appear as Owned. Stock can be limited. Test Place opens a test experience when configured.'
-            },
-            {
-                id: 'delivery',
-                title: 'Product delivery',
-                body: 'After purchase or grant, delivery may include files, links, and text via Discord DM. Users can use /retrieve with the product name. Staff can use /sendproduct.'
-            },
-            {
-                id: 'stacypilot',
-                title: 'StacyPilot',
-                body: 'Some Hub products are marked StacyPilot-compatible. The Hub UI and /hub command show · StacyPilot next to those products.'
-            },
-            {
-                id: 'keys',
-                title: 'License keys / whitelist',
-                body: 'License keys gate Roblox place scripts. Access can be by creator, place, or tags. Frozen keys/tags or maintenance mode deny access. Pending places wait for owner approval.'
-            },
-            {
-                id: 'commands',
-                title: 'Useful Discord commands',
-                body: '/link — verify Roblox. /switchaccount — switch linked account. /hub — store list. /retrieve — get owned product delivery. /profile — view a user link and products.'
-            },
-            {
-                id: 'escalate',
-                title: 'When to call staff',
-                body: 'Escalate if: payment/purchase dispute, ban appeal, account compromise, user asks for a human, repeated failure after clear steps, or anything requiring changing data (grants, blacklist, refunds).'
-            }
-        ]
-    });
-});
 
 app.listen(PORT, () => {});
