@@ -4702,6 +4702,7 @@ function renderExistingFiles(p){
 
 function renderLinksEditor(links){
   const box = $('linksEditor');
+  if (!box) return;
   const list = (links && links.length) ? links : [{ name: '', url: '' }];
   box.innerHTML = list.map((l, i) =>
     '<div class="row" style="margin-bottom:6px" data-link-row>' +
@@ -4826,6 +4827,7 @@ function renderOwners(){
     ].filter(Boolean).join(' ').toLowerCase();
     return blob.indexOf(q) >= 0;
   });
+  if (!box) return;
   if (!filtered.length) { box.innerHTML = '<p class="muted">No owners</p>'; return; }
   box.innerHTML = filtered.map(pl => {
     const link = linkForRoblox(pl.robloxId);
@@ -4850,15 +4852,17 @@ function renderOwners(){
 }
 
 function renderHistory(){
+  const body = $('histBody');
+  if (!body) return;
   const rows = OWNERSHIPS.slice().sort((a,b) => (b.purchasedAt||0) - (a.purchasedAt||0));
-  $('histBody').innerHTML = rows.map(o => {
+  body.innerHTML = rows.map(o => {
     const prod = PRODUCTS.find(p => p.id === o.productId);
     const when = o.purchasedAt ? new Date(o.purchasedAt).toLocaleString() : '—';
     return '<tr><td>' + when + '</td><td>' + (prod ? prod.name : o.productId) + '</td><td>' +
       (o.robloxName||'') + ' <code>' + o.robloxId + '</code></td><td>' + (o.manual?'Manual':'Purchase') +
       '</td><td><button type="button" class="btn danger" data-rev="' + o.id + '">Revoke</button></td></tr>';
   }).join('') || '<tr><td colspan="5" class="muted">No history</td></tr>';
-  $('histBody').querySelectorAll('[data-rev]').forEach(btn => {
+  body.querySelectorAll('[data-rev]').forEach(btn => {
     btn.addEventListener('click', async () => {
       await fetch('/api/hub/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ownershipId: btn.getAttribute('data-rev') }) });
@@ -4887,22 +4891,34 @@ function renderGrant(){
 }
 
 async function refreshState(forceRender){
+  const hint = $('liveHint');
   try {
-    const r = await fetch('/api/hub/state');
-    if (!r.ok) return;
+    const r = await fetch('/api/hub/state', { credentials: 'same-origin' });
+    if (!r.ok) {
+      const errText = await r.text().catch(() => '');
+      console.error('hub state HTTP', r.status, errText);
+      if (hint) hint.textContent = '· error loading (' + r.status + ')';
+      const box = $('productList');
+      if (box) box.innerHTML = '<p class="muted" style="color:#f43f5e">Failed to load products (HTTP ' + r.status + '). Try refresh / re-login.</p>';
+      return;
+    }
     const j = await r.json();
-    PRODUCTS = j.products || [];
-    OWNERSHIPS = j.ownerships || [];
-    LINKS = j.links || [];
-    KEYS = j.keys || [];
-    fillKeysSelect();
-    renderProducts();
-    renderOwners();
-    renderHistory();
-    renderGrant();
-    const hint = $('liveHint');
-    if (hint) hint.textContent = '· live ' + new Date().toLocaleTimeString();
-  } catch (e) { console.error('refreshState', e); }
+    PRODUCTS = Array.isArray(j.products) ? j.products : [];
+    OWNERSHIPS = Array.isArray(j.ownerships) ? j.ownerships : [];
+    LINKS = Array.isArray(j.links) ? j.links : [];
+    KEYS = Array.isArray(j.keys) ? j.keys : [];
+    try { fillKeysSelect(); } catch (e) { console.error('fillKeys', e); }
+    try { renderProducts(); } catch (e) { console.error('renderProducts', e); }
+    try { renderOwners(); } catch (e) { console.error('renderOwners', e); }
+    try { renderHistory(); } catch (e) { console.error('renderHistory', e); }
+    try { renderGrant(); } catch (e) { console.error('renderGrant', e); }
+    if (hint) hint.textContent = '· live ' + new Date().toLocaleTimeString() + ' · ' + PRODUCTS.length + ' products';
+  } catch (e) {
+    console.error('refreshState', e);
+    if (hint) hint.textContent = '· ' + (e.message || e);
+    const box = $('productList');
+    if (box) box.innerHTML = '<p class="muted" style="color:#f43f5e">Error: ' + String(e.message || e) + '</p>';
+  }
 }
 
 if ($('pFiles')) $('pFiles').addEventListener('change', () => {
@@ -5009,9 +5025,9 @@ if ($('btnGrant')) $('btnGrant').addEventListener('click', async () => {
 });
 if ($('ownerSearch')) $('ownerSearch').addEventListener('input', renderOwners);
 
-renderLinksEditor([]);
+try { renderLinksEditor([]); } catch (e) { console.error(e); }
 refreshState(true);
-setInterval(() => refreshState(false), 5000);
+setInterval(() => refreshState(false), 8000);
 </script>
 </div></body></html>`);
 });
@@ -5447,6 +5463,7 @@ app.get('/api/bot/profile', checkBotAuth, (req, res) => {
 // ---- Hub files + bot jobs ----
 app.get('/api/hub/state', checkAuth, (req, res) => {
     if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
+    try {
     const data = db.getData();
     ensureHubStores(data);
     ensureLinkStores(data);
@@ -5487,7 +5504,11 @@ app.get('/api/hub/state', checkAuth, (req, res) => {
         robloxName: l.robloxName || '',
         linkedAt: l.linkedAt || null
     }));
-    res.json({ products, ownerships, links, keys: (data.keys || []).map(k => k.key) });
+    res.json({ products, ownerships, links, keys: (data.keys || []).map(k => (typeof k === 'string' ? k : k.key)).filter(Boolean) });
+    } catch (e) {
+        console.error('[hub/state]', e);
+        res.status(500).json({ error: String(e.message || e) });
+    }
 });
 
 app.get('/api/hub/files/:token' , (req, res) => {
