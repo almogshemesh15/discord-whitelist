@@ -4463,6 +4463,12 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
 .muted{color:#64748b;font-size:13px}code{color:#a5b4fc}
 .pc{border:1px solid #1e293b;border-radius:12px;padding:12px;margin-bottom:10px;background:#0f172a}
 .tags{color:#fbbf24;font-size:12px}
+.grant-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;max-height:280px;overflow-y:auto;padding:4px}
+.grant-chip{display:flex;align-items:center;gap:10px;padding:12px 14px;border-radius:12px;border:1px solid #1e293b;background:#0f172a;cursor:pointer;transition:border-color .15s,background .15s,box-shadow .15s;user-select:none;margin:0;color:#e2e8f0;font-size:13px}
+.grant-chip:hover{border-color:#475569;background:#111827}
+.grant-chip.on{border-color:#a855f7;background:linear-gradient(135deg,rgba(219,39,119,.18),rgba(124,58,237,.18));box-shadow:0 0 0 1px rgba(168,85,247,.35)}
+.grant-chip input{accent-color:#a855f7;width:16px;height:16px;flex-shrink:0;margin:0}
+.grant-chip span{line-height:1.3;word-break:break-word}
 </style></head><body><div class="wrap">
 <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
   <h1>Hub Store <span class="muted" id="liveHint" style="font-size:12px;font-weight:400"></span></h1>
@@ -4558,7 +4564,12 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
     <h3>Grant product</h3>
     <p class="muted">Target must already be Discord-linked in Hub. Select one or more products (already owned are skipped).</p>
     <label>Products</label>
-    <div id="gProductList" style="max-height:180px;overflow-y:auto;border:1px solid #334155;border-radius:8px;padding:8px;background:#0f172a"></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+      <button type="button" class="btn sec" id="gSelectAll" style="margin:0;padding:6px 12px;font-size:12px">Select all</button>
+      <button type="button" class="btn sec" id="gSelectNone" style="margin:0;padding:6px 12px;font-size:12px">Clear</button>
+      <span class="muted" id="gSelectedCount" style="align-self:center">0 selected</span>
+    </div>
+    <div id="gProductList" class="grant-grid"></div>
     <label>Lookup type</label>
     <select id="gType">
       <option value="robloxId">Roblox user ID</option>
@@ -4831,6 +4842,20 @@ function renderHistory(){
   });
 }
 
+function updateGrantCount(){
+  const box = $('gProductList');
+  const n = box ? box.querySelectorAll('input[type=checkbox]:checked').length : 0;
+  const el = $('gSelectedCount');
+  if (el) el.textContent = n + ' selected';
+  if (box) {
+    box.querySelectorAll('.grant-chip').forEach(lab => {
+      const cb = lab.querySelector('input');
+      if (cb && cb.checked) lab.classList.add('on');
+      else lab.classList.remove('on');
+    });
+  }
+}
+
 function renderGrant(){
   const box = $('gProductList');
   if (!box) return;
@@ -4839,14 +4864,19 @@ function renderGrant(){
   );
   if (!PRODUCTS.length) {
     box.innerHTML = '<span class="muted">No products</span>';
+    updateGrantCount();
     return;
   }
   box.innerHTML = PRODUCTS.map(p => {
-    const checked = prev.has(p.id) ? ' checked' : '';
-    return '<label style="display:flex;align-items:center;gap:8px;margin:4px 0;color:#e2e8f0;cursor:pointer">' +
-      '<input type="checkbox" value="' + p.id + '"' + checked + '/>' +
+    const on = prev.has(p.id);
+    return '<label class="grant-chip' + (on ? ' on' : '') + '">' +
+      '<input type="checkbox" value="' + p.id + '"' + (on ? ' checked' : '') + '/>' +
       '<span>' + (p.name || p.id) + '</span></label>';
   }).join('');
+  box.querySelectorAll('input[type=checkbox]').forEach(cb => {
+    cb.addEventListener('change', updateGrantCount);
+  });
+  updateGrantCount();
 }
 
 function editProduct(p){
@@ -5039,6 +5069,23 @@ if ($('btnGrant')) {
     alert(parts.join('\\n') || 'Done');
     if ($('gValue')) $('gValue').value = '';
     await refreshState();
+  });
+}
+
+if ($('gSelectAll')) {
+  $('gSelectAll').addEventListener('click', () => {
+    const box = $('gProductList');
+    if (!box) return;
+    box.querySelectorAll('input[type=checkbox]').forEach(cb => { cb.checked = true; });
+    updateGrantCount();
+  });
+}
+if ($('gSelectNone')) {
+  $('gSelectNone').addEventListener('click', () => {
+    const box = $('gProductList');
+    if (!box) return;
+    box.querySelectorAll('input[type=checkbox]').forEach(cb => { cb.checked = false; });
+    updateGrantCount();
   });
 }
 
