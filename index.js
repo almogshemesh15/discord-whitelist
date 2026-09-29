@@ -4595,109 +4595,61 @@ document.querySelectorAll('.tabs button').forEach(btn => {
   });
 });
 
-if ($('gType')) $('gType').addEventListener('change', () => {
-  const t = $('gType').value;
-  $('gValueLabel').textContent =
-    t === 'robloxUsername' ? 'Roblox username' :
-    t === 'discordId' ? 'Discord user ID' : 'Roblox user ID';
-});
+if ($('gType')) {
+  $('gType').addEventListener('change', () => {
+    const t = $('gType').value;
+    if ($('gValueLabel')) {
+      $('gValueLabel').textContent =
+        t === 'robloxUsername' ? 'Roblox username' :
+        t === 'discordId' ? 'Discord user ID' : 'Roblox user ID';
+    }
+  });
+}
 
 function fillKeysSelect(){
   const sel = $('pKeys');
   if (!sel) return;
   const prev = Array.from(sel.selectedOptions || []).map(o => o.value);
   sel.innerHTML = '';
-  KEYS.forEach(k => {
+  (KEYS || []).forEach(k => {
     const o = document.createElement('option');
-    o.value = k; o.textContent = k;
+    o.value = k;
+    o.textContent = k;
     if (prev.indexOf(k) >= 0) o.selected = true;
     sel.appendChild(o);
   });
 }
-function selectedKeys(){ return Array.from($('pKeys').selectedOptions).map(o => o.value); }
 
-function clearForm(){
-  $('formTitle').textContent = 'Create product';
-  $('pId').value = '';
-  ['pName','pDev','pStock','pDesc','pImg','pDisc','pTest','pRoles','pText'].forEach(id => $(id).value = '');
-  $('pAvail').value = '1'; $('pSale').value = '0';
-  $('incFiles').checked = true; $('incLinks').checked = true; $('incText').checked = true;
-  Array.from($('pKeys').options).forEach(o => o.selected = false);
-  pendingFiles = [];
-  pendingNames = {};
-  $('pFiles').value = '';
-  $('fileList').textContent = '';
-  $('pendingFileNames').innerHTML = '';
-  renderLinksEditor([]);
+function selectedKeys(){
+  const sel = $('pKeys');
+  if (!sel) return [];
+  return Array.from(sel.selectedOptions || []).map(o => o.value);
 }
 
-function editProduct(p){
-  if (!p) return;
-  $('formTitle').textContent = 'Edit: ' + (p.name || '');
-  $('pId').value = p.id || '';
-  $('pName').value = p.name || '';
-  $('pDev').value = p.developerProductId || '';
-  $('pStock').value = (p.stock == null ? '' : p.stock);
-  $('pAvail').value = p.available === false ? '0' : '1';
-  $('pDesc').value = p.description || '';
-  $('pImg').value = p.imageUrl || '';
-  $('pDisc').value = p.discountPercent == null ? '' : p.discountPercent;
-  $('pSale').value = p.onSale ? '1' : '0';
-  $('pTest').value = p.testPlaceId || '';
-  if ($('pStacy')) $('pStacy').value = p.stacyPilot ? '1' : '0';
-  if ($('pLayout')) $('pLayout').value = p.layoutOrder != null ? p.layoutOrder : '';
-  $('pRoles').value = (p.discordRoleIds || []).join(', ');
-  const inc = Array.isArray(p.deliveryIncludes) && p.deliveryIncludes.length
-    ? p.deliveryIncludes
-    : ['files', 'links', 'text'];
-  if ($('incFiles')) $('incFiles').checked = inc.indexOf('files') >= 0;
-  if ($('incLinks')) $('incLinks').checked = inc.indexOf('links') >= 0;
-  if ($('incText')) $('incText').checked = inc.indexOf('text') >= 0;
-  if ($('pText')) $('pText').value = p.deliveryText != null ? String(p.deliveryText) : '';
-  if (typeof renderLinksEditor === 'function') renderLinksEditor(Array.isArray(p.links) ? p.links : []);
-  const keys = p.keyNames || [];
-  Array.from($('pKeys').options).forEach(o => { o.selected = keys.indexOf(o.value) >= 0; });
+function linkForRoblox(rid){
+  return (LINKS || []).find(l => String(l.robloxId) === String(rid)) || null;
+}
+
+function clearForm(){
+  if ($('formTitle')) $('formTitle').textContent = 'Create product';
+  if ($('pId')) $('pId').value = '';
+  ['pName','pDev','pStock','pDesc','pImg','pDisc','pTest','pRoles','pText'].forEach(id => {
+    if ($(id)) $(id).value = '';
+  });
+  if ($('pAvail')) $('pAvail').value = '1';
+  if ($('pSale')) $('pSale').value = '0';
+  if ($('pStacy')) $('pStacy').value = '0';
+  if ($('pLayout')) $('pLayout').value = '';
+  if ($('incFiles')) $('incFiles').checked = true;
+  if ($('incLinks')) $('incLinks').checked = true;
+  if ($('incText')) $('incText').checked = true;
+  if ($('pKeys')) Array.from($('pKeys').options).forEach(o => o.selected = false);
   pendingFiles = [];
   pendingNames = {};
   if ($('pFiles')) $('pFiles').value = '';
+  if ($('fileList')) $('fileList').textContent = '';
   if ($('pendingFileNames')) $('pendingFileNames').innerHTML = '';
-  renderExistingFiles(p);
-  document.querySelector('.tabs button[data-t="products"]').click();
-  window.scrollTo({ top: 0, behavior: 'smooth' });
-}
-
-function renderExistingFiles(p){
-  const files = p.files || [];
-  if (!files.length) { $('fileList').textContent = 'No files on server yet.'; return; }
-  $('fileList').innerHTML = files.map(f =>
-    '<div style="display:flex;gap:8px;align-items:center;margin:6px 0;flex-wrap:wrap">' +
-    '<input data-rename="' + f.id + '" value="' + String(f.name||'').replace(/"/g,'&quot;') + '" style="max-width:220px"/>' +
-    '<span class="muted">(' + Math.round((f.size||0)/1024) + ' KB)</span>' +
-    '<button type="button" class="btn sec" data-save-name="' + f.id + '">Rename</button>' +
-    '<button type="button" class="btn danger" data-fid="' + f.id + '">Delete</button></div>'
-  ).join('');
-  $('fileList').querySelectorAll('[data-fid]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const id = $('pId').value;
-      await fetch('/api/hub/products/' + encodeURIComponent(id) + '/files/' + encodeURIComponent(btn.getAttribute('data-fid')), { method: 'DELETE' });
-      await refreshState(true);
-      const p2 = PRODUCTS.find(x => x.id === id);
-      if (p2) { renderExistingFiles(p2); if ($('pId').value === p2.id) editProduct(p2); }
-    });
-  });
-  $('fileList').querySelectorAll('[data-save-name]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const id = $('pId').value;
-      const fid = btn.getAttribute('data-save-name');
-      const inp = $('fileList').querySelector('input[data-rename="' + fid + '"]');
-      const name = (inp && inp.value || '').trim();
-      if (!name) return;
-      await fetch('/api/hub/products/' + encodeURIComponent(id) + '/files/' + encodeURIComponent(fid) + '/rename', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name })
-      });
-      await refreshState(true);
-    });
-  });
+  renderLinksEditor([]);
 }
 
 function renderLinksEditor(links){
@@ -4712,23 +4664,224 @@ function renderLinksEditor(links){
   ).join('');
   box.querySelectorAll('[data-rm-link]').forEach(btn => {
     btn.addEventListener('click', () => {
-      btn.closest('[data-link-row]').remove();
+      const row = btn.closest('[data-link-row]');
+      if (row) row.remove();
       if (!box.querySelector('[data-link-row]')) renderLinksEditor([]);
     });
   });
 }
+
 function collectLinks(){
-  return Array.from(document.querySelectorAll('#linksEditor [data-link-row]')).map(row => ({
-    name: (row.querySelector('[data-lname]') || {}).value || '',
-    url: (row.querySelector('[data-lurl]') || {}).value || ''
-  })).filter(l => (l.url || '').trim());
+  const rows = document.querySelectorAll('#linksEditor [data-link-row]');
+  const out = [];
+  rows.forEach(row => {
+    const name = (row.querySelector('[data-lname]') || {}).value || '';
+    const url = (row.querySelector('[data-lurl]') || {}).value || '';
+    if (String(url).trim()) out.push({ name: String(name).trim() || String(url).trim(), url: String(url).trim() });
+  });
+  return out;
 }
-function collectIncludes(){
-  const a = [];
-  if ($('incFiles').checked) a.push('files');
-  if ($('incLinks').checked) a.push('links');
-  if ($('incText').checked) a.push('text');
-  return a;
+
+function renderExistingFiles(p){
+  const el = $('fileList');
+  if (!el) return;
+  const files = (p && p.files) || [];
+  if (!files.length) { el.textContent = 'No files on server yet.'; return; }
+  el.innerHTML = files.map(f =>
+    '<div style="display:flex;gap:8px;align-items:center;margin:6px 0;flex-wrap:wrap">' +
+    '<input data-rename="' + f.id + '" value="' + String(f.name||'').replace(/"/g,'&quot;') + '" style="max-width:220px"/>' +
+    '<span class="muted">(' + Math.round((f.size||0)/1024) + ' KB)</span>' +
+    '<button type="button" class="btn sec" data-save-name="' + f.id + '">Rename</button>' +
+    '<button type="button" class="btn danger" data-del-file="' + f.id + '">Delete</button></div>'
+  ).join('');
+  el.querySelectorAll('[data-save-name]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = btn.getAttribute('data-save-name');
+      const inp = el.querySelector('input[data-rename="' + id + '"]');
+      const name = inp ? inp.value.trim() : '';
+      if (!name || !$('pId').value) return;
+      await fetch('/api/hub/products/' + encodeURIComponent($('pId').value) + '/files/' + encodeURIComponent(id) + '/rename', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name })
+      });
+      await refreshState(true);
+    });
+  });
+  el.querySelectorAll('[data-del-file]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('Delete file?') || !$('pId').value) return;
+      await fetch('/api/hub/products/' + encodeURIComponent($('pId').value) + '/files/' + encodeURIComponent(btn.getAttribute('data-del-file')), {
+        method: 'DELETE'
+      });
+      await refreshState(true);
+    });
+  });
+}
+
+function renderProducts(){
+  const box = $('productList');
+  if (!box) return;
+  if (!PRODUCTS.length) {
+    box.innerHTML = '<p class="muted">No products yet</p>';
+    return;
+  }
+  const sorted = PRODUCTS.slice().sort((a, b) => {
+    const ao = a.layoutOrder != null ? Number(a.layoutOrder) : 0;
+    const bo = b.layoutOrder != null ? Number(b.layoutOrder) : 0;
+    if (ao !== bo) return ao - bo;
+    return String(a.name || '').localeCompare(String(b.name || ''));
+  });
+  box.innerHTML = sorted.map(p => {
+    const stock = p.stock == null ? '∞' : p.stock;
+    return '<div class="pc"><b>' + (p.name || '') + '</b> <code>' + p.id + '</code>' +
+      '<div class="muted">Dev: ' + (p.developerProductId||'') + ' · Stock: ' + stock +
+      (p.stacyPilot ? ' · <span style="color:#38bdf8">StacyPilot</span>' : '') +
+      (p.layoutOrder != null ? ' · order ' + p.layoutOrder : '') +
+      ' · Delivery: ' + ((p.deliveryIncludes||[]).join('+')||'none') +
+      ' · Keys: ' + ((p.keyNames||[]).join(', ')||'—') +
+      ' · Files: ' + ((p.files||[]).length) + '</div>' +
+      '<button type="button" class="btn sec" data-edit="' + p.id + '">Edit</button>' +
+      '<button type="button" class="btn danger" data-del="' + p.id + '">Delete</button></div>';
+  }).join('');
+  box.querySelectorAll('[data-edit]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      await refreshState(false);
+      const p = PRODUCTS.find(x => x.id === btn.getAttribute('data-edit'));
+      if (p) editProduct(p);
+    });
+  });
+  box.querySelectorAll('[data-del]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('Delete product?')) return;
+      await fetch('/api/hub/products/' + encodeURIComponent(btn.getAttribute('data-del')), { method: 'DELETE' });
+      await refreshState(true);
+    });
+  });
+}
+
+function renderOwners(){
+  const box = $('ownerList');
+  if (!box) return;
+  const by = {};
+  OWNERSHIPS.forEach(o => {
+    const rid = String(o.robloxId);
+    if (!by[rid]) by[rid] = { robloxId: rid, robloxName: o.robloxName || rid, items: [] };
+    if (o.robloxName) by[rid].robloxName = o.robloxName;
+    const prod = PRODUCTS.find(p => p.id === o.productId);
+    const keyTags = ((prod && prod.keyNames) || []).map(k => '🔑' + k).join(' ');
+    by[rid].items.push({
+      ownershipId: o.id,
+      name: prod ? prod.name : o.productId,
+      productId: o.productId,
+      keys: keyTags
+    });
+  });
+  const q = (($('ownerSearch') && $('ownerSearch').value) || '').toLowerCase().trim();
+  const filtered = Object.values(by).filter(pl => {
+    if (!q) return true;
+    const link = linkForRoblox(pl.robloxId);
+    const blob = [pl.robloxName, pl.robloxId, link && link.discordTag, link && link.discordId]
+      .filter(Boolean).join(' ').toLowerCase();
+    return blob.indexOf(q) >= 0;
+  });
+  if (!filtered.length) { box.innerHTML = '<p class="muted">No owners</p>'; return; }
+  box.innerHTML = filtered.map(pl => {
+    const link = linkForRoblox(pl.robloxId);
+    const disc = link
+      ? ('Discord: <b>' + (link.discordTag || '—') + '</b> <code>' + link.discordId + '</code>')
+      : '<span class="muted">Discord: not linked</span>';
+    const items = pl.items.map(it =>
+      '<div style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid #1e293b">' +
+      '<span><b>' + it.name + '</b> <span class="tags">' + (it.keys || '') + '</span></span>' +
+      '<button type="button" class="btn danger" data-rev="' + it.ownershipId + '">×</button></div>'
+    ).join('');
+    return '<div class="pc"><b>' + pl.robloxName + '</b> <code>' + pl.robloxId + '</code><div class="muted" style="margin:4px 0">' + disc + '</div><div>' + items + '</div></div>';
+  }).join('');
+  box.querySelectorAll('[data-rev]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('Remove product from player?')) return;
+      await fetch('/api/hub/revoke', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ownershipId: btn.getAttribute('data-rev') })
+      });
+      await refreshState(true);
+    });
+  });
+}
+
+function renderHistory(){
+  const body = $('histBody');
+  if (!body) return;
+  const rows = OWNERSHIPS.slice().sort((a,b) => (b.purchasedAt||0) - (a.purchasedAt||0));
+  body.innerHTML = rows.map(o => {
+    const prod = PRODUCTS.find(p => p.id === o.productId);
+    const when = o.purchasedAt ? new Date(o.purchasedAt).toLocaleString() : '—';
+    return '<tr><td>' + when + '</td><td>' + (prod ? prod.name : o.productId) + '</td><td>' +
+      (o.robloxName||'') + ' <code>' + o.robloxId + '</code></td><td>' + (o.manual?'Manual':'Purchase') +
+      '</td><td><button type="button" class="btn danger" data-rev="' + o.id + '">Revoke</button></td></tr>';
+  }).join('') || '<tr><td colspan="5" class="muted">No history</td></tr>';
+  body.querySelectorAll('[data-rev]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      await fetch('/api/hub/revoke', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ownershipId: btn.getAttribute('data-rev') })
+      });
+      await refreshState(true);
+    });
+  });
+}
+
+function renderGrant(){
+  const box = $('gProductList');
+  if (!box) return;
+  const prev = new Set(
+    Array.from(box.querySelectorAll('input[type=checkbox]:checked')).map(c => c.value)
+  );
+  if (!PRODUCTS.length) {
+    box.innerHTML = '<span class="muted">No products</span>';
+    return;
+  }
+  box.innerHTML = PRODUCTS.map(p => {
+    const checked = prev.has(p.id) ? ' checked' : '';
+    return '<label style="display:flex;align-items:center;gap:8px;margin:4px 0;color:#e2e8f0;cursor:pointer">' +
+      '<input type="checkbox" value="' + p.id + '"' + checked + '/>' +
+      '<span>' + (p.name || p.id) + '</span></label>';
+  }).join('');
+}
+
+function editProduct(p){
+  if (!p) return;
+  if ($('formTitle')) $('formTitle').textContent = 'Edit: ' + (p.name || '');
+  if ($('pId')) $('pId').value = p.id || '';
+  if ($('pName')) $('pName').value = p.name || '';
+  if ($('pDev')) $('pDev').value = p.developerProductId || '';
+  if ($('pStock')) $('pStock').value = (p.stock == null ? '' : p.stock);
+  if ($('pAvail')) $('pAvail').value = p.available === false ? '0' : '1';
+  if ($('pDesc')) $('pDesc').value = p.description || '';
+  if ($('pImg')) $('pImg').value = p.imageUrl || '';
+  if ($('pDisc')) $('pDisc').value = p.discountPercent == null ? '' : p.discountPercent;
+  if ($('pSale')) $('pSale').value = p.onSale ? '1' : '0';
+  if ($('pTest')) $('pTest').value = p.testPlaceId || '';
+  if ($('pStacy')) $('pStacy').value = p.stacyPilot ? '1' : '0';
+  if ($('pLayout')) $('pLayout').value = p.layoutOrder != null ? p.layoutOrder : '';
+  if ($('pRoles')) $('pRoles').value = (p.discordRoleIds || []).join(', ');
+  const inc = Array.isArray(p.deliveryIncludes) && p.deliveryIncludes.length
+    ? p.deliveryIncludes : ['files', 'links', 'text'];
+  if ($('incFiles')) $('incFiles').checked = inc.indexOf('files') >= 0;
+  if ($('incLinks')) $('incLinks').checked = inc.indexOf('links') >= 0;
+  if ($('incText')) $('incText').checked = inc.indexOf('text') >= 0;
+  if ($('pText')) $('pText').value = p.deliveryText != null ? String(p.deliveryText) : '';
+  renderLinksEditor(Array.isArray(p.links) ? p.links : []);
+  const keys = p.keyNames || [];
+  if ($('pKeys')) Array.from($('pKeys').options).forEach(o => { o.selected = keys.indexOf(o.value) >= 0; });
+  pendingFiles = [];
+  pendingNames = {};
+  if ($('pFiles')) $('pFiles').value = '';
+  if ($('pendingFileNames')) $('pendingFileNames').innerHTML = '';
+  renderExistingFiles(p);
+  const tab = document.querySelector('.tabs button[data-t="products"]');
+  if (tab) tab.click();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 async function uploadPending(productId){
@@ -4759,147 +4912,14 @@ async function uploadPending(productId){
   pendingNames = {};
 }
 
-function renderProducts(){
-  const box = $('productList');
-  if (!box) return;
-  if (!PRODUCTS.length) { box.innerHTML = '<p class="muted">No products yet</p>'; return; }
-  const sorted = PRODUCTS.slice().sort((a, b) => {
-    const ao = a.layoutOrder != null ? Number(a.layoutOrder) : 0;
-    const bo = b.layoutOrder != null ? Number(b.layoutOrder) : 0;
-    if (ao !== bo) return ao - bo;
-    return String(a.name || '').localeCompare(String(b.name || ''));
-  });
-  box.innerHTML = sorted.map(p => {
-    const stock = p.stock == null ? '∞' : p.stock;
-    return '<div class="pc"><b>' + (p.name || '') + '</b> <code>' + p.id + '</code>' +
-      '<div class="muted">Dev: ' + (p.developerProductId||'') + ' · Stock: ' + stock +
-        (p.stacyPilot ? ' · <span style="color:#38bdf8">StacyPilot</span>' : '') +
-        (p.layoutOrder != null ? ' · order ' + p.layoutOrder : '') +
-      ' · Delivery: ' + ((p.deliveryIncludes||[]).join('+')||'none') +
-      ' · Keys: ' + ((p.keyNames||[]).join(', ')||'—') +
-      ' · Files: ' + ((p.files||[]).length) + '</div>' +
-      '<button type="button" class="btn sec" data-edit="' + p.id + '">Edit</button>' +
-      '<button type="button" class="btn danger" data-del="' + p.id + '">Delete</button></div>';
-  }).join('');
-  box.querySelectorAll('[data-edit]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      await refreshState(false);
-      const p = PRODUCTS.find(x => x.id === btn.getAttribute('data-edit'));
-      if (p) editProduct(p);
-      else alert('Product not found');
-    });
-  });
-  box.querySelectorAll('[data-del]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      if (!confirm('Delete product?')) return;
-      await fetch('/api/hub/products/' + encodeURIComponent(btn.getAttribute('data-del')), { method: 'DELETE' });
-      await refreshState(true);
-    });
-  });
-}
-
-function linkForRoblox(robloxId){
-  return (LINKS || []).find(l => String(l.robloxId) === String(robloxId)) || null;
-}
-function renderOwners(){
-  const by = {};
-  OWNERSHIPS.forEach(o => {
-    const rid = String(o.robloxId);
-    if (!by[rid]) by[rid] = { robloxId: rid, robloxName: o.robloxName || rid, items: [] };
-    if (o.robloxName) by[rid].robloxName = o.robloxName;
-    const prod = PRODUCTS.find(p => p.id === o.productId);
-    const keyTags = ((prod && prod.keyNames) || []).map(k => '🔑' + k).join(' ');
-    by[rid].items.push({
-      ownershipId: o.id,
-      name: prod ? prod.name : o.productId,
-      productId: o.productId,
-      keys: keyTags
-    });
-  });
-  const q = ($('ownerSearch').value || '').toLowerCase().trim();
-  const box = $('ownerList');
-  const filtered = Object.values(by).filter(pl => {
-    if (!q) return true;
-    const link = linkForRoblox(pl.robloxId);
-    const blob = [
-      pl.robloxName, pl.robloxId,
-      link && link.discordTag, link && link.discordId
-    ].filter(Boolean).join(' ').toLowerCase();
-    return blob.indexOf(q) >= 0;
-  });
-  if (!box) return;
-  if (!filtered.length) { box.innerHTML = '<p class="muted">No owners</p>'; return; }
-  box.innerHTML = filtered.map(pl => {
-    const link = linkForRoblox(pl.robloxId);
-    const disc = link
-      ? ('Discord: <b>' + (link.discordTag || '—') + '</b> <code>' + link.discordId + '</code>')
-      : '<span class="muted">Discord: not linked</span>';
-    const items = pl.items.map(it =>
-      '<div style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid #1e293b">' +
-      '<span><b>' + it.name + '</b> <span class="tags">' + (it.keys || '') + '</span></span>' +
-      '<button type="button" class="btn danger" data-rev="' + it.ownershipId + '">×</button></div>'
-    ).join('');
-    return '<div class="pc"><b>' + pl.robloxName + '</b> <code>' + pl.robloxId + '</code><div class="muted" style="margin:4px 0">' + disc + '</div><div>' + items + '</div></div>';
-  }).join('');
-  box.querySelectorAll('[data-rev]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      if (!confirm('Remove product from player?')) return;
-      await fetch('/api/hub/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ownershipId: btn.getAttribute('data-rev') }) });
-      await refreshState(true);
-    });
-  });
-}
-
-function renderHistory(){
-  const body = $('histBody');
-  if (!body) return;
-  const rows = OWNERSHIPS.slice().sort((a,b) => (b.purchasedAt||0) - (a.purchasedAt||0));
-  body.innerHTML = rows.map(o => {
-    const prod = PRODUCTS.find(p => p.id === o.productId);
-    const when = o.purchasedAt ? new Date(o.purchasedAt).toLocaleString() : '—';
-    return '<tr><td>' + when + '</td><td>' + (prod ? prod.name : o.productId) + '</td><td>' +
-      (o.robloxName||'') + ' <code>' + o.robloxId + '</code></td><td>' + (o.manual?'Manual':'Purchase') +
-      '</td><td><button type="button" class="btn danger" data-rev="' + o.id + '">Revoke</button></td></tr>';
-  }).join('') || '<tr><td colspan="5" class="muted">No history</td></tr>';
-  body.querySelectorAll('[data-rev]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      await fetch('/api/hub/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ownershipId: btn.getAttribute('data-rev') }) });
-      await refreshState(true);
-    });
-  });
-}
-
-function renderGrant(){
-  const box = $('gProductList');
-  if (!box) return;
-  const prev = new Set(
-    [...box.querySelectorAll('input[type=checkbox]:checked')].map(c => c.value)
-  );
-  if (!PRODUCTS.length) {
-    box.innerHTML = '<span class="muted">No products</span>';
-    return;
-  }
-  box.innerHTML = PRODUCTS.map(p => {
-    const id = 'gp_' + p.id;
-    const checked = prev.has(p.id) ? ' checked' : '';
-    return '<label style="display:flex;align-items:center;gap:8px;margin:4px 0;color:#e2e8f0;cursor:pointer">' +
-      '<input type="checkbox" value="' + p.id + '" id="' + id + '"' + checked + '/>' +
-      '<span>' + (p.name || p.id) + '</span></label>';
-  }).join('');
-}
-
-async function refreshState(forceRender){
+async function refreshState(){
   const hint = $('liveHint');
   try {
     const r = await fetch('/api/hub/state', { credentials: 'same-origin' });
     if (!r.ok) {
-      const errText = await r.text().catch(() => '');
-      console.error('hub state HTTP', r.status, errText);
-      if (hint) hint.textContent = '· error loading (' + r.status + ')';
-      const box = $('productList');
-      if (box) box.innerHTML = '<p class="muted" style="color:#f43f5e">Failed to load products (HTTP ' + r.status + '). Try refresh / re-login.</p>';
+      if (hint) hint.textContent = '· load error ' + r.status;
+      if ($('productList')) $('productList').innerHTML =
+        '<p class="muted" style="color:#f43f5e">Failed to load (HTTP ' + r.status + '). Re-login if needed.</p>';
       return;
     }
     const j = await r.json();
@@ -4907,127 +4927,126 @@ async function refreshState(forceRender){
     OWNERSHIPS = Array.isArray(j.ownerships) ? j.ownerships : [];
     LINKS = Array.isArray(j.links) ? j.links : [];
     KEYS = Array.isArray(j.keys) ? j.keys : [];
-    try { fillKeysSelect(); } catch (e) { console.error('fillKeys', e); }
-    try { renderProducts(); } catch (e) { console.error('renderProducts', e); }
-    try { renderOwners(); } catch (e) { console.error('renderOwners', e); }
-    try { renderHistory(); } catch (e) { console.error('renderHistory', e); }
-    try { renderGrant(); } catch (e) { console.error('renderGrant', e); }
-    if (hint) hint.textContent = '· live ' + new Date().toLocaleTimeString() + ' · ' + PRODUCTS.length + ' products';
+    fillKeysSelect();
+    renderProducts();
+    renderOwners();
+    renderHistory();
+    renderGrant();
+    if (hint) hint.textContent = '· ' + PRODUCTS.length + ' products · ' + new Date().toLocaleTimeString();
   } catch (e) {
-    console.error('refreshState', e);
+    console.error(e);
     if (hint) hint.textContent = '· ' + (e.message || e);
-    const box = $('productList');
-    if (box) box.innerHTML = '<p class="muted" style="color:#f43f5e">Error: ' + String(e.message || e) + '</p>';
+    if ($('productList')) $('productList').innerHTML =
+      '<p class="muted" style="color:#f43f5e">Error: ' + String(e.message || e) + '</p>';
   }
 }
 
-if ($('pFiles')) $('pFiles').addEventListener('change', () => {
-  const added = Array.from($('pFiles').files || []);
-  for (const f of added) {
-    const exists = pendingFiles.some(x => x.name === f.name && x.size === f.size && x.lastModified === f.lastModified);
-    if (!exists) pendingFiles.push(f);
-  }
-  $('pFiles').value = '';
-  renderPendingFiles();
-});
-function renderPendingFiles(){
-  const box = $('pendingFileNames');
-  if (!box) return;
-  if (!pendingFiles.length) { box.innerHTML = ''; return; }
-  box.innerHTML = pendingFiles.map((f, i) =>
-    '<div style="margin:4px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
-    '<code>' + f.name + '</code> → ' +
-    '<input data-pidx="' + i + '" value="' + String(f.name).replace(/"/g,'&quot;') + '" style="max-width:200px" placeholder="display name"/>' +
-    '<button type="button" class="btn danger" data-rm-pending="' + i + '">×</button></div>'
-  ).join('');
-  box.querySelectorAll('[data-rm-pending]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const i = Number(btn.getAttribute('data-rm-pending'));
-      pendingFiles.splice(i, 1);
-      renderPendingFiles();
-    });
+if ($('pFiles')) {
+  $('pFiles').addEventListener('change', () => {
+    const added = Array.from($('pFiles').files || []);
+    for (const f of added) pendingFiles.push(f);
+    if ($('pendingFileNames')) {
+      $('pendingFileNames').innerHTML = pendingFiles.map((f, i) =>
+        '<div style="margin:4px 0">File: ' + f.name +
+        ' → <input data-pidx="' + i + '" placeholder="Display name" value="' +
+        String(f.name).replace(/"/g,'&quot;') + '" style="max-width:200px"/></div>'
+      ).join('');
+    }
+    $('pFiles').value = '';
   });
 }
 
-if ($('btnAddLink')) $('btnAddLink').addEventListener('click', () => {
-  const cur = collectLinks();
-  cur.push({ name: '', url: '' });
-  renderLinksEditor(cur);
-});
+if ($('btnAddLink')) {
+  $('btnAddLink').addEventListener('click', () => {
+    const cur = collectLinks();
+    cur.push({ name: '', url: '' });
+    renderLinksEditor(cur);
+  });
+}
 
 if ($('btnClear')) $('btnClear').addEventListener('click', clearForm);
-if ($('btnSave')) $('btnSave').addEventListener('click', async () => {
-  const body = {
-    id: $('pId').value.trim() || undefined,
-    name: $('pName').value.trim(),
-    developerProductId: $('pDev').value.trim(),
-    stock: $('pStock').value,
-    available: $('pAvail').value === '1',
-    description: $('pDesc').value,
-    imageUrl: $('pImg').value.trim(),
-    keyNames: selectedKeys(),
-    discordRoleIds: $('pRoles').value,
-    discountPercent: $('pDisc').value,
-    onSale: $('pSale').value === '1',
-    testPlaceId: $('pTest').value.trim(),
-    stacyPilot: $('pStacy') && $('pStacy').value === '1',
-    layoutOrder: $('pLayout') ? $('pLayout').value : '',
-    deliveryIncludes: collectIncludes(),
-    links: collectLinks(),
-    deliveryText: $('pText').value
-  };
-  const r = await fetch('/api/hub/products', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) { alert(j.error || 'Failed'); return; }
-  try {
-    if (pendingFiles.length && j.id) await uploadPending(j.id);
-  } catch (e) {
-    alert(e.message || e);
-  }
-  clearForm();
-  await refreshState(true);
-});
 
-if ($('btnGrant')) $('btnGrant').addEventListener('click', async () => {
-  try {
+if ($('btnSave')) {
+  $('btnSave').addEventListener('click', async () => {
+    const name = $('pName') ? $('pName').value.trim() : '';
+    if (!name) return alert('Name required');
+    const includes = [];
+    if ($('incFiles') && $('incFiles').checked) includes.push('files');
+    if ($('incLinks') && $('incLinks').checked) includes.push('links');
+    if ($('incText') && $('incText').checked) includes.push('text');
+    const body = {
+      id: $('pId') && $('pId').value.trim() ? $('pId').value.trim() : undefined,
+      name,
+      developerProductId: $('pDev') ? $('pDev').value.trim() : '',
+      stock: $('pStock') ? $('pStock').value : '',
+      available: !$('pAvail') || $('pAvail').value !== '0',
+      description: $('pDesc') ? $('pDesc').value : '',
+      imageUrl: $('pImg') ? $('pImg').value.trim() : '',
+      discountPercent: $('pDisc') ? $('pDisc').value : '',
+      onSale: $('pSale') && $('pSale').value === '1',
+      testPlaceId: $('pTest') ? $('pTest').value.trim() : '',
+      stacyPilot: $('pStacy') && $('pStacy').value === '1',
+      layoutOrder: $('pLayout') ? $('pLayout').value : '',
+      discordRoleIds: $('pRoles') ? $('pRoles').value : '',
+      keyNames: selectedKeys(),
+      deliveryIncludes: includes,
+      links: collectLinks(),
+      deliveryText: $('pText') ? $('pText').value : ''
+    };
+    const r = await fetch('/api/hub/products', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { alert(j.error || 'Failed'); return; }
+    try {
+      if (pendingFiles.length && j.id) await uploadPending(j.id);
+    } catch (e) {
+      alert(e.message || e);
+    }
+    clearForm();
+    await refreshState();
+  });
+}
+
+if ($('btnGrant')) {
+  $('btnGrant').addEventListener('click', async () => {
     const type = $('gType') ? $('gType').value : 'robloxId';
     const val = $('gValue') ? $('gValue').value.trim() : '';
     if (!val) return alert('Enter a target');
     const box = $('gProductList');
     const productIds = box
-      ? [...box.querySelectorAll('input[type=checkbox]:checked')].map(c => c.value)
+      ? Array.from(box.querySelectorAll('input[type=checkbox]:checked')).map(c => c.value)
       : [];
     if (!productIds.length) return alert('Select at least one product');
     const body = {
       productIds,
-      notifyDm: !!($('gNotify') && $('gNotify').checked)
+      notifyDm: !$('gNotify') || $('gNotify').checked
     };
     if (type === 'robloxId') body.robloxId = val;
     else if (type === 'robloxUsername') body.robloxUsername = val;
     else body.discordId = val;
     const r = await fetch('/api/hub/grant', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) { alert(j.error || 'Failed'); return; }
     const parts = [];
     if (j.granted && j.granted.length) parts.push('Granted: ' + j.granted.join(', '));
-    if (j.skipped && j.skipped.length) parts.push('Skipped (already owned): ' + j.skipped.join(', '));
+    if (j.skipped && j.skipped.length) parts.push('Skipped: ' + j.skipped.join(', '));
     if (j.failed && j.failed.length) parts.push('Failed: ' + j.failed.join(', '));
-    alert(parts.join('\n') || 'Done');
+    alert(parts.join('\\n') || 'Done');
     if ($('gValue')) $('gValue').value = '';
-    await refreshState(true);
-  } catch (err) {
-    alert(err.message || String(err));
-  }
-});
+    await refreshState();
+  });
+}
+
 if ($('ownerSearch')) $('ownerSearch').addEventListener('input', renderOwners);
 
-try { renderLinksEditor([]); } catch (e) { console.error(e); }
-refreshState(true);
-setInterval(() => refreshState(false), 8000);
+renderLinksEditor([]);
+refreshState();
+setInterval(refreshState, 8000);
 </script>
 </div></body></html>`);
 });
