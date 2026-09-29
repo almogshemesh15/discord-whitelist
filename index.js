@@ -4526,7 +4526,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
       <div id="linksEditor"></div>
       <button type="button" class="btn sec" id="btnAddLink">+ Add link</button>
     </div>
-    <label>Keys (Ctrl multi-select)</label>
+    <label>Keys (optional — Ctrl/Cmd multi-select, leave empty for none)</label>
     <select id="pKeys" multiple size="5"></select>
     <div id="fileSection" style="margin-top:12px;padding:12px;border:1px dashed #334155;border-radius:10px">
       <h4 style="margin:0 0 6px">📎 Files</h4>
@@ -4895,8 +4895,9 @@ function editProduct(p){
   if ($('pStacy')) $('pStacy').value = p.stacyPilot ? '1' : '0';
   if ($('pLayout')) $('pLayout').value = p.layoutOrder != null ? p.layoutOrder : '';
   if ($('pRoles')) $('pRoles').value = (p.discordRoleIds || []).join(', ');
-  const inc = Array.isArray(p.deliveryIncludes) && p.deliveryIncludes.length
-    ? p.deliveryIncludes : ['files', 'links', 'text'];
+  const inc = Array.isArray(p.deliveryIncludes)
+    ? p.deliveryIncludes
+    : ['files', 'links', 'text'];
   if ($('incFiles')) $('incFiles').checked = inc.indexOf('files') >= 0;
   if ($('incLinks')) $('incLinks').checked = inc.indexOf('links') >= 0;
   if ($('incText')) $('incText').checked = inc.indexOf('text') >= 0;
@@ -5020,6 +5021,7 @@ if ($('btnSave')) {
       discordRoleIds: $('pRoles') ? $('pRoles').value : '',
       keyNames: selectedKeys(),
       deliveryIncludes: includes,
+      deliveryNone: includes.length === 0,
       links: collectLinks(),
       deliveryText: $('pText') ? $('pText').value : ''
     };
@@ -5155,7 +5157,9 @@ app.post('/api/hub/products', checkAuth, async (req, res) => {
             : String(b.discordRoleIds || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
         let includes = b.deliveryIncludes;
         if (typeof includes === 'string') includes = includes.split(/[\s,]+/);
-        if (!Array.isArray(includes) || !includes.length) includes = ['files', 'links', 'text'];
+        // Missing field → default all; explicit [] → none (user unchecked everything)
+        if (includes == null) includes = ['files', 'links', 'text'];
+        if (!Array.isArray(includes)) includes = ['files', 'links', 'text'];
         includes = includes.map(String).map(s => s.toLowerCase()).filter(x => ['files','links','text'].includes(x));
         if (b.deliveryNone === true || b.deliveryNone === '1') includes = [];
         row.deliveryIncludes = includes;
@@ -5192,12 +5196,21 @@ app.post('/api/hub/products', checkAuth, async (req, res) => {
             deliveryIncludes: (function(){
                 let includes = b.deliveryIncludes;
                 if (typeof includes === 'string') includes = includes.split(/[\s,]+/);
+                if (includes == null) includes = ['files','links','text'];
                 if (!Array.isArray(includes)) includes = ['files','links','text'];
                 includes = includes.map(String).map(s => s.toLowerCase()).filter(x => ['files','links','text'].includes(x));
                 if (b.deliveryNone === true || b.deliveryNone === '1') includes = [];
                 return includes;
             })(),
-            deliveryMode: 'mixed',
+            deliveryMode: (function(){
+                let includes = b.deliveryIncludes;
+                if (typeof includes === 'string') includes = includes.split(/[\s,]+/);
+                if (includes == null) includes = ['files','links','text'];
+                if (!Array.isArray(includes)) includes = ['files','links','text'];
+                includes = includes.map(String).map(s => s.toLowerCase()).filter(x => ['files','links','text'].includes(x));
+                if (b.deliveryNone === true || b.deliveryNone === '1') includes = [];
+                return includes.length ? includes.join('+') : 'none';
+            })(),
             links: normalizeLinks(Array.isArray(b.links) ? b.links : String(b.links||'').split(/\n+/).map(s => ({ url: s }))),
             deliveryText: String(b.deliveryText || '').slice(0, 4000),
             files: [],
@@ -6388,13 +6401,14 @@ app.post('/api/blacklist', checkAuth, async (req, res) => {
     if (req.session.userEmail !== OWNER_EMAIL) return res.status(403).json({ error: 'owner only' });
     const data = db.getData();
     ensureBlacklist(data);
+    ensureLinkStores(data);
     let discordId = String(req.body.discordId || '').replace(/\D/g, '') || null;
     let robloxId = String(req.body.robloxId || '').replace(/\D/g, '') || null;
     let discordTag = String(req.body.discordTag || '').trim() || null;
     let robloxName = String(req.body.robloxName || req.body.robloxUsername || '').trim() || null;
     const note = String(req.body.note || '').trim().slice(0, 200) || null;
 
-    // Resolve Roblox username → id
+    // 1) Roblox username → id + canonical name
     if (robloxName && !robloxId) {
         try {
             const r = await axios.post('https://users.roblox.com/v1/usernames/users', {
@@ -6410,7 +6424,15 @@ app.post('/api/blacklist', checkAuth, async (req, res) => {
         }
     }
 
-    // Fill from discordLinks
+    // 2) Roblox id → username (if missing)
+    if (robloxId && !robloxName) {
+        try {
+            const u = await axios.get('https://users.roblox.com/v1/users/' + robloxId, { timeout: 8000 });
+            if (u.data && u.data.name) robloxName = u.data.name;
+        } catch (_) {}
+    }
+
+    // 3) Fill gaps from Hub Discord links (either direction)
     if (discordId) {
         const link = (data.discordLinks || []).find(l => String(l.discordId) === discordId);
         if (link) {
@@ -6426,6 +6448,28 @@ app.post('/api/blacklist', checkAuth, async (req, res) => {
             if (!discordTag) discordTag = link.discordTag || discordTag;
             if (!robloxName) robloxName = link.robloxName || robloxName;
         }
+    }
+    // Match by discord tag if only tag given
+    if (discordTag && !discordId) {
+        const low = discordTag.toLowerCase();
+        const link = (data.discordLinks || []).find(l =>
+            String(l.discordTag || '').toLowerCase() === low ||
+            String(l.discordTag || '').toLowerCase().replace(/#\d+$/, '') === low
+        );
+        if (link) {
+            discordId = String(link.discordId);
+            if (!robloxId) robloxId = String(link.robloxId);
+            if (!robloxName) robloxName = link.robloxName || robloxName;
+            discordTag = link.discordTag || discordTag;
+        }
+    }
+
+    // 4) If we got robloxId from link but still no name
+    if (robloxId && !robloxName) {
+        try {
+            const u = await axios.get('https://users.roblox.com/v1/users/' + robloxId, { timeout: 8000 });
+            if (u.data && u.data.name) robloxName = u.data.name;
+        } catch (_) {}
     }
 
     if (!discordId && !robloxId && !discordTag && !robloxName) {
@@ -7007,8 +7051,5 @@ loadList();
 </script></script>
 </body></html>`);
 });
-
-
-
 
 app.listen(PORT, () => {});
