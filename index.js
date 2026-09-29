@@ -2342,7 +2342,20 @@ app.get('/', checkAuth, (req, res) => {
                         \`).join('') || '<tr><td colspan="2" style="color:#64748b; text-align:center;">' + tt('noPending') + '</td></tr>';
                     }
 
-                    document.getElementById('creators-table').innerHTML = buildRows(data.whitelist.creators, 'creators', data.userEmail);
+                    // Authorized Creators = only manual whitelist keys (not Hub product grants)
+                    const manualCreators = (data.whitelist.creators || []).filter(c => {
+                        const keys = Array.isArray(c.keys) ? c.keys : [];
+                        // At least one key that was NOT granted via Hub
+                        return keys.some(k => {
+                            if (typeof k === 'string') return true; // legacy plain key string = manual
+                            return !k.fromHub;
+                        });
+                    }).map(c => {
+                        // Hide Hub keys in the object used for display (buildRows also skips them)
+                        const keys = (c.keys || []).filter(k => typeof k === 'string' || !k.fromHub);
+                        return Object.assign({}, c, { keys });
+                    });
+                    document.getElementById('creators-table').innerHTML = buildRows(manualCreators, 'creators', data.userEmail);
                     document.getElementById('places-table').innerHTML = buildRows(data.whitelist.places, 'places', data.userEmail);
                     
                     updateTimers();
