@@ -4557,8 +4557,8 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
   <div class="card">
     <h3>Grant product</h3>
     <p class="muted">Target must already be Discord-linked in Hub. Select one or more products (already owned are skipped).</p>
-    <label>Products (Ctrl/Cmd multi-select)</label>
-    <select id="gProduct" multiple size="6" style="min-height:120px"></select>
+    <label>Products</label>
+    <div id="gProductList" style="max-height:180px;overflow-y:auto;border:1px solid #334155;border-radius:8px;padding:8px;background:#0f172a"></div>
     <label>Lookup type</label>
     <select id="gType">
       <option value="robloxId">Roblox user ID</option>
@@ -4604,7 +4604,8 @@ if ($('gType')) $('gType').addEventListener('change', () => {
 
 function fillKeysSelect(){
   const sel = $('pKeys');
-  const prev = Array.from(sel.selectedOptions).map(o => o.value);
+  if (!sel) return;
+  const prev = Array.from(sel.selectedOptions || []).map(o => o.value);
   sel.innerHTML = '';
   KEYS.forEach(k => {
     const o = document.createElement('option');
@@ -4759,6 +4760,7 @@ async function uploadPending(productId){
 
 function renderProducts(){
   const box = $('productList');
+  if (!box) return;
   if (!PRODUCTS.length) { box.innerHTML = '<p class="muted">No products yet</p>'; return; }
   const sorted = PRODUCTS.slice().sort((a, b) => {
     const ao = a.layoutOrder != null ? Number(a.layoutOrder) : 0;
@@ -4866,12 +4868,22 @@ function renderHistory(){
 }
 
 function renderGrant(){
-  const sel = $('gProduct');
-  if (!sel) return;
-  const prev = new Set([...sel.selectedOptions].map(o => o.value));
-  sel.innerHTML = PRODUCTS.map(p =>
-    '<option value="' + p.id + '"' + (prev.has(p.id) ? ' selected' : '') + '>' + p.name + '</option>'
-  ).join('');
+  const box = $('gProductList');
+  if (!box) return;
+  const prev = new Set(
+    [...box.querySelectorAll('input[type=checkbox]:checked')].map(c => c.value)
+  );
+  if (!PRODUCTS.length) {
+    box.innerHTML = '<span class="muted">No products</span>';
+    return;
+  }
+  box.innerHTML = PRODUCTS.map(p => {
+    const id = 'gp_' + p.id;
+    const checked = prev.has(p.id) ? ' checked' : '';
+    return '<label style="display:flex;align-items:center;gap:8px;margin:4px 0;color:#e2e8f0;cursor:pointer">' +
+      '<input type="checkbox" value="' + p.id + '" id="' + id + '"' + checked + '/>' +
+      '<span>' + (p.name || p.id) + '</span></label>';
+  }).join('');
 }
 
 async function refreshState(forceRender){
@@ -4893,7 +4905,7 @@ async function refreshState(forceRender){
   } catch (e) { console.error('refreshState', e); }
 }
 
-$('pFiles').addEventListener('change', () => {
+if ($('pFiles')) $('pFiles').addEventListener('change', () => {
   const added = Array.from($('pFiles').files || []);
   for (const f of added) {
     const exists = pendingFiles.some(x => x.name === f.name && x.size === f.size && x.lastModified === f.lastModified);
@@ -4921,14 +4933,14 @@ function renderPendingFiles(){
   });
 }
 
-$('btnAddLink').addEventListener('click', () => {
+if ($('btnAddLink')) $('btnAddLink').addEventListener('click', () => {
   const cur = collectLinks();
   cur.push({ name: '', url: '' });
   renderLinksEditor(cur);
 });
 
-$('btnClear').addEventListener('click', clearForm);
-$('btnSave').addEventListener('click', async () => {
+if ($('btnClear')) $('btnClear').addEventListener('click', clearForm);
+if ($('btnSave')) $('btnSave').addEventListener('click', async () => {
   const body = {
     id: $('pId').value.trim() || undefined,
     name: $('pName').value.trim(),
@@ -4960,31 +4972,42 @@ $('btnSave').addEventListener('click', async () => {
   await refreshState(true);
 });
 
-$('btnGrant').addEventListener('click', async () => {
-  const type = $('gType').value;
-  const val = $('gValue').value.trim();
-  if (!val) return alert('Enter a target');
-  const productIds = [...$('gProduct').selectedOptions].map(o => o.value);
-  if (!productIds.length) return alert('Select at least one product');
-  const body = {
-    productIds,
-    notifyDm: !!($('gNotify') && $('gNotify').checked)
-  };
-  if (type === 'robloxId') body.robloxId = val;
-  else if (type === 'robloxUsername') body.robloxUsername = val;
-  else body.discordId = val;
-  const r = await fetch('/api/hub/grant', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) { alert(j.error || 'Failed'); return; }
-  const parts = [];
-  if (j.granted && j.granted.length) parts.push('Granted: ' + j.granted.join(', '));
-  if (j.skipped && j.skipped.length) parts.push('Skipped (already owned): ' + j.skipped.join(', '));
-  if (j.failed && j.failed.length) parts.push('Failed: ' + j.failed.join(', '));
-  alert(parts.join('\n') || 'Done');
-  $('gValue').value = '';
-  await refreshState(true);
+if ($('btnGrant')) $('btnGrant').addEventListener('click', async () => {
+  try {
+    const type = $('gType') ? $('gType').value : 'robloxId';
+    const val = $('gValue') ? $('gValue').value.trim() : '';
+    if (!val) return alert('Enter a target');
+    const box = $('gProductList');
+    const productIds = box
+      ? [...box.querySelectorAll('input[type=checkbox]:checked')].map(c => c.value)
+      : [];
+    if (!productIds.length) return alert('Select at least one product');
+    const body = {
+      productIds,
+      notifyDm: !!($('gNotify') && $('gNotify').checked)
+    };
+    if (type === 'robloxId') body.robloxId = val;
+    else if (type === 'robloxUsername') body.robloxUsername = val;
+    else body.discordId = val;
+    const r = await fetch('/api/hub/grant', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { alert(j.error || 'Failed'); return; }
+    const parts = [];
+    if (j.granted && j.granted.length) parts.push('Granted: ' + j.granted.join(', '));
+    if (j.skipped && j.skipped.length) parts.push('Skipped (already owned): ' + j.skipped.join(', '));
+    if (j.failed && j.failed.length) parts.push('Failed: ' + j.failed.join(', '));
+    alert(parts.join('\n') || 'Done');
+    if ($('gValue')) $('gValue').value = '';
+    await refreshState(true);
+  } catch (err) {
+    alert(err.message || String(err));
+  }
 });
-$('ownerSearch').addEventListener('input', renderOwners);
+if ($('ownerSearch')) $('ownerSearch').addEventListener('input', renderOwners);
 
 renderLinksEditor([]);
 refreshState(true);
