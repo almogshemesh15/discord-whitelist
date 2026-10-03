@@ -3247,127 +3247,158 @@ ${sourceCode}`;
 });
 
 
-// ========== Local Lua/Luau obfuscator (no external API) ==========
+
+
+
+// ========== Local Lua/Luau obfuscator (NO loadstring, single-line output) ==========
 function obfRandomInt(min, max) {
     return min + Math.floor(Math.random() * (max - min + 1));
 }
 function obfRandomName(len) {
-    const a = 'OIl';
-    const b = 'OIl1abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ';
-    let s = a[obfRandomInt(0, a.length - 1)];
-    for (let i = 1; i < (len || 10); i++) s += b[obfRandomInt(0, b.length - 1)];
-    return '_' + s;
+    const chars = 'OIlabcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ';
+    let s = '_';
+    for (let i = 0; i < (len || 10); i++) s += chars[obfRandomInt(0, chars.length - 1)];
+    return s;
 }
-function obfXorBuffer(buf, key) {
-    const out = Buffer.alloc(buf.length);
-    for (let i = 0; i < buf.length; i++) out[i] = buf[i] ^ key[i % key.length];
+function obfStripLuaComments(src) {
+    let out = '';
+    let i = 0;
+    const s = String(src);
+    while (i < s.length) {
+        if (s[i] === '-' && s[i + 1] === '-' && s[i + 2] === '[' && s[i + 3] === '[') {
+            const endPos = s.indexOf(']]', i + 4);
+            i = endPos < 0 ? s.length : endPos + 2;
+            continue;
+        }
+        if (s[i] === '-' && s[i + 1] === '-') {
+            while (i < s.length && s[i] !== '\n' && s[i] !== '\r') i++;
+            continue;
+        }
+        if (s[i] === '[' && s[i + 1] === '[') {
+            const endPos = s.indexOf(']]', i + 2);
+            if (endPos < 0) { out += s.slice(i); break; }
+            out += s.slice(i, endPos + 2);
+            i = endPos + 2;
+            continue;
+        }
+        if (s[i] === '"' || s[i] === "'") {
+            const q = s[i];
+            out += q;
+            i++;
+            while (i < s.length) {
+                if (s[i] === '\\') { out += s[i] + (s[i + 1] || ''); i += 2; continue; }
+                out += s[i];
+                if (s[i] === q) { i++; break; }
+                i++;
+            }
+            continue;
+        }
+        out += s[i];
+        i++;
+    }
+    return out;
+}
+function obfEncryptStrings(src, decName, key) {
+    let out = '';
+    let i = 0;
+    const s = String(src);
+    while (i < s.length) {
+        if (s[i] === '[' && s[i + 1] === '[') {
+            const endPos = s.indexOf(']]', i + 2);
+            if (endPos < 0) { out += s.slice(i); break; }
+            const inner = s.slice(i + 2, endPos);
+            const bytes = Buffer.from(inner, 'utf8');
+            const enc = [];
+            for (let j = 0; j < bytes.length; j++) enc.push(bytes[j] ^ key[j % key.length]);
+            out += decName + '({' + enc.join(',') + '})';
+            i = endPos + 2;
+            continue;
+        }
+        if (s[i] === '"' || s[i] === "'") {
+            const q = s[i];
+            i++;
+            let raw = '';
+            while (i < s.length) {
+                if (s[i] === '\\' && i + 1 < s.length) {
+                    const n = s[i + 1];
+                    if (n === 'n') raw += '\n';
+                    else if (n === 't') raw += '\t';
+                    else if (n === 'r') raw += '\r';
+                    else if (n === '\\') raw += '\\';
+                    else if (n === q) raw += q;
+                    else raw += n;
+                    i += 2;
+                    continue;
+                }
+                if (s[i] === q) { i++; break; }
+                raw += s[i];
+                i++;
+            }
+            const bytes = Buffer.from(raw, 'utf8');
+            const enc = [];
+            for (let j = 0; j < bytes.length; j++) enc.push(bytes[j] ^ key[j % key.length]);
+            out += decName + '({' + enc.join(',') + '})';
+            continue;
+        }
+        out += s[i];
+        i++;
+    }
     return out;
 }
 function obfuscateLuaLocal(sourceCode) {
     let src = String(sourceCode || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
     if (!src.trim()) throw new Error('empty code');
 
-    const keys = [];
-    for (let r = 0; r < 3; r++) {
-        const len = obfRandomInt(12, 24);
-        const k = Buffer.alloc(len);
-        for (let i = 0; i < len; i++) k[i] = obfRandomInt(1, 255);
-        keys.push(k);
-    }
+    src = src.replace(/--[[\s\S]*?Whitelist Systems[\s\S]*?]]\s*/i, '');
+    src = src.replace(/^-- Protected by Whitelist Hub[^\n]*\n/i, '');
 
-    let buf = Buffer.from(src, 'utf8');
-    for (const k of keys) buf = obfXorBuffer(buf, k);
+    src = obfStripLuaComments(src);
 
-    const nums = Array.from(buf);
-    const chunkSize = obfRandomInt(48, 80);
-    const chunks = [];
-    for (let i = 0; i < nums.length; i += chunkSize) chunks.push(nums.slice(i, i + chunkSize));
+    const key = [];
+    const keyLen = obfRandomInt(8, 16);
+    for (let i = 0; i < keyLen; i++) key.push(obfRandomInt(1, 255));
 
-    const N = {
-        payload: obfRandomName(12),
-        keys: obfRandomName(12),
-        dec: obfRandomName(10),
-        i: obfRandomName(6),
-        j: obfRandomName(6),
-        b: obfRandomName(6),
-        s: obfRandomName(6),
-        c: obfRandomName(6),
-        f: obfRandomName(6),
-        e: obfRandomName(6),
-        t: obfRandomName(6),
-        k: obfRandomName(6),
-        p: obfRandomName(6),
-        x: obfRandomName(6),
-        l: obfRandomName(6),
-        step: obfRandomName(6),
-        bit: obfRandomName(8),
-        fn: obfRandomName(8),
-        err: obfRandomName(8),
-        junk1: obfRandomName(9),
-        junk2: obfRandomName(9)
-    };
-    const junkA = obfRandomInt(1000, 9999);
-    const junkB = obfRandomInt(1000, 9999);
-    const keysLua = keys.map(k => '{' + Array.from(k).join(',') + '}').join(',');
-    const chunksLua = chunks.map(ch => '{' + ch.join(',') + '}').join(',\n');
+    const decName = obfRandomName(12);
+    const keyName = obfRandomName(10);
+    const bitName = obfRandomName(8);
+    const iName = obfRandomName(6);
+    const nName = obfRandomName(6);
+    const tName = obfRandomName(6);
+    const bName = obfRandomName(6);
+    const sName = obfRandomName(6);
+    const junk1 = obfRandomName(9);
+    const junk2 = obfRandomName(9);
+    const junkA = obfRandomInt(100, 999);
+    const junkB = obfRandomInt(100, 999);
 
-    // bit32.bxor on Roblox; pure-Lua XOR fallback for other Lua 5.1
-    return [
-        '-- Protected by Whitelist Hub local obfuscator',
-        'return(function(...)',
-        'local ' + N.junk1 + '=(' + junkA + '~' + junkA + ')',
-        'local ' + N.junk2 + '=(' + junkB + '*0)',
-        'local ' + N.payload + '={',
-        chunksLua,
-        '}',
-        'local ' + N.keys + '={' + keysLua + '}',
-        'local function ' + N.bit + '(' + N.x + ')',
-        'if type(' + N.x + ')~="number"then return 0 end',
-        'return ' + N.x + '%256',
+    // Keep statement boundaries as semicolons so one-line Lua stays valid
+    let body = obfEncryptStrings(src, decName, key);
+    body = body.replace(/\n+/g, ';').replace(/;+/g, ';');
+
+    const decryptor = [
+        'local ' + junk1 + '=(' + junkA + '~' + junkA + ')',
+        'local ' + junk2 + '=(' + junkB + '*0)',
+        'local ' + keyName + '={' + key.join(',') + '}',
+        'local function ' + bitName + '(x) x=tonumber(x)or 0; if x<0 then x=(-x)%256 end; return x%256 end',
+        'local function ' + decName + '(' + tName + ')',
+        'if type(' + tName + ')~="table" then return tostring(' + tName + ' or "") end',
+        'local ' + sName + '={}',
+        'local ' + nName + '=#' + keyName,
+        'for ' + iName + '=1,#' + tName + ' do',
+        'local ' + bName + '=' + bitName + '(' + tName + '[' + iName + '])',
+        'if bit32 and bit32.bxor then ' + bName + '=bit32.bxor(' + bName + ',' + keyName + '[(((' + iName + '-1)%' + nName + ')+1)]) else',
+        'local a,bb,r,p=' + bName + ',' + keyName + '[(((' + iName + '-1)%' + nName + ')+1)],0,1;',
+        'for _=1,8 do local ab,bd=a%2,bb%2; if ab~=bd then r=r+p end; a,bb,p=(a-ab)/2,(bb-bd)/2,p*2 end;',
+        bName + '=r%256 end',
+        sName + '[' + iName + ']=string.char(' + bitName + '(' + bName + '))',
         'end',
-        'local function ' + N.dec + '()',
-        'local ' + N.t + '={}',
-        'local ' + N.p + '=1',
-        'for ' + N.i + '=1,#' + N.payload + ' do',
-        'local ' + N.c + '=' + N.payload + '[' + N.i + ']',
-        'for ' + N.j + '=1,#' + N.c + ' do',
-        N.t + '[' + N.p + ']=' + N.bit + '(' + N.c + '[' + N.j + '])',
-        N.p + '=' + N.p + '+1',
-        'end',
-        'end',
-        'for ' + N.i + '=#' + N.keys + ',1,-1 do',
-        'local ' + N.k + '=' + N.keys + '[' + N.i + ']',
-        'local ' + N.l + '=#' + N.k,
-        'for ' + N.j + '=1,#' + N.t + ' do',
-        'local ' + N.x + '=' + N.t + '[' + N.j + ']',
-        'local ' + N.b + '=' + N.k + '[(((' + N.j + '-1)%' + N.l + ')+1)]',
-        'if bit32 and bit32.bxor then',
-        N.t + '[' + N.j + ']=' + N.bit + '(bit32.bxor(' + N.x + ',' + N.b + '))',
-        'else',
-        'local r,p,a,bb=0,1,' + N.x + ',' + N.b,
-        'for _=1,8 do local ab,bd=a%2,bb%2 if ab~=bd then r=r+p end a,bb,p=(a-ab)/2,(bb-bd)/2,p*2 end',
-        N.t + '[' + N.j + ']=' + N.bit + '(r)',
-        'end',
-        'end',
-        'end',
-        'local ' + N.s + '=""',
-        'local ' + N.step + '=4096',
-        'for ' + N.i + '=1,#' + N.t + ',' + N.step + ' do',
-        'local ' + N.e + '=math.min(' + N.i + '+' + N.step + '-1,#' + N.t + ')',
-        'local ' + N.b + '={}',
-        'for ' + N.j + '=' + N.i + ',' + N.e + ' do ' + N.b + '[#' + N.b + '+1]=string.char(' + N.t + '[' + N.j + ']) end',
-        N.s + '=' + N.s + '..table.concat(' + N.b + ')',
-        'end',
-        'return ' + N.s,
-        'end',
-        'local ' + N.s + '=' + N.dec + '()',
-        'local ' + N.f + '=loadstring or load',
-        'if not ' + N.f + ' then error("loadstring unavailable in this environment",0) end',
-        'local ' + N.fn + ',' + N.err + '=' + N.f + '(' + N.s + ')',
-        'if not ' + N.fn + ' then error("deobf failed: "..tostring(' + N.err + '),0) end',
-        'return ' + N.fn + '(...)',
-        'end)(...)'
-    ].join('\n');
+        'return table.concat(' + sName + ')',
+        'end'
+    ].join(' ');
+
+    let result = 'do ' + decryptor + ' ' + body + ' end';
+    result = result.replace(/[\r\n]+/g, ' ').replace(/[\t ]+/g, ' ').trim();
+    return result;
 }
 
 
