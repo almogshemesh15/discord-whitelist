@@ -3192,13 +3192,15 @@ ${sourceCode}`;
         </div>
         <script>
             const logo = String.raw\`--[[
-            █████╗ ███████╗    ██████╗ ██████╗  ██████╗ ██████╗ ██╗    ██╗ ██████╗████████╗██╗ ██████╗ ███╗   ██╗███████╗
-           ██╔══██╗██╔════╝    ██╔══██╗██╔══██╗██╔═══██╗██╔══██╗██║    ██║██╔════╝╚══██╔══╝██║██╔═══██╗████╗  ██║██╔════╝
-           ███████║███████╗    ██████╔╝██████╔╝██║   ██║██║  ██║██║    ██║██║       ██║   ██║██║   ██║██╔██╗ ██║███████╗
-           ██╔══██║╚════██║    ██╔═══╝ ██╔══██╗██║   ██║██║  ██║██║    ██║██║       ██║   ██║██║   ██║██║╚██╗██║╚════██║
-           ██║  ██║███████║    ██║     ██║  ██║╚██████╔╝██████╔╝╚██████╔╝╚██████╗  ██║   ██║╚██████╔╝██║ ╚████║███████║
-           ╚═╝  ╚═╝╚══════╝    ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═════╝  ╚═════╝  ╚═════╝  ╚═╝   ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝
---]]\\n\\n\`;
+     █████╗ ███████╗    ██████╗ ██████╗  ██████╗ ██████╗ ██╗   ██╗ ██████╗████████╗██╗ ██████╗ ███╗   ██╗███████╗
+    ██╔══██╗██╔════╝    ██╔══██╗██╔══██╗██╔═══██╗██╔══██╗██║   ██║██╔════╝╚══██╔══╝██║██╔═══██╗████╗  ██║██╔════╝
+    ███████║███████╗    ██████╔╝██████╔╝██║   ██║██║  ██║██║   ██║██║        ██║   ██║██║   ██║██╔██╗ ██║███████╗
+    ██╔══██║╚════██║    ██╔═══╝ ██╔══██╗██║   ██║██║  ██║██║   ██║██║        ██║   ██║██║   ██║██║╚██╗██║╚════██║
+    ██║  ██║███████║    ██║     ██║  ██║╚██████╔╝██████╔╝╚██████╔╝╚██████╗   ██║   ██║╚██████╔╝██║ ╚████║███████║
+    ╚═╝  ╚═╝╚══════╝    ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═════╝  ╚═════╝  ╚═════╝   ╚═╝   ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝
+--]]
+
+\`;
 
             async function runObfuscation() {
                 const area = document.getElementById("output-code");
@@ -3409,11 +3411,10 @@ app.post('/api/perform-obfuscate', checkAuth, async (req, res) => {
             return res.status(400).type('text/plain').send('-- Error: empty code');
         }
         let src = String(code);
-        // Strip logo / previous banners so re-obfuscate works
-        src = src.replace(/^--[[\s\S]*?Whitelist Systems[\s\S]*?]]\s*/i, '');
+        // Strip previous logo/comment block so re-obfuscate works
+        src = src.replace(/^--[[\s\S]*?]]\s*/i, '');
         src = src.replace(/^-- Protected by Whitelist Hub[^\n]*\n/i, '');
 
-        // Same approach as Basic-Com/Roblox-obfuscator → WeAreDevs API
         const response = await axios.post(
             'https://wearedevs.net/api/obfuscate',
             { script: src },
@@ -3429,7 +3430,13 @@ app.post('/api/perform-obfuscate', checkAuth, async (req, res) => {
             return res.status(502).type('text/plain').send('-- Error: empty response from obfuscator API');
         }
         out = String(out).trim();
-        // Force single line (user request)
+
+        // Drop WeAreDevs banner — keep from first "return"
+        const retIdx = out.search(/\breturn\b/);
+        if (retIdx >= 0) out = out.slice(retIdx);
+        else out = out.replace(/^--[[\s\S]*?]]\s*/i, '').trim();
+
+        // Single line
         out = out.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').map(l => l.trim()).filter(Boolean).join(' ');
         res.type('text/plain').send(out);
     } catch (e) {
