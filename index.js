@@ -3184,7 +3184,7 @@ ${sourceCode}`;
                 </div>
                 <textarea id="output-code">${rawCode.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</textarea>
                 <div class="btn-group">
-                    <button class="btn-obfuscate" onclick="runObfuscation()">✨ Obfuscate Code</button>
+                    <button class="btn-obfuscate" onclick="runObfuscation()">✨ Obfuscate (Local)</button>
                     <button class="btn-copy" onclick="copyToClipboard()">📋 Copy</button>
                     <button class="btn-download" onclick="saveFile()">📥 Save As...</button>
                 </div>
@@ -3203,15 +3203,23 @@ ${sourceCode}`;
             async function runObfuscation() {
                 const area = document.getElementById("output-code");
                 const code = area.value;
-                area.value = "-- Obfuscating...";
-                
-                const response = await fetch('/api/perform-obfuscate', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ code })
-                });
-                const result = await response.text();
-                area.value = logo + result;
+                if (!code || !code.trim()) { alert('Nothing to obfuscate'); return; }
+                area.value = "-- Obfuscating locally...";
+                try {
+                    const response = await fetch('/api/perform-obfuscate', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ code })
+                    });
+                    const result = await response.text();
+                    if (!response.ok) {
+                        area.value = result || ('-- Error HTTP ' + response.status);
+                        return;
+                    }
+                    area.value = logo + result;
+                } catch (e) {
+                    area.value = '-- Error: ' + (e.message || e);
+                }
             }
 
             function copyToClipboard() {
@@ -3238,15 +3246,146 @@ ${sourceCode}`;
     </html>`);
 });
 
+
+// ========== Local Lua/Luau obfuscator (no external API) ==========
+function obfRandomInt(min, max) {
+    return min + Math.floor(Math.random() * (max - min + 1));
+}
+function obfRandomName(len) {
+    const a = 'OIl';
+    const b = 'OIl1abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ';
+    let s = a[obfRandomInt(0, a.length - 1)];
+    for (let i = 1; i < (len || 10); i++) s += b[obfRandomInt(0, b.length - 1)];
+    return '_' + s;
+}
+function obfXorBuffer(buf, key) {
+    const out = Buffer.alloc(buf.length);
+    for (let i = 0; i < buf.length; i++) out[i] = buf[i] ^ key[i % key.length];
+    return out;
+}
+function obfuscateLuaLocal(sourceCode) {
+    let src = String(sourceCode || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    if (!src.trim()) throw new Error('empty code');
+
+    const keys = [];
+    for (let r = 0; r < 3; r++) {
+        const len = obfRandomInt(12, 24);
+        const k = Buffer.alloc(len);
+        for (let i = 0; i < len; i++) k[i] = obfRandomInt(1, 255);
+        keys.push(k);
+    }
+
+    let buf = Buffer.from(src, 'utf8');
+    for (const k of keys) buf = obfXorBuffer(buf, k);
+
+    const nums = Array.from(buf);
+    const chunkSize = obfRandomInt(48, 80);
+    const chunks = [];
+    for (let i = 0; i < nums.length; i += chunkSize) chunks.push(nums.slice(i, i + chunkSize));
+
+    const N = {
+        payload: obfRandomName(12),
+        keys: obfRandomName(12),
+        dec: obfRandomName(10),
+        i: obfRandomName(6),
+        j: obfRandomName(6),
+        b: obfRandomName(6),
+        s: obfRandomName(6),
+        c: obfRandomName(6),
+        f: obfRandomName(6),
+        e: obfRandomName(6),
+        t: obfRandomName(6),
+        k: obfRandomName(6),
+        p: obfRandomName(6),
+        x: obfRandomName(6),
+        l: obfRandomName(6),
+        step: obfRandomName(6),
+        bit: obfRandomName(8),
+        fn: obfRandomName(8),
+        err: obfRandomName(8),
+        junk1: obfRandomName(9),
+        junk2: obfRandomName(9)
+    };
+    const junkA = obfRandomInt(1000, 9999);
+    const junkB = obfRandomInt(1000, 9999);
+    const keysLua = keys.map(k => '{' + Array.from(k).join(',') + '}').join(',');
+    const chunksLua = chunks.map(ch => '{' + ch.join(',') + '}').join(',\n');
+
+    // bit32.bxor on Roblox; pure-Lua XOR fallback for other Lua 5.1
+    return [
+        '-- Protected by Whitelist Hub local obfuscator',
+        'return(function(...)',
+        'local ' + N.junk1 + '=(' + junkA + '~' + junkA + ')',
+        'local ' + N.junk2 + '=(' + junkB + '*0)',
+        'local ' + N.payload + '={',
+        chunksLua,
+        '}',
+        'local ' + N.keys + '={' + keysLua + '}',
+        'local function ' + N.bit + '(' + N.x + ')',
+        'if type(' + N.x + ')~="number"then return 0 end',
+        'return ' + N.x + '%256',
+        'end',
+        'local function ' + N.dec + '()',
+        'local ' + N.t + '={}',
+        'local ' + N.p + '=1',
+        'for ' + N.i + '=1,#' + N.payload + ' do',
+        'local ' + N.c + '=' + N.payload + '[' + N.i + ']',
+        'for ' + N.j + '=1,#' + N.c + ' do',
+        N.t + '[' + N.p + ']=' + N.bit + '(' + N.c + '[' + N.j + '])',
+        N.p + '=' + N.p + '+1',
+        'end',
+        'end',
+        'for ' + N.i + '=#' + N.keys + ',1,-1 do',
+        'local ' + N.k + '=' + N.keys + '[' + N.i + ']',
+        'local ' + N.l + '=#' + N.k,
+        'for ' + N.j + '=1,#' + N.t + ' do',
+        'local ' + N.x + '=' + N.t + '[' + N.j + ']',
+        'local ' + N.b + '=' + N.k + '[(((' + N.j + '-1)%' + N.l + ')+1)]',
+        'if bit32 and bit32.bxor then',
+        N.t + '[' + N.j + ']=' + N.bit + '(bit32.bxor(' + N.x + ',' + N.b + '))',
+        'else',
+        'local r,p,a,bb=0,1,' + N.x + ',' + N.b,
+        'for _=1,8 do local ab,bd=a%2,bb%2 if ab~=bd then r=r+p end a,bb,p=(a-ab)/2,(bb-bd)/2,p*2 end',
+        N.t + '[' + N.j + ']=' + N.bit + '(r)',
+        'end',
+        'end',
+        'end',
+        'local ' + N.s + '=""',
+        'local ' + N.step + '=4096',
+        'for ' + N.i + '=1,#' + N.t + ',' + N.step + ' do',
+        'local ' + N.e + '=math.min(' + N.i + '+' + N.step + '-1,#' + N.t + ')',
+        'local ' + N.b + '={}',
+        'for ' + N.j + '=' + N.i + ',' + N.e + ' do ' + N.b + '[#' + N.b + '+1]=string.char(' + N.t + '[' + N.j + ']) end',
+        N.s + '=' + N.s + '..table.concat(' + N.b + ')',
+        'end',
+        'return ' + N.s,
+        'end',
+        'local ' + N.s + '=' + N.dec + '()',
+        'local ' + N.f + '=loadstring or load',
+        'if not ' + N.f + ' then error("loadstring unavailable in this environment",0) end',
+        'local ' + N.fn + ',' + N.err + '=' + N.f + '(' + N.s + ')',
+        'if not ' + N.fn + ' then error("deobf failed: "..tostring(' + N.err + '),0) end',
+        'return ' + N.fn + '(...)',
+        'end)(...)'
+    ].join('\n');
+}
+
+
 app.post('/api/perform-obfuscate', checkAuth, async (req, res) => {
-    const { code } = req.body;
+    const { code } = req.body || {};
     try {
-        const response = await axios.post('https://magicsec.vip/api/obfuscate', {
-            code, platform: "roblox", options: { antiTamper: true, encryptStrings: true }
-        });
-        res.send(response.data.code || response.data.script || response.data);
+        if (!code || !String(code).trim()) {
+            return res.status(400).type('text/plain').send('-- Error: empty code');
+        }
+        // Strip leading logo banner if user re-obfuscates
+        let src = String(code);
+        src = src.replace(/^--[[\s\S]*?Whitelist Systems[\s\S]*?]]\s*/i, '');
+        src = src.replace(/^-- Protected by Whitelist Hub[\s\S]*?(?=return\(function)/i, '');
+        const out = obfuscateLuaLocal(src);
+        res.type('text/plain').send(out);
     } catch (e) {
-        res.status(500).send("-- Error obfuscating");
+        console.error('[obfuscate]', e);
+        res.status(500).type('text/plain').send('-- Error obfuscating: ' + (e.message || e));
     }
 });
 
@@ -7064,5 +7203,8 @@ loadList();
 </script></script>
 </body></html>`);
 });
+
+
+
 
 app.listen(PORT, () => {});
