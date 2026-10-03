@@ -3184,7 +3184,7 @@ ${sourceCode}`;
                 </div>
                 <textarea id="output-code">${rawCode.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</textarea>
                 <div class="btn-group">
-                    <button class="btn-obfuscate" onclick="runObfuscation()">✨ Obfuscate (Local)</button>
+                    <button class="btn-obfuscate" onclick="runObfuscation()">✨ Obfuscate</button>
                     <button class="btn-copy" onclick="copyToClipboard()">📋 Copy</button>
                     <button class="btn-download" onclick="saveFile()">📥 Save As...</button>
                 </div>
@@ -3204,7 +3204,7 @@ ${sourceCode}`;
                 const area = document.getElementById("output-code");
                 const code = area.value;
                 if (!code || !code.trim()) { alert('Nothing to obfuscate'); return; }
-                area.value = "-- Obfuscating locally...";
+                area.value = "-- Obfuscating...";
                 try {
                     const response = await fetch('/api/perform-obfuscate', {
                         method: 'POST',
@@ -3408,17 +3408,39 @@ app.post('/api/perform-obfuscate', checkAuth, async (req, res) => {
         if (!code || !String(code).trim()) {
             return res.status(400).type('text/plain').send('-- Error: empty code');
         }
-        // Strip leading logo banner if user re-obfuscates
         let src = String(code);
+        // Strip logo / previous banners so re-obfuscate works
         src = src.replace(/^--[[\s\S]*?Whitelist Systems[\s\S]*?]]\s*/i, '');
-        src = src.replace(/^-- Protected by Whitelist Hub[\s\S]*?(?=return\(function)/i, '');
-        const out = obfuscateLuaLocal(src);
+        src = src.replace(/^-- Protected by Whitelist Hub[^\n]*\n/i, '');
+
+        // Same approach as Basic-Com/Roblox-obfuscator → WeAreDevs API
+        const response = await axios.post(
+            'https://wearedevs.net/api/obfuscate',
+            { script: src },
+            { timeout: 120000, headers: { 'Content-Type': 'application/json' } }
+        );
+
+        let out = null;
+        if (response.data) {
+            if (typeof response.data === 'string') out = response.data;
+            else out = response.data.obfuscated || response.data.code || response.data.script || null;
+        }
+        if (!out || !String(out).trim()) {
+            return res.status(502).type('text/plain').send('-- Error: empty response from obfuscator API');
+        }
+        out = String(out).trim();
+        // Force single line (user request)
+        out = out.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').map(l => l.trim()).filter(Boolean).join(' ');
         res.type('text/plain').send(out);
     } catch (e) {
-        console.error('[obfuscate]', e);
-        res.status(500).type('text/plain').send('-- Error obfuscating: ' + (e.message || e));
+        console.error('[obfuscate]', e.response && e.response.status, e.message);
+        const detail = (e.response && e.response.data)
+            ? (typeof e.response.data === 'string' ? e.response.data : JSON.stringify(e.response.data)).slice(0, 300)
+            : (e.message || String(e));
+        res.status(500).type('text/plain').send('-- Error obfuscating: ' + detail);
     }
 });
+
 
 app.get('/force-save', checkAuth, async (req, res) => {
     await safeSave();
