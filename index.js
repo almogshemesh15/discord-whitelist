@@ -3,7 +3,6 @@ const axios = require('axios');
 const session = require('express-session');
 const db = require('./database');
 const app = express();
-let isSaving = false;
 
 process.on('unhandledRejection', (reason) => {
     console.error('Unhandled Rejection:', reason);
@@ -3618,38 +3617,31 @@ app.get('/toggle-key-lock/:key', checkAuth, async (req, res) => {
     res.sendStatus(200);
 });
 
-let saveQueued = false;
+// Serialize all saves so every change is actually written (no dropped writes on concurrent requests).
+let saveChain = Promise.resolve();
 
 async function persistToDb() {
-    // Support whichever persistence method the db module actually exposes.
     if (typeof db.save === 'function') return db.save();
     if (typeof db.saveData === 'function') return db.saveData();
     if (typeof db.write === 'function') return db.write();
     if (typeof db.persist === 'function') return db.persist();
-    console.error('safeSave: db module has no save/saveData/write/persist method - data is NOT being persisted to disk!');
+    console.error('safeSave: db module has no save method — data is NOT persisted!');
 }
 
-async function safeSave() {
-    if (isSaving) {
-        // A save is already running - don't drop this write, queue it so it runs
-        // right after the current one finishes. This is what prevents data loss
-        // (like duplicated/ghost active users) when multiple requests hit at once.
-        saveQueued = true;
-        return;
-    }
-    isSaving = true;
-    try {
-        await persistToDb();
-    } catch (e) {
-        console.error('safeSave error:', e);
-    } finally {
-        isSaving = false;
-    }
-    if (saveQueued) {
-        saveQueued = false;
-        await safeSave();
-    }
+function safeSave() {
+    // Chain: each caller waits until ITS save (after previous ones) finishes.
+    saveChain = saveChain
+        .then(() => persistToDb())
+        .catch((e) => {
+            console.error('safeSave error:', e && e.message ? e.message : e);
+        });
+    return saveChain;
 }
+
+// Auto-flush to DB every 60s (safety net so deploy/restart never loses recent in-memory changes)
+setInterval(() => {
+    safeSave().catch(() => {});
+}, 60 * 1000);
 
 app.post('/add', checkAuth, async (req, res) => {
     const data = db.getData();
@@ -3803,6 +3795,7 @@ app.post('/add-key', checkAuth, async (req, res) => {
             const isAllAccess = wantAll || key.toUpperCase() === 'ALL';
             data.keys.push({ key, isLocked: true, isAllAccess: !!isAllAccess });
             await safeSave();
+            console.log('[keys] created:', key, '| total keys:', (data.keys || []).length);
             await saveActionLogInternal(
                 req.session.userEmail,
                 'Create License Key',
