@@ -1291,6 +1291,7 @@ app.get('/api/dashboard-data', checkAuth, async (req, res) => {
         currentSessionId: req.sessionID,
         userEmail: req.session.userEmail,
         maintenanceMode: !!data.maintenanceMode,
+        hubEnabled: data.hubEnabled !== false,
         stats: {
             total: data.stats.total || 0,
             allowed: data.stats.allowed || 0,
@@ -1811,6 +1812,7 @@ app.get('/', checkAuth, (req, res) => {
                     </span>
                     <span style="font-size:12px;color:#94a3b8;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${req.session.userEmail}">${req.session.userEmail}</span>
                     ${isOwner ? `<button type="button" id="maint-btn" class="hdr-btn ${maintenanceOn ? 'btn-maint-on' : 'btn-maint-off'}" onclick="toggleMaintenance()">${maintenanceOn ? '🛠️ ' + tr('maintenanceOn') : '🛠️ ' + tr('maintenance')}</button>` : ''}
+                    ${isOwner ? `<button type="button" id="hub-btn" class="hdr-btn" onclick="toggleHub()" style="background:${(data.hubEnabled !== false) ? '#059669' : '#9f1239'};border-color:${(data.hubEnabled !== false) ? '#10b981' : '#be123c'};">${(data.hubEnabled !== false) ? '🛒 Hub ON' : '🛒 Hub OFF'}</button>` : ''}
                     <a href="/blacklist" class="btn-obfuscate-page" style="background:#9f1239;border-color:#be123c;">🚫 Blacklist</a>
                     <a href="/inbox" class="btn-obfuscate-page" style="background:#0e7490;border-color:#0891b2;">💬 DM Inbox</a>
                     <a href="/bot" class="btn-obfuscate-page" style="background:#6366f1;border-color:#4f46e5;">🤖 Bot</a>
@@ -1826,6 +1828,7 @@ app.get('/', checkAuth, (req, res) => {
                 </div>
             </div>
             <div id="maint-banner" class="maint-banner" style="${maintenanceOn ? 'display:block;' : 'display:none;'}">⚠️ ${tr('maintenanceBanner')}</div>
+            <div id="hub-banner" class="maint-banner" style="${(data.hubEnabled === false) ? 'display:block;background:#9f1239;' : 'display:none;'}">🛒 Hub Store is OFF — players will not see products in the Hub game</div>
             <div class="grid">
                 <div class="card" style="grid-column: span 2;">
                     <div class="card-header"><h3>📊 ${tr('stats')}</h3></div>
@@ -2034,6 +2037,17 @@ app.get('/', checkAuth, (req, res) => {
                     const res = await fetch('/toggle-maintenance', { method: 'POST' });
                     if (res.status === 403) {
                         alert(tt('onlyOwnerMaint'));
+                        return;
+                    }
+                    fetchDashboardData();
+                } catch(e) {}
+            }
+
+            async function toggleHub() {
+                try {
+                    const res = await fetch('/toggle-hub', { method: 'POST' });
+                    if (res.status === 403) {
+                        alert(tt('onlyOwnerMaint') || 'Owner only');
                         return;
                     }
                     fetchDashboardData();
@@ -2289,6 +2303,15 @@ app.get('/', checkAuth, (req, res) => {
                         maintBtn.textContent = data.maintenanceMode ? '🛠️ ' + tt('maintenanceOn') : '🛠️ ' + tt('maintenance');
                         maintBtn.className = 'hdr-btn ' + (data.maintenanceMode ? 'btn-maint-on' : 'btn-maint-off');
                     }
+                    const hubBtn = document.getElementById('hub-btn');
+                    const hubOn = data.hubEnabled !== false;
+                    if (hubBtn) {
+                        hubBtn.textContent = hubOn ? '🛒 Hub ON' : '🛒 Hub OFF';
+                        hubBtn.style.background = hubOn ? '#059669' : '#9f1239';
+                        hubBtn.style.borderColor = hubOn ? '#10b981' : '#be123c';
+                    }
+                    const hubBanner = document.getElementById('hub-banner');
+                    if (hubBanner) hubBanner.style.display = hubOn ? 'none' : 'block';
 
                     const keysBox = document.getElementById('keys-box');
                     keysBox.innerHTML = data.keys.map(k => {
@@ -3465,6 +3488,18 @@ app.post('/toggle-maintenance', checkAuth, async (req, res) => {
     res.json({ maintenanceMode: !!data.maintenanceMode });
 });
 
+app.post('/toggle-hub', checkAuth, async (req, res) => {
+    if (req.session.userEmail !== OWNER_EMAIL) {
+        return res.sendStatus(403);
+    }
+    const data = db.getData();
+    // default true; first toggle turns OFF
+    data.hubEnabled = data.hubEnabled === false ? true : false;
+    await safeSave();
+    await saveActionLogInternal(req.session.userEmail, 'Toggle Hub Store', `Hub Store is now ${data.hubEnabled !== false ? 'ON' : 'OFF'}`);
+    res.json({ hubEnabled: data.hubEnabled !== false });
+});
+
 app.get('/api/lookup-username', checkAuth, async (req, res) => {
     const username = (req.query.username || '').trim();
     if (!username) return res.json({ ok: false, error: 'Missing username' });
@@ -3766,7 +3801,7 @@ app.post('/add-key', checkAuth, async (req, res) => {
         const existingKeyIndex = data.keys.findIndex(k => k.key === key);
         if (existingKeyIndex === -1) {
             const isAllAccess = wantAll || key.toUpperCase() === 'ALL';
-            data.keys.push({ key, isLocked: false, isAllAccess: !!isAllAccess });
+            data.keys.push({ key, isLocked: true, isAllAccess: !!isAllAccess });
             await safeSave();
             await saveActionLogInternal(
                 req.session.userEmail,
@@ -5449,6 +5484,9 @@ app.delete('/api/hub/products/:id', checkAuth, async (req, res) => {
 app.get('/api/hub/catalog', checkBotAuth, (req, res) => {
     const data = db.getData();
     ensureHubStores(data);
+    if (data.hubEnabled === false) {
+        return res.json({ products: [], ownedProductIds: [], hubDisabled: true });
+    }
     const robloxId = String(req.query.robloxId || '').trim();
     if (robloxId && isBlacklisted(data, { robloxId })) {
         return res.json({ products: [], ownedProductIds: [], blacklisted: true });
@@ -5488,6 +5526,9 @@ app.get('/api/hub/catalog', checkBotAuth, (req, res) => {
 app.post('/api/hub/purchase', checkBotAuth, async (req, res) => {
     const data = db.getData();
     ensureHubStores(data);
+    if (data.hubEnabled === false) {
+        return res.status(503).json({ error: 'Hub Store is currently disabled', hubDisabled: true });
+    }
     const robloxId = String(req.body.robloxId || '').trim();
     const robloxName = String(req.body.robloxName || '').trim() || null;
     const developerProductId = String(req.body.developerProductId || '').trim();
@@ -5911,6 +5952,9 @@ app.post('/api/bot/jobs/:id/fail', checkBotAuth, async (req, res) => {
 app.get('/api/bot/hub-catalog', checkBotAuth, (req, res) => {
     const data = db.getData();
     ensureHubStores(data);
+    if (data.hubEnabled === false) {
+        return res.json({ products: [], robloxGameUrl: (data.botConfig && data.botConfig.robloxGameUrl) || '', hubDisabled: true });
+    }
     ensureBotConfig(data);
     const cfg = data.botConfig;
     const all = req.query.all === '1' || req.query.all === 'true';
@@ -7263,8 +7307,5 @@ loadList();
 </script></script>
 </body></html>`);
 });
-
-
-
 
 app.listen(PORT, () => {});
