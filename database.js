@@ -559,6 +559,9 @@ async function persist() {
         lastLoadAt = Date.now();
         lastLoadOk = true;
         lastLoadError = null;
+        console.log('[DB] Saved — keys:', (data.keys || []).length,
+            'creators:', (data.whitelist && data.whitelist.creators || []).length,
+            'hubProducts:', (data.hubProducts || []).length);
         return true;
     } catch (e) {
         try { await client.query('ROLLBACK'); } catch (_) {}
