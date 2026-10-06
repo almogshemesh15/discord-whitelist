@@ -10,8 +10,7 @@ let data = defaultData();
 let lastLoadOk = false;
 let lastLoadError = null;
 let lastLoadAt = null;
-let saveInFlight = false;
-let saveQueued = false;
+let saveChain = Promise.resolve();
 let readyPromise = null;
 
 function defaultData() {
@@ -309,7 +308,6 @@ async function persistSideTables(client, full) {
     if (keepP.length) {
         await client.query(`DELETE FROM hub_products WHERE id <> ALL($1::text[])`, [keepP]);
     } else {
-        await client.query('DELETE FROM hub_ownerships');
         await client.query('DELETE FROM hub_products');
     }
     for (const p of products) {
@@ -548,23 +546,37 @@ async function persist() {
     const p = getPool();
     const client = await p.connect();
     try {
+        // Core state first (own transaction) so keys/whitelist always land in Neon
         await client.query('BEGIN');
         await client.query(
             `INSERT INTO app_state (id, data, updated_at) VALUES (1, $1::jsonb, NOW())
              ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
             [JSON.stringify(coreStateOnly(data))]
         );
-        await persistSideTables(client, data);
         await client.query('COMMIT');
+
+        // Side tables in a separate transaction — failure here must not undo app_state
+        try {
+            await client.query('BEGIN');
+            await persistSideTables(client, data);
+            await client.query('COMMIT');
+        } catch (sideErr) {
+            try { await client.query('ROLLBACK'); } catch (_) {}
+            console.error('[DB] side tables save error:', sideErr.message || sideErr);
+            // still mark core save as ok
+        }
+
         lastLoadAt = Date.now();
         lastLoadOk = true;
         lastLoadError = null;
         console.log('[DB] Saved — keys:', (data.keys || []).length,
             'creators:', (data.whitelist && data.whitelist.creators || []).length,
-            'hubProducts:', (data.hubProducts || []).length);
+            'hubProducts:', (data.hubProducts || []).length,
+            'at:', new Date().toISOString());
         return true;
     } catch (e) {
         try { await client.query('ROLLBACK'); } catch (_) {}
+        console.error('[DB] core save error:', e.message || e);
         throw e;
     } finally {
         client.release();
@@ -572,20 +584,17 @@ async function persist() {
 }
 
 async function save() {
-    if (saveInFlight) { saveQueued = true; return; }
-    saveInFlight = true;
+    // Serialize saves; every caller awaits a full persist of the latest memory snapshot
+    const run = saveChain.then(() => persist());
+    saveChain = run.catch(() => {});
     try {
-        await persist();
+        await run;
+        return true;
     } catch (e) {
         console.error('[DB] save error:', e.message || e);
         lastLoadError = e.message || String(e);
         lastLoadOk = false;
-    } finally {
-        saveInFlight = false;
-    }
-    if (saveQueued) {
-        saveQueued = false;
-        await save();
+        return false;
     }
 }
 
