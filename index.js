@@ -6134,10 +6134,12 @@ button.sec{background:#334155}button.green{background:#059669}button.danger{back
 </div>
 <div class="card">
   <h3>Live bot status message</h3>
-  <p class="muted">Posts/updates an embed showing bot online status (live timestamp). Choose channels below.</p>
-  <label>Status channel IDs (comma-separated)</label>
+  <p class="muted">Keeps an embed with live online status. Prefer pasting existing message links so the bot <b>edits</b> them instead of posting new ones. If a tracked message is deleted, it will not be recreated.</p>
+  <label>Existing status message links (one per line — will be edited, not re-posted)</label>
+  <textarea id="statusMessageLinks" rows="3" placeholder="https://discord.com/channels/GUILD_ID/CHANNEL_ID/MESSAGE_ID"></textarea>
+  <label>Or channel IDs only (comma-separated — creates a new status message if none is tracked)</label>
   <input id="statusChannelsInput" placeholder="111, 222"/>
-  <button type="button" class="btn green" id="btnStatusDeploy">Deploy / refresh status messages</button>
+  <button type="button" class="btn green" id="btnStatusDeploy">Save &amp; attach status messages</button>
   <div id="statusDeployHint" class="muted" style="margin-top:8px"></div>
 </div>
 <div class="card">
@@ -6446,9 +6448,13 @@ if ($('btnStatusDeploy')) {
     const st = $('statusDeployHint');
     try {
       const ids = String(($('statusChannelsInput')||{}).value||'').split(/[,\s]+/).map(s=>s.trim()).filter(Boolean);
+      const links = String(($('statusMessageLinks')||{}).value||'');
       st.textContent = 'Saving…';
-      await post('/api/composer/status-channels', { channelIds: ids });
-      st.textContent = 'Saved. Bot will post/update status embeds shortly.';
+      const res = await post('/api/composer/status-channels', { channelIds: ids, messageLinks: links });
+      const n = res && res.linkedMessages != null ? res.linkedMessages : 0;
+      st.textContent = n
+        ? ('Saved. Tracking ' + n + ' existing message(s) for live edit. Bot will update them shortly.')
+        : 'Saved. Bot will post/update status embeds in the channel(s) shortly.';
     } catch (e) { st.textContent = e.message || e; }
   };
 }
@@ -6466,17 +6472,64 @@ app.post('/api/composer/status-channels', checkAuth, async (req, res) => {
         if (Array.isArray(v)) return v.map(String).map(s => s.trim()).filter(s => /^\d+$/.test(s));
         return String(v || '').split(/[,\s]+/).map(s => s.trim()).filter(s => /^\d+$/.test(s));
     };
-    cfg.statusChannels = parseIds(req.body.channelIds);
+    // Parse Discord message links: https://discord.com/channels/GUILD/CHANNEL/MESSAGE
+    const parseMessageLinks = (raw) => {
+        const map = {};
+        const text = Array.isArray(raw) ? raw.join('\n') : String(raw || '');
+        const re = /https?:\/\/(?:ptb\.|canary\.)?discord(?:app)?\.com\/channels\/(\d+)\/(\d+)\/(\d+)/gi;
+        let m;
+        while ((m = re.exec(text)) !== null) {
+            const channelId = m[2];
+            const messageId = m[3];
+            map[channelId] = messageId;
+        }
+        // Also accept bare "channelId/messageId" or "channelId messageId"
+        const lines = text.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+        for (const line of lines) {
+            if (/^https?:/i.test(line)) continue;
+            const parts = line.split(/[\/\s]+/).filter(p => /^\d+$/.test(p));
+            if (parts.length >= 2) {
+                const channelId = parts[parts.length - 2];
+                const messageId = parts[parts.length - 1];
+                map[channelId] = messageId;
+            }
+        }
+        return map;
+    };
+
+    const channelIds = parseIds(req.body.channelIds);
+    const linkMap = parseMessageLinks(req.body.messageLinks || req.body.links || '');
+    const linkedChannelIds = Object.keys(linkMap);
+
+    // Merge message IDs from links into tracked map (edit these, don't recreate)
+    if (!cfg.statusMessages || typeof cfg.statusMessages !== 'object') cfg.statusMessages = {};
+    for (const [ch, msgId] of Object.entries(linkMap)) {
+        cfg.statusMessages[String(ch)] = String(msgId);
+    }
+
+    // Channels = explicit IDs + channels from links
+    const allChannels = Array.from(new Set([
+        ...channelIds.map(String),
+        ...linkedChannelIds.map(String)
+    ].filter(Boolean)));
+    cfg.statusChannels = allChannels;
     cfg.updatedAt = Date.now();
     data.botConfig = cfg;
     ensureHubStores(data);
-    // Pass channelIds in job so bot does not wait for next heartbeat
+
+    // force:true only creates NEW messages for channels that have no tracked messageId
     enqueueBotJob(data, 'status_message_sync', {
         force: true,
-        channelIds: cfg.statusChannels.slice()
+        channelIds: cfg.statusChannels.slice(),
+        statusMessages: Object.assign({}, cfg.statusMessages)
     });
     await safeSave();
-    res.json({ ok: true, channelIds: cfg.statusChannels, statusMessages: cfg.statusMessages || {} });
+    res.json({
+        ok: true,
+        channelIds: cfg.statusChannels,
+        statusMessages: cfg.statusMessages || {},
+        linkedMessages: linkedChannelIds.length
+    });
 });
 
 app.get('/api/bot/blacklist-check', checkBotAuth, (req, res) => {
