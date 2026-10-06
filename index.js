@@ -6507,13 +6507,28 @@ app.post('/api/bot/verification-status', checkBotAuth, async (req, res) => {
 app.post('/api/bot/status-messages', checkBotAuth, async (req, res) => {
     const data = db.getData();
     const cfg = ensureBotConfig(data);
+    // Merge message IDs (channelId -> messageId) so restarts can keep editing the same embeds
     if (req.body.statusMessages && typeof req.body.statusMessages === 'object') {
-        cfg.statusMessages = req.body.statusMessages;
+        const incoming = req.body.statusMessages;
+        const merged = Object.assign({}, cfg.statusMessages || {});
+        for (const [k, v] of Object.entries(incoming)) {
+            if (v == null || v === '') delete merged[k]; // explicit untrack
+            else merged[String(k)] = String(v);
+        }
+        // Drop keys not present in incoming when bot sends full map
+        if (req.body.replaceAll === true) {
+            cfg.statusMessages = incoming;
+        } else {
+            cfg.statusMessages = merged;
+        }
+    }
+    if (Array.isArray(req.body.statusChannels) && req.body.statusChannels.length) {
+        cfg.statusChannels = req.body.statusChannels.map(String).filter(s => /^\d+$/.test(s));
     }
     cfg.updatedAt = Date.now();
     data.botConfig = cfg;
     await safeSave();
-    res.json({ ok: true });
+    res.json({ ok: true, statusMessages: cfg.statusMessages, statusChannels: cfg.statusChannels });
 });
 
 app.post('/api/composer/send', checkAuth, async (req, res) => {
